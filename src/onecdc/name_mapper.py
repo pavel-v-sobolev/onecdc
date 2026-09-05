@@ -33,7 +33,7 @@ HASH_LENGTH = 4
 RESERVED_FIELD_NAMES = ('merged_on', 'inserted_on', 'exchange_message_no', 'is_deleted_or_empty')
 
 
-class NameMapper1C:
+class NameMapper:
     """
     Транслитерирует русские имена объектов и полей 1С в латиницу и приводит их
     к ограничениям идентификаторов PostgreSQL (длина, служебные имена).

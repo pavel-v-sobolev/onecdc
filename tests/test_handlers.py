@@ -1,5 +1,5 @@
 """
-Оффлайн-тесты пользовательских обработчиков (cdc_1c.handlers). Без 1С и без реальных merge:
+Оффлайн-тесты пользовательских обработчиков (onecdc.handlers). Без 1С и без реальных merge:
 проверяется механика — нормализация объявленных обработчиков, накопление отметок, окно
 (last_run_at, boundary], влияние незавершённых merge на верхнюю границу, реакция на результат merge
 и на упавший обработчик.
@@ -18,14 +18,14 @@ import pytest
 from dbmerge import mergeResult
 from sqlalchemy import func, select
 
-from cdc_1c import Handler1C
-from cdc_1c.handlers import (EPOCH, SOURCE_CHANGES, SOURCE_DB_SIGNAL, SOURCE_FULL_LOAD, HandlerLoop,
+from onecdc import Handler
+from onecdc.handlers import (EPOCH, SOURCE_CHANGES, SOURCE_DB_SIGNAL, SOURCE_FULL_LOAD, HandlerLoop,
                              HandlerSignals, WriteTracker, as_handler)
-from cdc_1c.name_mapper import NameMapper1C
+from onecdc.name_mapper import NameMapper
 from conftest import TEST_QUEUE_GUID
 
 
-class Spy(Handler1C):
+class Spy(Handler):
     """Обработчик-шпион: запоминает контексты вызовов, при желании падает."""
 
     ON = ["Catalog_X"]
@@ -56,10 +56,10 @@ def _runner(db, handler):
 
 
 def _replicator(db, exchange="План", **kwargs):
-    from cdc_1c.replicator import Replicator1C
+    from onecdc.replicator import Replicator
     kwargs.setdefault("db_schema", db.schema)
-    return Replicator1C(odata_url="http://x", odata_auth=None, exchange_name=exchange,
-                        queue_guid=TEST_QUEUE_GUID, engine=db.engine, **kwargs)
+    return Replicator(odata_url="http://x", odata_auth=None, exchange_name=exchange,
+                      queue_guid=TEST_QUEUE_GUID, engine=db.engine, **kwargs)
 
 
 def _runner_for(db, handler):
@@ -68,7 +68,7 @@ def _runner_for(db, handler):
 
 
 def _signal(db, object_name, source=SOURCE_CHANGES):
-    """Сигнал так, как его подаёт репликатор: флагом в handlers_1c. Прямого вызова у цикла нет —
+    """Сигнал так, как его подаёт репликатор: флагом в handlers. Прямого вызова у цикла нет —
     он и не должен ничего знать о том, кто его разбудил."""
     HandlerSignals(db.engine, db.schema).signal(object_name, source)
 
@@ -78,7 +78,7 @@ def _last_run_at(runner, name):
 
 
 def _state(runner, name):
-    """Строка состояния обработчика из handlers_1c."""
+    """Строка состояния обработчика из handlers."""
     with runner.engine.connect() as conn:
         return conn.execute(select(runner.table)
                             .where(runner.table.c.name == name)).one()
@@ -106,7 +106,7 @@ def test_as_handler_accepts_instances_modules_and_functions(db):
 
 
 def test_as_handler_rejects_broken_declarations(db):
-    class NoOn(Handler1C):
+    class NoOn(Handler):
         def handle(self, context):
             pass
 
@@ -146,16 +146,16 @@ def test_handlers_are_signalled_by_table_name(db, monkeypatch):
 
 def test_db_now_drops_the_time_zone(db):
     # PostgreSQL now() отдаёт timestamptz, драйвер — offset-aware datetime. А merged_on, started_at
-    # и handlers_1c.last_run_at лежат в колонках без пояса и читаются offset-naive. Сравнить их в
+    # и onecdc_handlers.last_run_at лежат в колонках без пояса и читаются offset-naive. Сравнить их в
     # Python нельзя, и HandlerLoop падал на boundary <= last_run_at с «can't compare offset-naive
     # and offset-aware datetimes». Приведение делает сама БД (DB_NOW_WITHOUT_TIMEZONE).
-    from cdc_1c.db_writer import DBWriter1C
+    from onecdc.db_writer import DBWriter
 
     with db.engine.connect() as conn:
         aware = conn.scalar(select(func.now()))
     assert aware.tzinfo is not None, 'иначе тест ничего не проверяет'
 
-    now = DBWriter1C(engine=db.engine, name_mapper=NameMapper1C(), schema=db.schema).db_now()
+    now = DBWriter(engine=db.engine, name_mapper=NameMapper(), schema=db.schema).db_now()
     assert now.tzinfo is None
     assert now == aware.replace(tzinfo=None).replace(microsecond=now.microsecond), \
         'смещение отбрасываем, а не переводим в UTC'
@@ -170,7 +170,7 @@ def test_db_now_drops_the_time_zone(db):
 
 def test_failure_before_handle_keeps_the_handler_in_the_queue(db):
     # Падение ДО вызова handle (например, при расчёте границы) не должно съедать грязные отметки:
-    # иначе обработчик перестанет вставать в очередь до следующего изменения, а в handlers_1c не
+    # иначе обработчик перестанет вставать в очередь до следующего изменения, а в handlers не
     # появится last_error — со стороны БД он будет выглядеть исправным.
     class BrokenMerges:
         def boundary(self, object_names):
@@ -191,7 +191,7 @@ def test_failure_before_handle_keeps_the_handler_in_the_queue(db):
 
 
 def test_handlers_are_told_apart_by_name(db):
-    # Имя — ключ состояния в handlers_1c: два одноимённых поделили бы одну отметку last_run_at,
+    # Имя — ключ состояния в handlers: два одноимённых поделили бы одну отметку last_run_at,
     # поэтому параметризованным экземплярам имя задают явно.
     assert as_handler(Spy()).name == 'Spy'
     assert as_handler(Spy(name='second')).name == 'second'
@@ -519,7 +519,7 @@ def test_replicator_signals_only_on_real_changes(db, monkeypatch):
 # --- несколько планов обмена: общий HandlerLoop --------------------------------------------
 
 def test_signals_from_several_replicators_reach_one_handler(db):
-    # Несколько планов обмена — несколько Replicator1C, а обработчик один. Связывает их только БД:
+    # Несколько планов обмена — несколько Replicator, а обработчик один. Связывает их только БД:
     # репликаторы ставят update_requested_at, обработчик её видит. Объекты обработчика им не
     # нужны — потому он и может жить в другом процессе.
     spy = Spy(on=["Catalog_Nomenklatura", "Document_ZakazKlienta"])
@@ -589,7 +589,7 @@ def test_stop_signal_is_process_wide(db):
     # отдельных потоках, где signal.signal бросает ValueError, — но флаг им всё равно нужен.
     import threading
 
-    from cdc_1c.stop_signal import StopSignal, handle_stop_signal
+    from onecdc.stop_signal import StopSignal, handle_stop_signal
 
     made = {}
     thread = threading.Thread(target=lambda: made.update(stop=StopSignal()))
@@ -606,10 +606,10 @@ def test_stop_signal_is_process_wide(db):
 
 def test_request_stop_ends_run_forever(db, monkeypatch):
     # Точечная остановка: цикл в рабочем потоке своего перехвата сигналов не имеет.
-    from cdc_1c.replicator import Replicator1C
+    from onecdc.replicator import Replicator
 
     rep = _replicator(db)
-    monkeypatch.setattr(Replicator1C, "run_once",
+    monkeypatch.setattr(Replicator, "run_once",
                         lambda self, notify_changes=True, handlers=None: self.request_stop())
 
     rep.run_forever(interval=0)           # выйдет сам: run_once просит остановиться
@@ -662,7 +662,7 @@ def test_update_flag_survives_a_failed_run(db):
 def test_dead_replicator_does_not_freeze_the_boundary(db):
     # Строки брошенного процесса не должны морозить границу навсегда: раз процесса нет, его
     # транзакции откатились. Отсекаем по отметке живости.
-    from cdc_1c.handlers import MERGE_HEARTBEAT_TTL, WriteTracker
+    from onecdc.handlers import MERGE_HEARTBEAT_TTL, WriteTracker
 
     tracker = WriteTracker(db.engine, db.schema, 'dead-replicator')
     tracked = tracker.track("Catalog_Nomenklatura")
@@ -679,7 +679,7 @@ def test_dead_replicator_does_not_freeze_the_boundary(db):
 def test_abandoned_rows_of_a_gone_replicator_are_removed(db):
     # Брошенные строки при расчёте границы игнорируются, но удалить их некому: процесс может не
     # вернуться никогда — репликатор переименовали или выключили. Иначе они копились бы вечно.
-    from cdc_1c.handlers import MERGE_ABANDONED_TTL, WriteTracker
+    from onecdc.handlers import MERGE_ABANDONED_TTL, WriteTracker
 
     gone = WriteTracker(db.engine, db.schema, 'renamed-away')
     tracked = gone.track("Catalog_Nomenklatura")
@@ -695,7 +695,7 @@ def test_abandoned_rows_of_a_gone_replicator_are_removed(db):
 
 def test_restart_forgets_own_stale_writes(db):
     # Свои строки от прошлого запуска чистим сразу: ждать по ним TTL после каждого рестарта незачем.
-    from cdc_1c.handlers import WriteTracker
+    from onecdc.handlers import WriteTracker
 
     def own_rows(tracker):
         with db.engine.connect() as conn:
@@ -718,8 +718,8 @@ def test_merge_heartbeat_works_without_a_replication_loop(db, monkeypatch):
     # Отметку живости раньше вёл только run_forever репликатора. Но строки реестра появляются и в
     # одиночном run_once, и в вызванном руками full_load — там цикла нет вовсе, и merge, идущий
     # дольше MERGE_HEARTBEAT_TTL, признавался бы брошенным: обработчик перешагнул бы его строки.
-    from cdc_1c import write_tracker as tracker_module
-    from cdc_1c.handlers import MERGE_HEARTBEAT_TTL
+    from onecdc import write_tracker as tracker_module
+    from onecdc.handlers import MERGE_HEARTBEAT_TTL
 
     monkeypatch.setattr(tracker_module, 'MERGE_HEARTBEAT_PERIOD', 0.05)
     tracker = WriteTracker(db.engine, db.schema, 'План1')
@@ -753,7 +753,7 @@ def test_heartbeat_thread_is_started_once(db, monkeypatch):
     # одновременно, иначе заводят по потоку каждый.
     import threading
 
-    from cdc_1c import write_tracker as tracker_module
+    from onecdc import write_tracker as tracker_module
 
     monkeypatch.setattr(tracker_module, 'MERGE_HEARTBEAT_PERIOD', 0.05)
     tracker = WriteTracker(db.engine, db.schema, 'План1')
@@ -786,7 +786,7 @@ def test_the_heartbeat_thread_goes_away_when_nothing_is_in_flight(db, monkeypatc
     # незачем: поток нужен ровно пока есть что продлевать.
     import threading
 
-    from cdc_1c import write_tracker as tracker_module
+    from onecdc import write_tracker as tracker_module
 
     monkeypatch.setattr(tracker_module, 'MERGE_HEARTBEAT_PERIOD', 0.01)
     tracker = WriteTracker(db.engine, db.schema, 'План1')
@@ -813,7 +813,7 @@ def test_constructors_install_signal_handlers(db, monkeypatch):
     # намертво. Поэтому перехват ставится в конструкторе — он-то вызывается из главного потока.
     import signal as signal_module
 
-    from cdc_1c import stop_signal
+    from onecdc import stop_signal
 
     monkeypatch.setattr(stop_signal, '_handlers_installed', False)
     previous = {sig: signal_module.getsignal(sig)
@@ -828,7 +828,7 @@ def test_constructors_install_signal_handlers(db, monkeypatch):
             signal_module.signal(sig, previous_handler)
 
 
-class BlockSpy(Handler1C):
+class BlockSpy(Handler):
     """Обработчик с пересборкой по блокам: три года, по блоку на год."""
 
     ON = ["Catalog_X"]
@@ -1019,7 +1019,7 @@ def test_full_rebuild_from_a_full_load_page_skips_opted_out_handlers(db):
 
 
 def test_replicator_passes_the_source_to_the_rebuild_request(db):
-    """Тот же гейт на боевом пути: источник доезжает от _signal_handlers до handlers_1c."""
+    """Тот же гейт на боевом пути: источник доезжает от _signal_handlers до handlers."""
     quiet = Spy(name='quiet', on=["Catalog_X"], on_full_load=False)
     runner = _runner_for(db, quiet)
     rep = _replicator(db)

@@ -2,7 +2,7 @@ from PIL import Image, ImageDraw
 import math, os
 
 S = 256
-OUT = "resources"
+OUT = "assets"
 os.makedirs(OUT, exist_ok=True)
 
 BLUE  = (46, 109, 184, 255)

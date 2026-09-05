@@ -12,14 +12,14 @@
 # (см. tests/test_cdc_run_once.py, там run_once вызывается с notify_changes=False).
 #
 # Использование:
-#   tests/debug_docker.sh                     # один цикл (CDC1C_MODE=once) и выход
+#   tests/debug_docker.sh                     # один цикл (ONECDC_MODE=once) и выход
 #   tests/debug_docker.sh loop                # вечный цикл, Ctrl-C для остановки
-#   tests/debug_docker.sh once -e CDC1C_LOG_LEVEL=DEBUG   # всё после режима уходит в docker run
+#   tests/debug_docker.sh once -e ONECDC_LOG_LEVEL=DEBUG   # всё после режима уходит в docker run
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-IMAGE="${CDC1C_IMAGE:-sobolevp/cdc-1c:latest}"
+IMAGE="${ONECDC_IMAGE:-sobolevp/onecdc:latest}"
 MODE="${1:-once}"
 [ $# -gt 0 ] && shift
 
@@ -40,20 +40,20 @@ PY
 )"
 
 echo "образ:  $IMAGE"
-echo "режим:  CDC1C_MODE=$MODE"
+echo "режим:  ONECDC_MODE=$MODE"
 echo "1С:     $ODATA_URL"
 echo "схема:  $DB_SCHEMA"
 
 exec docker run --rm --network host \
-  -e CDC1C_ODATA_URL="$ODATA_URL" \
-  -e CDC1C_ODATA_USER="$ODATA_USER" \
-  -e CDC1C_ODATA_PASSWORD="$ODATA_PASSWORD" \
-  -e CDC1C_EXCHANGE_NAME="$EXCHANGE_NAME" \
-  -e CDC1C_QUEUE_GUID="$QUEUE_GUID" \
-  -e CDC1C_DB_URL="$DB_URL" \
-  -e CDC1C_DB_SCHEMA="$DB_SCHEMA" \
-  -e CDC1C_DB_TEMP_SCHEMA="${DB_SCHEMA}_tmp" \
-  -e CDC1C_MODE="$MODE" \
+  -e ONECDC_ODATA_URL="$ODATA_URL" \
+  -e ONECDC_ODATA_USER="$ODATA_USER" \
+  -e ONECDC_ODATA_PASSWORD="$ODATA_PASSWORD" \
+  -e ONECDC_EXCHANGE_NAME="$EXCHANGE_NAME" \
+  -e ONECDC_QUEUE_GUID="$QUEUE_GUID" \
+  -e ONECDC_DB_URL="$DB_URL" \
+  -e ONECDC_DB_SCHEMA="$DB_SCHEMA" \
+  -e ONECDC_DB_TEMP_SCHEMA="${DB_SCHEMA}_tmp" \
+  -e ONECDC_MODE="$MODE" \
   -e TZ="${TZ:-Europe/Moscow}" \
   "$@" \
   "$IMAGE"

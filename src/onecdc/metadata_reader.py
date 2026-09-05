@@ -9,9 +9,9 @@ from sqlalchemy import (String, Uuid, BigInteger, Integer, SmallInteger, Numeric
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge
 
-from cdc_1c.name_mapper import NameMapper1C
-from cdc_1c.common_functions import format_bytes, parse_object_full_name, raise_for_status
-from cdc_1c.logging_config import get_logger, load_mode, LOAD_MODE_METADATA
+from onecdc.name_mapper import NameMapper
+from onecdc.common_functions import format_bytes, parse_object_full_name, raise_for_status
+from onecdc.logging_config import get_logger, load_mode, LOAD_MODE_METADATA
 
 logger = get_logger(__name__)
 
@@ -31,8 +31,8 @@ def resolve_timeout(request_timeout: float | tuple[float, float] | None):
     return DEFAULT_REQUEST_TIMEOUT if request_timeout is None else request_timeout
 
 
-# Таблица-реестр объектов 1С и состояния их полной выгрузки (см. MetadataReader1C).
-METADATA_OBJECTS_TABLE = 'metadata_objects_1c'
+# Таблица-реестр объектов 1С и состояния их полной выгрузки (см. MetadataReader).
+METADATA_OBJECTS_TABLE = 'onecdc_metadata_objects'
 
 type_mapping = {'Guid':Uuid(),
                 'Int64':BigInteger(),
@@ -51,7 +51,7 @@ type_mapping = {'Guid':Uuid(),
                 'Binary':String(),
                 # Субконто регистра бухгалтерии: тип синтетический, поля с ним в $metadata нет —
                 # см. EXT_DIMENSIONS_FIELDS. JSON, а не JSONB: диалект знает только писатель
-                # (DBWriter1C.save поднимает его до JSONB на postgres).
+                # (DBWriter.save поднимает его до JSONB на postgres).
                 'ExtDimensions':JSON()}
 
 # Типы, которых нет в данных: их нельзя отобразить в колонку, но это не ошибка метаданных.
@@ -98,7 +98,7 @@ RECORDER_FIELDS = ('Recorder', 'Recorder_Key', 'Recorder_Type')
 # --- Субконто регистра бухгалтерии ---
 # Колонки, которых в $metadata нет: в описании движения (_RowType) субконто отсутствуют вовсе,
 # они живут только в виртуальной таблице RecordsWithExtDimensions и собираются оттуда
-# (см. DataReader1C). Ключ JSON-объекта — ВИД субконто (Guid), значение — {"value", "type"}.
+# (см. DataReader). Ключ JSON-объекта — ВИД субконто (Guid), значение — {"value", "type"}.
 #
 # Почему JSON, а не колонки: 1С отдаёт субконто слотами (ExtDimensionDr1..3), а номер слота смысла
 # не имеет — субконто1 счёта 10 это Номенклатура, счёта 60 Контрагенты. Витрина, написавшая
@@ -187,7 +187,7 @@ def _classify_register_fields(base_name: str, properties: dict, complextypes: di
 
 
 
-class MetadataObject1C(UserDict):
+class MetadataObject(UserDict):
     def __init__(self, name, properties, primary_key, object_key=None,
                  dimensions=None, resources=None, attributes=None, is_table_part = False):
         super().__init__(properties)
@@ -211,7 +211,7 @@ class MetadataObject1C(UserDict):
 
 
 
-class MetadataReader1C(UserDict):
+class MetadataReader(UserDict):
     def __init__(self, odata_url:str, odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None,
                  engine: Engine | None = None, schema: str | None = None,
@@ -227,7 +227,7 @@ class MetadataReader1C(UserDict):
         # параллельно с основным циклом — сериализуем перестроение словаря.
         self._lock = threading.Lock()
 
-        # Реестр объектов и состояния полной выгрузки (metadata_objects_1c). Ведётся, только если
+        # Реестр объектов и состояния полной выгрузки (onecdc_metadata_objects). Ведётся, только если
         # передан engine (в библиотечном/тестовом сценарии без БД метаданные читаются как раньше).
         # Членство в плане обмена определяется эмпирически — по приходу объекта в пакете SelectChanges
         # (require_full_load_if_new). Состав реестра синхронизируется с $metadata через dbmerge
@@ -235,7 +235,7 @@ class MetadataReader1C(UserDict):
         # Таблицу создаёт сам dbmerge при первой sync; objects_table — её Table-описание оттуда же.
         self.engine = engine
         self.schema = schema
-        # Схема промежуточных таблиц dbmerge (см. DBWriter1C); None — схема данных.
+        # Схема промежуточных таблиц dbmerge (см. DBWriter); None — схема данных.
         self.temp_schema = temp_schema
         self.objects_table = None
 
@@ -322,7 +322,7 @@ class MetadataReader1C(UserDict):
     def get_metadata(self):
         """
         Запрашиваем метаданные всех доступных объектов из odata и (если задан engine) синхронизируем
-        реестр metadata_objects_1c с актуальным составом $metadata.
+        реестр onecdc_metadata_objects с актуальным составом $metadata.
         Можно вызывать повторно для обновления (при появлении нового объекта/поля — см. data_reader);
         под блокировкой, т.к. вызывается и из фоновых потоков full_load. В конце is_loaded=True.
 
@@ -376,8 +376,8 @@ class MetadataReader1C(UserDict):
                     # программно ими не пользуются (внутри JSON), и в dimensions им делать нечего.
                     properties.update({f: EXT_DIMENSIONS_TYPE
                                        for f in EXT_DIMENSIONS_FIELDS.values()})
-                self[item_name] = MetadataObject1C(item_name, properties, primary_key, object_key,
-                                                   dimensions, resources, attributes)
+                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
+                                                 dimensions, resources, attributes)
 
             elif (item_name.startswith(REGISTER_TYPES)
                   and not item_name.endswith(METADATA_POSTFIXES)
@@ -393,8 +393,8 @@ class MetadataReader1C(UserDict):
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 dimensions, resources, attributes = _classify_register_fields(
                     item_name, properties, complextypes)
-                self[item_name] = MetadataObject1C(item_name, properties, primary_key, object_key,
-                                                   dimensions, resources, attributes)
+                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
+                                                 dimensions, resources, attributes)
 
             elif item_name.startswith(ENTITY_TYPES) and not item_name.endswith(METADATA_POSTFIXES):
             # если документ или справочник без постфикса, то
@@ -404,12 +404,12 @@ class MetadataReader1C(UserDict):
                 primary_key = self._read_metadata_item_key(item,properties)
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 is_table_part = _check_object_is_table_part(item_name, complextypes)
-                self[item_name] = MetadataObject1C(item_name, properties, primary_key, object_key, 
-                                                   is_table_part=is_table_part)
+                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key, 
+                                                 is_table_part=is_table_part)
 
 
 
-    # --- Реестр объектов и состояния полной выгрузки (metadata_objects_1c) ---
+    # --- Реестр объектов и состояния полной выгрузки (onecdc_metadata_objects) ---
 
     def resolve_object_name(self, name: str) -> str:
         """
@@ -417,7 +417,7 @@ class MetadataReader1C(UserDict):
         (`Document_ЗаказКлиента`), и имя ТАБЛИЦЫ в БД (`Document_ZakazKlienta`).
 
         Обе формы — потому что настраивают выгрузку, глядя в базу и в реестр
-        metadata_objects_1c (там имя таблицы лежит в object_full_name_en), а не в конфигуратор,
+        onecdc_metadata_objects (там имя таблицы лежит в object_full_name_en), а не в конфигуратор,
         и то же имя стоит у обработчиков в `ON`. Отдельная таблица соответствий не нужна:
         транслитерация детерминирована, поэтому обратное соответствие ищется перебором.
 
@@ -426,7 +426,7 @@ class MetadataReader1C(UserDict):
         """
         if name in self:
             return name
-        mapper = NameMapper1C()
+        mapper = NameMapper()
         matches = [candidate for candidate in self if mapper.map_object_name(candidate) == name]
         if len(matches) == 1:
             return matches[0]
@@ -436,7 +436,7 @@ class MetadataReader1C(UserDict):
             raise ValueError(f"Object {name!r} is ambiguous: {', '.join(sorted(matches))}")
         raise ValueError(f"Object {name!r} not found in 1C metadata; expected a 1C name like "
                          f"'Document_ЗаказКлиента' or a table name like 'Document_ZakazKlienta' "
-                         f"(see metadata_objects_1c.object_full_name / object_full_name_en)")
+                         f"(see onecdc_metadata_objects.object_full_name / object_full_name_en)")
 
     def resolve_field_name(self, object_name: str, field: str) -> str:
         """
@@ -446,7 +446,7 @@ class MetadataReader1C(UserDict):
         fields = self.get(object_name) or {}
         if field in fields:
             return field
-        mapper = NameMapper1C()
+        mapper = NameMapper()
         matches = [candidate for candidate in fields if mapper.map_field_name(candidate) == field]
         if len(matches) == 1:
             return matches[0]
@@ -455,7 +455,7 @@ class MetadataReader1C(UserDict):
                              f"{', '.join(sorted(matches))}")
         raise ValueError(f"Field {field!r} not found in {object_name}; expected a 1C name like "
                          f"'Дата' or a column name like 'Data' "
-                         f"(see metadata_objects_1c.fields / fields_en)")
+                         f"(see onecdc_metadata_objects.fields / fields_en)")
 
     def _sync_objects(self, object_names: list[str]) -> None:
         """
@@ -470,7 +470,7 @@ class MetadataReader1C(UserDict):
         # object_full_name_en — транслитерированное имя (= имя таблицы в БД); fields/fields_en — JSON-списки
         # полей объекта: оригинальные имена 1С и их транслит (= имена колонок в БД). Для удобного
         # просмотра состава объекта. Все три синхронизируются с $metadata.
-        mapper = NameMapper1C()
+        mapper = NameMapper()
         # На json-колонке dbmerge сравнивает значения через IS DISTINCT FROM; у Postgres-типа json
         # нет оператора равенства — берём jsonb.
         json_type = JSONB() if self.engine.dialect.name == 'postgresql' else JSON()

@@ -1,5 +1,5 @@
 """
-Защита от дурака в параметрах: конструктор Replicator1C и подсказка со списком узлов обмена.
+Защита от дурака в параметрах: конструктор Replicator и подсказка со списком узлов обмена.
 
 Проверяем, что неверный параметр падает СРАЗУ и с внятным текстом, а не оборачивается ошибкой 1С
 где-то в середине первого цикла, и что незаданный узел обмена печатает в лог, из чего выбирать.
@@ -11,7 +11,7 @@ import pytest
 from pathlib import Path
 
 import fake_1c  # соседний модуль в tests/ (pytest добавляет каталог теста в sys.path)
-from cdc_1c import Replicator1C
+from onecdc import Replicator
 
 GUID = "12345678-1234-1234-1234-123456789abc"
 
@@ -21,7 +21,7 @@ def _make(db, **overrides):
                   exchange_name="ДляODATA", queue_guid=GUID,
                   engine=db.engine, db_schema=db.schema)
     kwargs.update(overrides)
-    return Replicator1C(**kwargs)
+    return Replicator(**kwargs)
 
 
 @pytest.mark.parametrize("overrides, expected", [
@@ -58,7 +58,7 @@ def test_empty_queue_guid_logs_available_nodes(db, caplog):
                   if (p / "manifest.json").exists())
     with fake_1c.running_server(config) as (odata_url, fake):
         repl = _make(db, odata_url=odata_url, queue_guid="")
-        with caplog.at_level(logging.ERROR, logger="cdc_1c"):
+        with caplog.at_level(logging.ERROR, logger="onecdc"):
             with pytest.raises(ValueError, match="queue_guid is not set"):
                 repl.changes.read_changes()
 

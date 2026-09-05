@@ -1,12 +1,12 @@
 """
-Entrypoint для запуска из окружения без единой строки своего кода: `python -m cdc_1c` или команда
-`cdc-1c`. Все настройки — переменные окружения CDC1C_*; режим задаёт CDC1C_MODE: `loop`
-(по умолчанию) запускает run_forever с периодом CDC1C_POLL_INTERVAL, `once` — один run_once.
+Entrypoint для запуска из окружения без единой строки своего кода: `python -m onecdc` или команда
+`onecdc`. Все настройки — переменные окружения ONECDC_*; режим задаёт ONECDC_MODE: `loop`
+(по умолчанию) запускает run_forever с периодом ONECDC_POLL_INTERVAL, `once` — один run_once.
 
-Обязательные: CDC1C_ODATA_URL, CDC1C_EXCHANGE_NAME, CDC1C_QUEUE_GUID, CDC1C_DB_URL.
-CDC1C_QUEUE_GUID не знаете — запустите без него: в лог выведется список узлов плана обмена.
-Необязательные: CDC1C_ODATA_USER, CDC1C_ODATA_PASSWORD (без пользователя — без авторизации),
-CDC1C_DB_SCHEMA, CDC1C_DB_TEMP_SCHEMA, CDC1C_FULL_LOAD_WORKERS, CDC1C_POLL_INTERVAL, CDC1C_LOG_LEVEL, CDC1C_MODE.
+Обязательные: ONECDC_ODATA_URL, ONECDC_EXCHANGE_NAME, ONECDC_QUEUE_GUID, ONECDC_DB_URL.
+ONECDC_QUEUE_GUID не знаете — запустите без него: в лог выведется список узлов плана обмена.
+Необязательные: ONECDC_ODATA_USER, ONECDC_ODATA_PASSWORD (без пользователя — без авторизации),
+ONECDC_DB_SCHEMA, ONECDC_DB_TEMP_SCHEMA, ONECDC_FULL_LOAD_WORKERS, ONECDC_POLL_INTERVAL, ONECDC_LOG_LEVEL, ONECDC_MODE.
 
 Обработчиков здесь нет: они объявляются кодом, а тут кода пользователя нет. Нужны обработчики —
 берите за основу config/runner.py: там ровно та же сборка, плюс по HandlerLoop на каждого
@@ -18,7 +18,7 @@ import os
 import requests
 from sqlalchemy import create_engine
 
-from cdc_1c.replicator import Replicator1C
+from onecdc.replicator import Replicator
 
 
 def _required(name: str) -> str:
@@ -26,8 +26,8 @@ def _required(name: str) -> str:
     запускает контейнер, — говорим прямо, чего не хватает."""
     value = os.environ.get(name, "").strip()
     if not value:
-        raise SystemExit(f"{name} is not set (required: CDC1C_ODATA_URL, CDC1C_EXCHANGE_NAME, "
-                         f"CDC1C_DB_URL)")
+        raise SystemExit(f"{name} is not set (required: ONECDC_ODATA_URL, ONECDC_EXCHANGE_NAME, "
+                         f"ONECDC_DB_URL)")
     return value
 
 
@@ -44,14 +44,14 @@ def _number(name: str, default: str, cast=float):
 
 
 def main() -> None:
-    odata_user = os.environ.get("CDC1C_ODATA_USER")
-    odata_url = _required("CDC1C_ODATA_URL")
-    full_load_workers = _number("CDC1C_FULL_LOAD_WORKERS", "2", int)
+    odata_user = os.environ.get("ONECDC_ODATA_USER")
+    odata_url = _required("ONECDC_ODATA_URL")
+    full_load_workers = _number("ONECDC_FULL_LOAD_WORKERS", "2", int)
 
-    mode = os.environ.get("CDC1C_MODE", "loop")
+    mode = os.environ.get("ONECDC_MODE", "loop")
     if mode not in ("loop", "once"):
         # Проверяем до соединений с БД и 1С: незачем поднимать пул ради заведомо неверного режима.
-        raise SystemExit(f"Unknown CDC1C_MODE={mode!r} (expected 'loop' or 'once')")
+        raise SystemExit(f"Unknown ONECDC_MODE={mode!r} (expected 'loop' or 'once')")
 
     # Пул: одновременно соединение держат цикл изменений, ДВА потока отметки живости (реестр
     # незавершённых merge и захват полной выгрузки) и страницы полной выгрузки, отсюда
@@ -59,39 +59,39 @@ def main() -> None:
     # не получившей соединения дольше своего TTL, никто не верит: её захват или её границу окна
     # считают брошенными.
     # Обработчиков здесь нет — были бы, добавилось бы по соединению на каждого.
-    engine = create_engine(_required("CDC1C_DB_URL"), pool_size=full_load_workers + 3)
+    engine = create_engine(_required("ONECDC_DB_URL"), pool_size=full_load_workers + 3)
 
     # Параметры присваиваются явно, по одному — как и в config/runner.py: сборка одинаково
     # читается и здесь, и в пользовательском коде, где значения будут литералами.
     # Недоступная БД — не ошибка в коде, а состояние окружения: показываем строку, ради которой
     # человек и полез бы в стотридцатистрочный трейс (см. _check_db_connection в replicator).
     try:
-        replicator = Replicator1C(
+        replicator = Replicator(
             odata_url=odata_url,
-            odata_auth=(odata_user, os.environ.get("CDC1C_ODATA_PASSWORD", "")) if odata_user else None,
-            exchange_name=_required("CDC1C_EXCHANGE_NAME"),
+            odata_auth=(odata_user, os.environ.get("ONECDC_ODATA_PASSWORD", "")) if odata_user else None,
+            exchange_name=_required("ONECDC_EXCHANGE_NAME"),
             # Без узла обмена работать нельзя, но KeyError тут ничего не подскажет: пустое значение
             # дойдёт до чтения изменений, и оно выведет в лог список узлов плана обмена.
-            queue_guid=os.environ.get("CDC1C_QUEUE_GUID", ""),
+            queue_guid=os.environ.get("ONECDC_QUEUE_GUID", ""),
             engine=engine,
-            db_schema=os.environ.get("CDC1C_DB_SCHEMA"),
+            db_schema=os.environ.get("ONECDC_DB_SCHEMA"),
             # Схема промежуточных таблиц dbmerge; не задана — та же, что у данных.
-            db_temp_schema=os.environ.get("CDC1C_DB_TEMP_SCHEMA"),
+            db_temp_schema=os.environ.get("ONECDC_DB_TEMP_SCHEMA"),
             full_load_workers=full_load_workers,
         )
     except ConnectionError as exc:
         raise SystemExit(str(exc))
 
-    # Уровень логирования — после конструктора: он вешает обработчик на логгер cdc_1c
+    # Уровень логирования — после конструктора: он вешает обработчик на логгер onecdc
     # (по умолчанию INFO), а тут переопределяем на заданный (например, DEBUG/WARNING).
-    log_level = os.environ.get("CDC1C_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    log_level = os.environ.get("ONECDC_LOG_LEVEL", "INFO").strip().upper() or "INFO"
     # getLevelName на известное имя отвечает числом, на неизвестное — строкой "Level FOO".
     # Не getLevelNamesMapping(): он появился только в 3.11, а поддерживаем с 3.10.
     level = logging.getLevelName(log_level)
     if not isinstance(level, int):
-        raise SystemExit(f"Unknown CDC1C_LOG_LEVEL={log_level!r} "
+        raise SystemExit(f"Unknown ONECDC_LOG_LEVEL={log_level!r} "
                          "(expected DEBUG/INFO/WARNING/ERROR/CRITICAL)")
-    logging.getLogger("cdc_1c").setLevel(level)
+    logging.getLogger("onecdc").setLevel(level)
 
     # run_forever недоступную 1С переживает сам (логирует и повторяет с backoff), а run_once
     # обязан отдать ошибку наружу — здесь она и превращается в строку вместо трейса.
@@ -99,7 +99,7 @@ def main() -> None:
         if mode == "once":
             replicator.run_once()
         else:
-            replicator.run_forever(interval=_number("CDC1C_POLL_INTERVAL", "60"))
+            replicator.run_forever(interval=_number("ONECDC_POLL_INTERVAL", "60"))
     except requests.RequestException as exc:
         raise SystemExit(f"1C is not available at {odata_url}: {exc}")
 

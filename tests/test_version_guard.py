@@ -1,5 +1,5 @@
 """
-Оффлайн-тесты guard'ов полной выгрузки (DBWriter1C.save, full_load_started_at).
+Оффлайн-тесты guard'ов полной выгрузки (DBWriter.save, full_load_started_at).
 
 Guard сравнивает merged_on строки с моментом старта прогона: снимок не трогает то, что переписали
 уже после его старта, но всё, что старше прогона, перезаписывает. В тестах момент старта задаётся
@@ -12,9 +12,9 @@ from datetime import datetime
 
 from sqlalchemy import select, Table, MetaData
 
-from cdc_1c import DataObject1C, NameMapper1C
-from cdc_1c.db_writer import DBWriter1C
-from cdc_1c.metadata_reader import MetadataObject1C
+from onecdc import DataObject, NameMapper
+from onecdc.db_writer import DBWriter
+from onecdc.metadata_reader import MetadataObject
 
 REF = "R1"
 REF2 = "R2"
@@ -26,7 +26,7 @@ NEW_RUN = datetime(2100, 1, 1)
 
 
 def _writer(db):
-    return DBWriter1C(db.engine, NameMapper1C(), schema=db.schema)
+    return DBWriter(db.engine, NameMapper(), schema=db.schema)
 
 
 def _rows(writer, table_name):
@@ -38,12 +38,12 @@ def _rows(writer, table_name):
 
 # --- Документ/справочник: одиночная запись по ключу, update-guard ---
 
-_DOC_META = MetadataObject1C("Catalog_X", {"Ref_Key": "String", "Val": "String"},
-                             {"Ref_Key": "String"}, object_key=None)
+_DOC_META = MetadataObject("Catalog_X", {"Ref_Key": "String", "Val": "String"},
+                           {"Ref_Key": "String"}, object_key=None)
 
 
 def _doc(records):
-    return DataObject1C(_DOC_META, records)
+    return DataObject(_DOC_META, records)
 
 
 def _doc_rec(ref, val, emn):
@@ -100,13 +100,13 @@ def test_full_load_inserts_untouched_row(db):
 
 # --- Групповой объект (табличная часть): own-or-skip по группе (Ref_Key) ---
 
-_TP_META = MetadataObject1C(
+_TP_META = MetadataObject(
     "Document_X_Rows", {"Ref_Key": "String", "LineNumber": "Int64", "Val": "String"},
     {"Ref_Key": "String", "LineNumber": "Int64"}, object_key=["Ref_Key"])
 
 
 def _tp(records):
-    return DataObject1C(_TP_META, records)
+    return DataObject(_TP_META, records)
 
 
 def _tp_rec(ref, line, val, emn):

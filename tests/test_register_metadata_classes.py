@@ -11,7 +11,7 @@
 
 import pytest
 
-from cdc_1c.metadata_reader import MetadataReader1C
+from onecdc.metadata_reader import MetadataReader
 
 INDEPENDENT = """
   <EntityType Name="InformationRegister_Prices">
@@ -92,8 +92,8 @@ ACCOUNTING = """
 """
 
 
-def _metadata(*blocks: str) -> MetadataReader1C:
-    """MetadataReader1C с подставленным ответом `$metadata` (сети нет)."""
+def _metadata(*blocks: str) -> MetadataReader:
+    """MetadataReader с подставленным ответом `$metadata` (сети нет)."""
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<edmx:Edmx xmlns:edmx="http://schemas.microsoft.com/ado/2007/06/edmx">'
            '<edmx:DataServices><Schema>' + ''.join(blocks) + '</Schema>'
@@ -105,8 +105,8 @@ def _metadata(*blocks: str) -> MetadataReader1C:
         text = xml
         content = xml.encode()
 
-    reader = MetadataReader1C(odata_url="http://fake")
-    import cdc_1c.metadata_reader as module
+    reader = MetadataReader(odata_url="http://fake")
+    import onecdc.metadata_reader as module
     original = module.requests.get
     module.requests.get = lambda *a, **kw: _Response()
     try:

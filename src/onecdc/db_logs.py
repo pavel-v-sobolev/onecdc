@@ -1,11 +1,11 @@
 """
 Лог-таблицы пайплайна в БД (общие хелперы на SQLAlchemy Core).
 
-- `replicator_1c_log` — лог загрузки: строка на каждую загрузку объекта. `type` — вид загрузки
+- `onecdc_replicator_log` — лог загрузки: строка на каждую загрузку объекта. `type` — вид загрузки
   (`changes` — пакет изменений, `full` — полная выгрузка); `message_no` — номер пакета обмена
   (NULL для полной выгрузки); `started_at`/`finished_at` (серверное `func.now()`,
   finished_at=NULL у незавершённой/упавшей); счётчики строк merge и `total_time` наращиваются
-  в БД по мере сохранений (см. Replicator1CLog.write_result).
+  в БД по мере сохранений (см. ReplicatorLog.write_result).
 
 Время берётся серверным `func.now()`. Схема не задана (schema=None) — работаем в схеме БД
 по умолчанию (public у PostgreSQL), как это делает и dbmerge.
@@ -16,11 +16,11 @@ from dbmerge import mergeResult
 from sqlalchemy import (Column, DateTime, Engine, Integer, MetaData, String,
                         Table, func, insert, update, schema, Numeric)
 
-from cdc_1c.logging_config import get_logger
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-REPLICATOR_LOG = "replicator_1c_log"
+REPLICATOR_LOG = "onecdc_replicator_log"
 
 # Тип строки лога: обработка пакета изменений или полная выгрузка.
 LOAD_TYPE_CHANGES = 'changes'
@@ -40,7 +40,7 @@ def _check_create_schema(engine: Engine, schema_name: str | None) -> str | None:
 
 
 
-def _replicator_log_table(metadata: MetaData, schema_name: str | None) -> Table:
+def _onecdc_replicator_log_table(metadata: MetaData, schema_name: str | None) -> Table:
     return Table(
         REPLICATOR_LOG, metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
@@ -58,14 +58,14 @@ def _replicator_log_table(metadata: MetaData, schema_name: str | None) -> Table:
     )
 
 
-class Replicator1CLog:
-    """Лог загрузки (replicator_1c_log): start() при начале, write_result() накапливает счётчики
+class ReplicatorLog:
+    """Лог загрузки (onecdc_replicator_log): start() при начале, write_result() накапливает счётчики
     и/или завершает строку (finish=True)."""
 
     def __init__(self, engine: Engine, schema_name: str | None = None):
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema_name)
-        self.table = _replicator_log_table(MetaData(), self.schema_name)
+        self.table = _onecdc_replicator_log_table(MetaData(), self.schema_name)
         self.table.create(engine, checkfirst=True)
 
     def start(self, exchange: str, obj: str, message_no: int | None, load_type: str) -> int:

@@ -8,11 +8,11 @@ import threading
 
 import pytest
 
-from cdc_1c.common_functions import format_bytes, format_duration
-from cdc_1c.logging_config import (LOAD_MODE_CHANGES, LOAD_MODE_FULL, LOAD_MODE_METADATA,
+from onecdc.common_functions import format_bytes, format_duration
+from onecdc.logging_config import (LOAD_MODE_CHANGES, LOAD_MODE_FULL, LOAD_MODE_METADATA,
                                    NOISY_LOGGERS, _ensure_handler, get_logger, load_mode,
                                    log_prefix)
-from cdc_1c.logging_config import logger as package_logger
+from onecdc.logging_config import logger as package_logger
 
 
 @pytest.mark.parametrize("size, expected", [
@@ -51,8 +51,8 @@ def test_log_prefix_only_inside_load_mode():
 
 
 def test_adapter_prefixes_message(caplog):
-    logger = get_logger('cdc_1c.test')
-    with caplog.at_level(logging.INFO, logger='cdc_1c.test'):
+    logger = get_logger('onecdc.test')
+    with caplog.at_level(logging.INFO, logger='onecdc.test'):
         logger.info('Saving %s records', 5)
         with load_mode(LOAD_MODE_FULL):
             logger.info('Saving %s records', 5)
@@ -63,11 +63,11 @@ def test_adapter_prefixes_message(caplog):
 def test_metadata_read_is_not_tagged_as_changes(monkeypatch):
     # Чтение $metadata общее для изменений и полной выгрузки — метка у него своя, а не вызвавшей
     # операции: раньше внутри run_once оно уезжало в лог как [CHANGES].
-    from cdc_1c.metadata_reader import MetadataReader1C
+    from onecdc.metadata_reader import MetadataReader
 
     seen = []
-    md = MetadataReader1C('http://x')
-    monkeypatch.setattr(MetadataReader1C, '_fetch_and_parse_metadata',
+    md = MetadataReader('http://x')
+    monkeypatch.setattr(MetadataReader, '_fetch_and_parse_metadata',
                         lambda self: seen.append(log_prefix()))
 
     with load_mode(LOAD_MODE_CHANGES):

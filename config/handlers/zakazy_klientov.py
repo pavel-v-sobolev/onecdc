@@ -15,7 +15,7 @@ merged_on регистра, строка, дождавшаяся своей но
 from sqlalchemy import and_, select, tuple_, union_all
 from dbmerge import dbmerge
 
-from cdc_1c import Handler1C, HandlerContext
+from onecdc import Handler, HandlerContext
 
 DDL = """
 CREATE OR REPLACE VIEW {schema}."ZakazyKlientov_view"
@@ -85,7 +85,7 @@ SELECT DISTINCT to_char(date_trunc('month', "Period"), 'YYYY-MM') AS label,
 """
 
 
-class ZakazyKlientov(Handler1C):
+class ZakazyKlientov(Handler):
     # Имена ТАБЛИЦ в целевой БД (транслит), а не имена объектов 1С — те же, что стоят в SQL ниже:
     #   AccumulationRegister_ZakazyKlientov  ← РегистрНакопления.ЗаказыКлиентов
     #   Catalog_Nomenklatura                 ← Справочник.Номенклатура
@@ -101,7 +101,7 @@ class ZakazyKlientov(Handler1C):
     def rebuild(self, context: HandlerContext):
         """
         Пересборка ПО МЕСЯЦАМ. Между блоками цикл применяет накопившиеся изменения, поэтому витрина
-        не стоит холодной все те десятки минут, что идёт пересборка (см. Handler1C.rebuild).
+        не стоит холодной все те десятки минут, что идёт пересборка (см. Handler.rebuild).
 
         Блок читает данные АКТУАЛЬНЫЕ на момент своего выполнения — никакого снимка на старте
         пересборки. Иначе блок затёр бы изменения, применённые между блоками.
@@ -176,7 +176,7 @@ class ZakazyKlientov(Handler1C):
             # В варианте с UNION ALL в каждой ветке остаётся предикат ровно по ОДНОЙ базовой
             # таблице. Такой предикат планировщик опускает внутрь вьюшки, в скан этой таблицы, и
             # ветка заходит через её индекс merged_on (их заводит сам репликатор, см.
-            # DBWriter1C._ensure_merged_on_index). LEFT JOIN не мешает: `n.merged_on >
+            # DBWriter._ensure_merged_on_index). LEFT JOIN не мешает: `n.merged_on >
             # last_run_at` для несопоставленных строк даёт NULL, предикат null-rejecting, и
             # внешнее соединение в
             # этой ветке схлопывается во внутреннее.

@@ -1,8 +1,8 @@
 """
-Оффлайн replay-тест полного пайплайна Replicator1C.
+Оффлайн replay-тест полного пайплайна Replicator.
 
 Поднимает фейковый сервер 1С (tests/fake_1c.py), который проигрывает записанные ответы, и гоняет
-против него реальный Replicator1C с локальным PostgreSQL (см. conftest.py). Живая 1С не нужна.
+против него реальный Replicator с локальным PostgreSQL (см. conftest.py). Живая 1С не нужна.
 
 Параметризуется по подпапкам tests/responses/* : добавление новой конфигурации (версия/конфигурация
 1С) автоматически добавляет тест-кейсы.
@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import inspect, text
 
 import fake_1c  # соседний модуль в tests/ (pytest добавляет каталог теста в sys.path)
-from cdc_1c import Replicator1C
+from onecdc import Replicator
 
 RESPONSES_DIR = Path(__file__).parent / "responses"
 CONFIGS = sorted(p for p in RESPONSES_DIR.iterdir() if (p / "manifest.json").exists())
@@ -28,7 +28,7 @@ def fake_server(request):
 
 
 def _make_replicator(odata_url, queue_guid, db):
-    return Replicator1C(
+    return Replicator(
         odata_url=odata_url,
         odata_auth=None,                  # фейковый сервер не проверяет auth
         exchange_name="ДляODATA",   # сервер матчит ExchangePlan по пути, имя не важно

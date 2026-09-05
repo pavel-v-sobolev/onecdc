@@ -1,5 +1,5 @@
 """
-Оффлайн-тесты записи изменений (DBWriter1C.save, режим изменений).
+Оффлайн-тесты записи изменений (DBWriter.save, режим изменений).
 
 Два связанных механизма:
 - шумной пакет (1С переписала объект, не изменив реквизитов) не должен трогать строку: отличие
@@ -13,16 +13,16 @@
 import pytest
 from sqlalchemy import select, Table, MetaData
 
-from cdc_1c import DataObject1C, NameMapper1C
-from cdc_1c.data_reader import VERSION_FIELDS
-from cdc_1c.db_writer import DBWriter1C
-from cdc_1c.metadata_reader import MetadataObject1C
+from onecdc import DataObject, NameMapper
+from onecdc.data_reader import VERSION_FIELDS
+from onecdc.db_writer import DBWriter
+from onecdc.metadata_reader import MetadataObject
 
 REF = "R1"
 
 
 def _writer(db):
-    return DBWriter1C(db.engine, NameMapper1C(), schema=db.schema)
+    return DBWriter(db.engine, NameMapper(), schema=db.schema)
 
 
 def _rows(writer, table_name):
@@ -42,7 +42,7 @@ def version_field(request):
 
 
 def _doc_meta(version_field):
-    return MetadataObject1C("Catalog_X", {"Ref_Key": "String", "Val": "String",
+    return MetadataObject("Catalog_X", {"Ref_Key": "String", "Val": "String",
                                           version_field: "String"},
                             {"Ref_Key": "String"}, object_key=None)
 
@@ -50,7 +50,7 @@ def _doc_meta(version_field):
 def _save_doc(writer, version_field, val, emn, version):
     record = {"Ref_Key": REF, "Val": val, version_field: version,
               "is_deleted_or_empty": False, "exchange_message_no": emn}
-    return writer.save("Catalog_X", DataObject1C(_doc_meta(version_field), [record]))
+    return writer.save("Catalog_X", DataObject(_doc_meta(version_field), [record]))
 
 
 def test_noisy_packet_does_not_touch_the_row(db, version_field):
@@ -83,7 +83,7 @@ def test_real_change_writes_noisy_fields_too(db, version_field):
 
 # --- Надгробия: строка выпала из набора движений регистра ---
 
-_REG_META = MetadataObject1C(
+_REG_META = MetadataObject(
     "AccumulationRegister_Reg",
     {"Recorder": "String", "LineNumber": "Int64", "Kolichestvo": "Double", "Comment": "String"},
     {"Recorder": "String", "LineNumber": "Int64"}, object_key=["Recorder"],
@@ -98,11 +98,11 @@ def _reg_rec(line, qty):
 def test_row_dropped_from_the_set_is_marked_with_nulled_resource(db):
     w = _writer(db)
     w.save("AccumulationRegister_Reg",
-           DataObject1C(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
+           DataObject(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
     before = {r["LineNumber"]: r for r in _rows(w, "AccumulationRegister_Reg")}
 
     # следующий пакет привёз набор без строки 2
-    w.save("AccumulationRegister_Reg", DataObject1C(_REG_META, [_reg_rec(1, 10)]))
+    w.save("AccumulationRegister_Reg", DataObject(_REG_META, [_reg_rec(1, 10)]))
 
     rows = {r["LineNumber"]: r for r in _rows(w, "AccumulationRegister_Reg")}
     assert set(rows) == {1, 2}                       # строка не исчезла — осталась надгробием
@@ -117,12 +117,12 @@ def test_row_dropped_from_the_set_is_marked_with_nulled_resource(db):
 def test_row_returning_to_the_set_is_resurrected(db):
     w = _writer(db)
     w.save("AccumulationRegister_Reg",
-           DataObject1C(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
-    w.save("AccumulationRegister_Reg", DataObject1C(_REG_META, [_reg_rec(1, 10)]))
+           DataObject(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
+    w.save("AccumulationRegister_Reg", DataObject(_REG_META, [_reg_rec(1, 10)]))
 
     # строка 2 вернулась в набор
     w.save("AccumulationRegister_Reg",
-           DataObject1C(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
+           DataObject(_REG_META, [_reg_rec(1, 10), _reg_rec(2, 20)]))
 
     rows = {r["LineNumber"]: r for r in _rows(w, "AccumulationRegister_Reg")}
     assert not rows[2]["is_deleted_or_empty"]        # флаг снят входящим значением

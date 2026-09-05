@@ -1,7 +1,7 @@
 """
 Фейковый сервер 1С для оффлайн-тестов (record/replay).
 
-Проигрывает записанные ответы 1С из папки конфигурации, чтобы полный цикл Replicator1C можно было
+Проигрывает записанные ответы 1С из папки конфигурации, чтобы полный цикл Replicator можно было
 гонять без живого сервера 1С (например, на GitHub CI). Записываются только $metadata и пакеты
 SelectChanges; состояние обмена (ExchangePlan/ReceivedNo) сервер синтезирует сам, держа счётчик
 received_no и инкрементируя его на NotifyChangesReceived.
@@ -16,7 +16,7 @@ batches — упорядоченный список; индекс i соотве
 Использование:
   - в тестах: `with running_server(config_dir) as (odata_url, fake): ...`;
   - вручную:  `python tests/fake_1c.py tests/responses/trade_demo_8.5 --port 8080`
-              (затем натравить на него реальный Replicator1C.run_forever).
+              (затем натравить на него реальный Replicator.run_forever).
 """
 
 import argparse

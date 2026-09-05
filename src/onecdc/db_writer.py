@@ -6,11 +6,11 @@ from sqlalchemy import (Engine, Index, JSON, MetaData, Table, Integer, Numeric,
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge, mergeResult
 
-from cdc_1c.data_reader import (DataObject1C, EXCHANGE_MESSAGE_NO_FIELD,
+from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD,
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
-from cdc_1c.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from cdc_1c.name_mapper import NameMapper1C
-from cdc_1c.logging_config import get_logger
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.name_mapper import NameMapper
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -40,13 +40,13 @@ def save_order_key(object_name: str) -> int:
     return len(SAVE_ORDER_PREFIXES)
 
 
-class DBWriter1C:
+class DBWriter:
     """
-    Сохраняет объекты 1С (DataObject1C) в БД через dbmerge, по одному вызовом save().
-    Имена таблиц и колонок переводятся NameMapper1C, типы и первичный ключ берутся из метаданных.
+    Сохраняет объекты 1С (DataObject) в БД через dbmerge, по одному вызовом save().
+    Имена таблиц и колонок переводятся NameMapper, типы и первичный ключ берутся из метаданных.
 
     Заполняет служебные merged_on/inserted_on и создаёт индекс по merged_on (для инкрементальной
-    материализации). Лог загрузки (replicator_1c_log) пишет оркестратор Replicator1C — у writer-а нет
+    материализации). Лог загрузки (onecdc_replicator_log) пишет оркестратор Replicator — у writer-а нет
     контекста обмена (его можно использовать и для полной перевыгрузки через read_object, где нет
     номера пакета).
 
@@ -58,7 +58,7 @@ class DBWriter1C:
     авторитетны и идут в порядке пакетов, поэтому guard'ами не ограничиваются.
     """
 
-    def __init__(self, engine: Engine, name_mapper: NameMapper1C, schema: str | None = None,
+    def __init__(self, engine: Engine, name_mapper: NameMapper, schema: str | None = None,
                  temp_schema: str | None = None):
         self.engine = engine
         self.name_mapper = name_mapper
@@ -71,7 +71,7 @@ class DBWriter1C:
         # и не дёргать checkfirst на каждом save).
         self._indexed_tables: set[str] = set()
 
-    def save(self, object_name: str, data_object: DataObject1C,
+    def save(self, object_name: str, data_object: DataObject,
              full_load_started_at: datetime | None = None) -> mergeResult | None:
         """
         Сохраняет один объект через dbmerge.
@@ -81,7 +81,7 @@ class DBWriter1C:
         чистый upsert по ключу. Изменения авторитетны, поэтому guard'ами не ограничиваются.
 
         Режим полной выгрузки (передан full_load_started_at — отметка ЭТОЙ страницы: граница по
-        реестру незавершённых merge, взятая перед её чтением, см. Replicator1C._load_pages):
+        реестру незавершённых merge, взятая перед её чтением, см. Replicator._load_pages):
         применяются guard'ы по merged_on, чтобы устаревший снимок не затирал изменения, пришедшие
         уже после этой отметки:
         - документ/справочник: upsert без удаления + update_condition (перезаписываем строку, только
@@ -263,7 +263,7 @@ class DBWriter1C:
             return
         tbl = Table(table_name, MetaData(), schema=self.schema, autoload_with=self.engine)
         if MERGED_ON_FIELD in tbl.c:
-            ix_name = NameMapper1C._fit_length(f'ix_{table_name}_merged_on')
+            ix_name = NameMapper._fit_length(f'ix_{table_name}_merged_on')
             Index(ix_name, tbl.c[MERGED_ON_FIELD]).create(self.engine, checkfirst=True)
         self._indexed_tables.add(table_name)
 

@@ -4,46 +4,46 @@
 # экраном. Подробный справочник по ним — README_ENV.md. Реальные пароли так в репозиторий попадать не должны: либо держите этот файл вне git,
 # либо замените значения на ${ПЕРЕМЕННАЯ} и положите их в .env рядом.
 services:
-  cdc-1c:
-    image: sobolevp/cdc-1c:latest
+  onecdc:
+    image: sobolevp/onecdc:latest
     restart: unless-stopped
 
     environment:
       # --- обязательные ---------------------------------------------------------------------
       # Адрес OData-интерфейса опубликованной базы 1С (именно интерфейса, а не базы).
-      CDC1C_ODATA_URL: "http://server/base/odata/standard.odata"
+      ONECDC_ODATA_URL: "http://server/base/odata/standard.odata"
       # Имя плана обмена в 1С — то, что видно в конфигураторе.
-      CDC1C_EXCHANGE_NAME: "ДляODATA"
+      ONECDC_EXCHANGE_NAME: "ДляODATA"
       # Ref_Key узла обмена (очереди). Не знаете — оставьте пустым: в лог выведется список узлов.
-      CDC1C_QUEUE_GUID: "a9bc23c5-3689-11f1-926c-0800270bc6cb"
+      ONECDC_QUEUE_GUID: "a9bc23c5-3689-11f1-926c-0800270bc6cb"
       # Строка подключения SQLAlchemy к целевой БД. Postgres на хосте — см. network_mode ниже.
-      CDC1C_DB_URL: "postgresql+psycopg2://user:pass@dbhost:5432/dwh"
+      ONECDC_DB_URL: "postgresql+psycopg2://user:pass@dbhost:5432/dwh"
 
       # --- необязательные -------------------------------------------------------------------
       # Пользователь OData. Не задан — запросы идут без авторизации.
-      CDC1C_ODATA_USER: "odata"
-      CDC1C_ODATA_PASSWORD: "secret"
+      ONECDC_ODATA_USER: "odata"
+      ONECDC_ODATA_PASSWORD: "secret"
       # Схема целевой БД. Не задана — схема по умолчанию (public у Postgres).
-      CDC1C_DB_SCHEMA: "cdc_1c"
+      ONECDC_DB_SCHEMA: "onecdc"
       # Схема промежуточных таблиц merge. Не задана — схема данных. Отдельная удобна тем, что в ней
       # по определению нет ничего ценного: таблицу от упавшего процесса видно и не жалко удалить.
-      CDC1C_DB_TEMP_SCHEMA: "cdc_1c_tmp"
+      ONECDC_DB_TEMP_SCHEMA: "onecdc_tmp"
       # Число фоновых потоков полной выгрузки (по умолчанию 2). Больше потоков — больше нагрузки
       # и на 1С, и на пул соединений к БД.
-      CDC1C_FULL_LOAD_WORKERS: "2"
+      ONECDC_FULL_LOAD_WORKERS: "2"
       # Период опроса изменений в секундах (по умолчанию 60).
-      CDC1C_POLL_INTERVAL: "60"
+      ONECDC_POLL_INTERVAL: "60"
       # loop (по умолчанию) — вечный цикл; once — один цикл read → save → notify и выход.
-      CDC1C_MODE: "loop"
+      ONECDC_MODE: "loop"
       # DEBUG / INFO (по умолчанию) / WARNING / ERROR / CRITICAL.
-      CDC1C_LOG_LEVEL: "INFO"
+      ONECDC_LOG_LEVEL: "INFO"
       # Путь к своему runner.py, если он назван иначе (по умолчанию /config/runner.py).
-      # CDC1C_RUNNER: "/config/runner_cron.py"
+      # ONECDC_RUNNER: "/config/runner_cron.py"
       # Часовой пояс: расписания FullLoadCron считаются в локальном времени, а в контейнере это UTC.
       TZ: "Europe/Moscow"
 
     # Свой конфиг: runner.py + handlers/. Шаблон достаётся из самого образа:
-    #   docker run --rm sobolevp/cdc-1c:latest tar c -C /opt/cdc-1c config | tar x
+    #   docker run --rm sobolevp/onecdc:latest tar c -C /opt/onecdc config | tar x
     # Тома нет — контейнер работает по переменным выше, без обработчиков и расписаний.
     # ro: конфиг читается и не должен меняться изнутри контейнера.
     volumes:

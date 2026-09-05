@@ -1,5 +1,5 @@
 """
-Оффлайн-тесты DataObject1C.to_nested_records / group_by — записи объекта с вложенными табличными
+Оффлайн-тесты DataObject.to_nested_records / group_by — записи объекта с вложенными табличными
 частями (для экспорта в JSON). Без 1С/Postgres.
 """
 
@@ -8,8 +8,8 @@ import uuid
 from datetime import datetime
 
 import fake_1c  # соседний модуль в tests/
-from cdc_1c import ChangeReader1C, DataObject1C, MetadataReader1C, NameMapper1C
-from cdc_1c.metadata_reader import MetadataObject1C
+from onecdc import ChangeReader, DataObject, MetadataReader, NameMapper
+from onecdc.metadata_reader import MetadataObject
 
 REF_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 REF_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -17,13 +17,13 @@ REC = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
 
 def _doc_with_parts():
-    doc = DataObject1C(MetadataObject1C("Document_Doc", {}, {"Ref_Key": "Guid"}, object_key=None), [
+    doc = DataObject(MetadataObject("Document_Doc", {}, {"Ref_Key": "Guid"}, object_key=None), [
         {"Ref_Key": REF_A, "Дата": datetime(2026, 1, 1, 12, 0, 0)},
         {"Ref_Key": REF_B, "Дата": datetime(2026, 1, 2, 12, 0, 0)},
     ])
-    part = DataObject1C(
-        MetadataObject1C("Document_Doc_Товары", {}, {"Ref_Key": "Guid", "LineNumber": "Int64"},
-                         object_key=["Ref_Key"]), [
+    part = DataObject(
+        MetadataObject("Document_Doc_Товары", {}, {"Ref_Key": "Guid", "LineNumber": "Int64"},
+                       object_key=["Ref_Key"]), [
             {"Ref_Key": REF_A, "LineNumber": 1, "Товар": "X"},
             {"Ref_Key": REF_A, "LineNumber": 2, "Товар": "Y"},
             {"Ref_Key": REF_B, "LineNumber": 1, "Товар": "Z"},
@@ -44,9 +44,9 @@ def test_nested_records_raw():
 
 
 def test_flat_without_parts():
-    reg = DataObject1C(
-        MetadataObject1C("AccumulationRegister_Reg", {}, {"Recorder": "Guid"},
-                         object_key=["Recorder", "Recorder_Type"]),
+    reg = DataObject(
+        MetadataObject("AccumulationRegister_Reg", {}, {"Recorder": "Guid"},
+                       object_key=["Recorder", "Recorder_Type"]),
         [{"Recorder": REC, "Сумма": 100}])
     records = reg.to_nested_records(json_safe=True)   # table_parts пуст → плоско
     assert records[0]["Сумма"] == 100 and "Товары" not in records[0]
@@ -54,7 +54,7 @@ def test_flat_without_parts():
 
 
 def test_nested_records_mapped():
-    records = _doc_with_parts().to_nested_records(NameMapper1C(), json_safe=True)
+    records = _doc_with_parts().to_nested_records(NameMapper(), json_safe=True)
     assert "Tovary" in records[0]                     # ключ части транслитерирован
     assert "Data" in records[0]                       # поле Дата -> Data
     assert all("Tovar" in row for row in records[0]["Tovary"])
@@ -62,13 +62,13 @@ def test_nested_records_mapped():
 
 def test_emptied_part_yields_empty_list():
     # У REF_B табличная часть опустела: пришла фиктивная запись is_deleted_or_empty=True.
-    doc = DataObject1C(MetadataObject1C("Document_Doc", {}, {"Ref_Key": "Guid"}, object_key=None), [
+    doc = DataObject(MetadataObject("Document_Doc", {}, {"Ref_Key": "Guid"}, object_key=None), [
         {"Ref_Key": REF_A},
         {"Ref_Key": REF_B},
     ])
-    part = DataObject1C(
-        MetadataObject1C("Document_Doc_Товары", {}, {"Ref_Key": "Guid", "LineNumber": "Int64"},
-                         object_key=["Ref_Key"]), [
+    part = DataObject(
+        MetadataObject("Document_Doc_Товары", {}, {"Ref_Key": "Guid", "LineNumber": "Int64"},
+                       object_key=["Ref_Key"]), [
             {"Ref_Key": REF_A, "LineNumber": 1, "Товар": "X"},
             {"Ref_Key": REF_B, "is_deleted_or_empty": True},
         ])
@@ -87,8 +87,8 @@ def test_group_by():
 
 def test_over_replay():
     with fake_1c.running_server("tests/responses/trade_demo_8.5") as (odata_url, fake):
-        md = MetadataReader1C(odata_url)
-        changes = ChangeReader1C(odata_url, "E", fake.queue_guid, md)
+        md = MetadataReader(odata_url)
+        changes = ChangeReader(odata_url, "E", fake.queue_guid, md)
         md.get_metadata()
         changes.read_changes()                        # первый пакет: номенклатура + её ТЧ
 

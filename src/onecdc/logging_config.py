@@ -2,9 +2,9 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-# Пакетный логгер. Логгеры модулей (getLogger(__name__) → cdc_1c.replicator и т.п.) — его потомки,
+# Пакетный логгер. Логгеры модулей (getLogger(__name__) → onecdc.replicator и т.п.) — его потомки,
 # поэтому хендлер/уровень, выставленные здесь, действуют на весь пакет.
-logger = logging.getLogger("cdc_1c")
+logger = logging.getLogger("onecdc")
 
 # Пометка режима загрузки в сообщениях лога: полная выгрузка идёт фоновыми потоками параллельно
 # с чтением изменений, и без пометки в общем логе не разобрать, к чему относится строка.
@@ -24,12 +24,12 @@ NOISY_LOGGERS = ('alembic',)
 
 # ContextVar, а не глобальная переменная: у каждого потока свой контекст, поэтому режим фоновой
 # полной выгрузки не протекает в основной цикл и в соседние выгрузки.
-_load_mode: ContextVar[str] = ContextVar('cdc_1c_load_mode', default='')
+_load_mode: ContextVar[str] = ContextVar('onecdc_load_mode', default='')
 
 
 @contextmanager
 def load_mode(mode: str):
-    """Помечает режимом загрузки все сообщения лога cdc_1c, выданные внутри блока."""
+    """Помечает режимом загрузки все сообщения лога onecdc, выданные внутри блока."""
     token = _load_mode.set(mode)
     try:
         yield
@@ -52,19 +52,19 @@ class _LoadModeAdapter(logging.LoggerAdapter):
 
 
 def get_logger(name: str) -> logging.LoggerAdapter:
-    """Логгер модуля cdc_1c: как logging.getLogger, но с пометкой режима загрузки."""
+    """Логгер модуля onecdc: как logging.getLogger, но с пометкой режима загрузки."""
     return _LoadModeAdapter(logging.getLogger(name), {})
 
 
 def _ensure_handler(level: int = logging.INFO) -> None:
     """
-    Настроить вывод логов cdc_1c в stderr — только если логирование ещё не настроено
-    (ни на логгере cdc_1c, ни выше по цепочке до root). Если приложение уже настроило
+    Настроить вывод логов onecdc в stderr — только если логирование ещё не настроено
+    (ни на логгере onecdc, ни выше по цепочке до root). Если приложение уже настроило
     логирование, ничего не делаем: не перебиваем его выбор уровня и не плодим дубли.
 
-    Вызывается из конструктора Replicator1C (точка начала работы), а не на импорте: к этому
+    Вызывается из конструктора Replicator (точка начала работы), а не на импорте: к этому
     моменту приложение, если хотело, уже сконфигурировало логирование, и hasHandlers() даёт
-    корректный снимок. Идемпотентна — после первого вызова свой хендлер уже висит на cdc_1c,
+    корректный снимок. Идемпотентна — после первого вызова свой хендлер уже висит на onecdc,
     и hasHandlers() вернёт True.
 
     Заодно приглушает шумные чужие логгеры (NOISY_LOGGERS) — но только когда настраиваем

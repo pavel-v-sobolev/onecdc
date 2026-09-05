@@ -1,15 +1,22 @@
-[![PyPI version](https://img.shields.io/pypi/v/cdc-1c.svg)](https://pypi.org/project/cdc-1c/)
-[![Python versions](https://img.shields.io/pypi/pyversions/cdc-1c.svg)](https://pypi.org/project/cdc-1c/)
+[![PyPI version](https://img.shields.io/pypi/v/onecdc.svg)](https://pypi.org/project/onecdc/)
+[![Python versions](https://img.shields.io/pypi/pyversions/onecdc.svg)](https://pypi.org/project/onecdc/)
 
+<p align="left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pavel-v-sobolev/onecdc/main/assets/logo_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/pavel-v-sobolev/onecdc/main/assets/logo_light.png">
+    <img alt="OneCDC logo" src="https://raw.githubusercontent.com/pavel-v-sobolev/onecdc/main/assets/logo_light.png" width="500">
+  </picture>
+</p>
 
-**cdc-1c** is a docker container and a Python library, that provides 1C system data loading to data warehouse using Change Data Capture apporach. \
+**OneCDC** is a docker container and a Python library, that provides 1C system data loading to data warehouse using Change Data Capture apporach. \
 It engages standard ODATA mechanism and standard 1C exchange plan mechanism to extract data from 1C system and upsert changes to the target DB.
 
-**cdc-1c** - это докер контейнер и python-библиотека, предназначенные для получения данных из 1С, использующий подход CDC (загрузка изменений данных). \
+**OneCDC** — это докер контейнер и python-библиотека, предназначенные для получения данных из 1С, использующий подход CDC (загрузка изменений данных). \
 Продукт использует стандартный интерфейс ODATA и механизм планов обмена для выгрузки изменений данных из системы 1С и обновления данных в целевой БД.
 
 # Общий принцип действия
-1) Основной объект библиотеки это оркестратор `Replicator1C`, который циклично читает изменения из 1С (через OData + план обмена) и
+1) Основной объект библиотеки это оркестратор `Replicator`, который циклично читает изменения из 1С (через OData + план обмена) и
 пишет их в целевую БД Postgres, подтверждая приём пакета только после успешного сохранения.
 2) В Postgres объекты сохраняются в виде отдельных таблиц на каждый регистр, справочник, документ, табличные части документа или справочника. Структура соответствует структуре хранения в 1С, но имена таблиц и полей автоматически переводятся в транслит.
 3) Полученные таблицы вы можете сами использовать для построения запросов, но библиотека предлагает также механизм обработчиков (handlers). Когда из 1С приходят новые данные, обработчик обновляет соответствующую часть в витрине данных. Витрину вы описываете сами — представлением (view) в базе данных. В примере показано как сделать обновление витрины быстрым, только по изменениям. Также механизм обработчиков это по сути ваш код на python, в который вы можете вставить что нужно, например, отправка в RabbitMQ или еще что-то.
@@ -20,14 +27,14 @@ It engages standard ODATA mechanism and standard 1C exchange plan mechanism to e
 2) настроить план обмена в конфигураторе и включить в его состав нужные объекты 1с
 3) создать пользователя для доступа к odata и дать ему необходимые права (`чтение` и `изменение` к плану обмена, `чтение` к загружаемым объектам).
 4) дать роль `чтение` всем пользователям к плану обмена (иначе будут ошибки при сохранении объектов)
-5) создать узел обмена с использованием внешней обработки `cdc-1c.odt`
-6) запустить загрузку: докер-образом `sobolevp/cdc-1c` (см. «Запуск в docker») либо python-библиотекой `cdc-1c` (см. ниже)
+5) создать узел обмена с использованием внешней обработки `onecdc.epf`
+6) запустить загрузку: докер-образом `sobolevp/onecdc` (см. «Запуск в docker») либо python-библиотекой `onecdc` (см. ниже)
 
 # Использование библиотеки python
 
 ## Установка
 ```bash
-pip install cdc-1c
+pip install onecdc
 ```
 
 Для записи изменений необходим **PostgreSQL** (Другие СУБД не тестировались, хотя в теории возможны).
@@ -36,20 +43,20 @@ pip install cdc-1c
 
 ```python
 from sqlalchemy import create_engine
-from cdc_1c import Replicator1C
+from onecdc import Replicator
 
 # pool_size >= full_load_workers + 3 (+1 на каждого обработчика и каждое расписание) —
 # почему столько, см. README_DB.md, «Сколько нужно соединений к БД»
-engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/cdc_1c", pool_size=5)
+engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/onecdc", pool_size=5)
 
-rep = Replicator1C(
+rep = Replicator(
     odata_url="http://host/base/odata/standard.odata",
     odata_auth=("odata", "secret"),        # (user, password) либо None без авторизации
     exchange_name="ВашПланОбмена",              # имя плана обмена в 1С
-    queue_guid="aaaaaaaa-aaaa-aaaa-aaa-aaaaaaaaaaaa",  # Ref_Key узла обмена
+    queue_guid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",  # Ref_Key узла обмена
     engine=engine,
-    db_schema="cdc_1c",                    # None → схема БД по умолчанию (public у Postgres)
-    db_temp_schema="cdc_1c_tmp",           # схема промежуточных таблиц merge; None → схема данных
+    db_schema="onecdc",                    # None → схема БД по умолчанию (public у Postgres)
+    db_temp_schema="onecdc_tmp",           # схема промежуточных таблиц merge; None → схема данных
     request_timeout=60,                    # таймаут HTTP-запросов к 1С, сек (по умолчанию 60 на коннект, 900 на ответ)
     full_load_workers=2,                   # число фоновых потоков полной выгрузки
 )
@@ -66,14 +73,14 @@ rep.run_forever(interval=60)               # цикл опроса раз в 60 
 
 ```bash
 docker run --rm --network host \
-  -e CDC1C_ODATA_URL="http://server/base/odata/standard.odata" \
-  -e CDC1C_ODATA_USER=odata -e CDC1C_ODATA_PASSWORD=secret \
-  -e CDC1C_EXCHANGE_NAME="ВашПланОбмена" \
-  -e CDC1C_QUEUE_GUID="aaaaaaaa-aaaa-aaaa-aaa-aaaaaaaaaaaa" \
-  -e CDC1C_DB_URL="postgresql+psycopg2://user:pass@database_host:5432/cdc" \
-  -e CDC1C_DB_SCHEMA=cdc_1c -e CDC1C_DB_TEMP_SCHEMA=cdc_1c_tmp \
+  -e ONECDC_ODATA_URL="http://server/base/odata/standard.odata" \
+  -e ONECDC_ODATA_USER=odata -e ONECDC_ODATA_PASSWORD=secret \
+  -e ONECDC_EXCHANGE_NAME="ВашПланОбмена" \
+  -e ONECDC_QUEUE_GUID="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" \
+  -e ONECDC_DB_URL="postgresql+psycopg2://user:pass@database_host:5432/cdc" \
+  -e ONECDC_DB_SCHEMA=onecdc -e ONECDC_DB_TEMP_SCHEMA=onecdc_tmp \
   -v "$PWD/config:/config:ro" \
-  sobolevp/cdc-1c:latest
+  sobolevp/onecdc:latest
 ```
 
 `-v "$PWD/config:/config:ro"` — монтирует папку `config` из текущего каталога. В ней лежит файл [runner.py](config/runner.py), а также подпапка с примерами обработчиков (config/handlers).
@@ -83,8 +90,8 @@ docker run --rm --network host \
 
 ## Запуск из окружения
 
-Если хочется не писать код вовсе, есть готовый entrypoint — `python -m cdc_1c` (он же команда
-`cdc-1c`). Он читает те же параметры из переменных окружения, см описание: [README_ENV.md](README_ENV.md)
+Если хочется не писать код вовсе, есть готовый entrypoint — `python -m onecdc` (он же команда
+`onecdc`). Он читает те же параметры из переменных окружения, см описание: [README_ENV.md](README_ENV.md)
 
 
 
@@ -92,11 +99,11 @@ docker run --rm --network host \
 
 `queue_guid` — это `Ref_Key` узла плана обмена, того самого, на который 1С регистрирует изменения
 (`ЭтотУзел` не подходит: он описывает саму базу-источник). Если guid неизвестен, оставьте параметр
-пустым (`queue_guid=""`, или просто не задавайте `CDC1C_QUEUE_GUID`) и запустите: чтение изменений
+пустым (`queue_guid=""`, или просто не задавайте `ONECDC_QUEUE_GUID`) и запустите: чтение изменений
 выведет в лог список узлов плана обмена и остановится.
 
 ```
-ERROR cdc_1c.change_reader: queue_guid is not set. Available nodes of exchange plan ДляODATA:
+ERROR onecdc.change_reader: queue_guid is not set. Available nodes of exchange plan ДляODATA:
     a9bc23c5-3689-11f1-926c-0800270bc6cb  CDC  Витрина
 ```
 
@@ -117,7 +124,7 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 
 При работе `run_forever` объекты, впервые встреченные в пакете изменений, автоматически ставятся в
 очередь на полную выгрузку и грузятся фоновыми потоками. 
-- Можно запустить выгрузку и вручную, поставив флаг в таблице metadata_objects_1c - full_load_is_required=`True`
+- Можно запустить выгрузку и вручную, поставив флаг в таблице onecdc_metadata_objects - full_load_is_required=`True`
 - Полная выгрузка спроектирована так, чтобы работать параллельно с получением изменений объекта и не затирать свежие изменения объекта. Также она автоматически разбивает объект на отрезки по времени и выгружает его порциями с автоматическим подбором размера (batch_size).
 
 
@@ -126,21 +133,21 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 На каждый объект 1С заводится своя таблица: имя транслитерируется, к полям добавляются служебные
 (`merged_on`, `inserted_on`, `is_deleted_or_empty`, `exchange_message_no`). Схемы, таблицы и новые
 колонки библиотека создаёт сама. Рядом появляются служебные таблицы, по которым видно состояние
-загрузки: журнал `replicator_1c_log`, реестр объектов `metadata_objects_1c`, состояние обработчиков
-`handlers_1c` и реестр незавершённых записей `writes_in_process_1c`.
+загрузки: журнал `onecdc_replicator_log`, реестр объектов `onecdc_metadata_objects`, состояние обработчиков
+`onecdc_handlers` и реестр незавершённых записей `onecdc_writes_in_process`.
 
 Подробно — [README_DB.md](README_DB.md): состав полей, что означает `is_deleted_or_empty`, зачем
 отдельная схема промежуточных таблиц и что лежит в каждой служебной таблице.
 
 ## Классы библиотеки
 
-`Replicator1C` читает изменения и пишет их в БД, `Handler1C` + `HandlerLoop` дают возможность запуска своего кода
+`Replicator` читает изменения и пишет их в БД, `Handler` + `HandlerLoop` дают возможность запуска своего кода
 по событию изменения, `FullLoadCron` — полную выгрузку по расписанию. Что каждый из них принимает и
 что у него можно вызвать — [README_API.md](README_API.md).
 
 ## Логирование
 
-Из коробки библиотека вешает вывод на логгер `cdc_1c` (INFO), если приложение не настроило логирование
+Из коробки библиотека вешает вывод на логгер `onecdc` (INFO), если приложение не настроило логирование
 само. Настроили своё — библиотека молчит и пишет через стандартный `logging`.
 
 ## Шум со стороны 1С
@@ -158,9 +165,9 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 вызывает ваш код. Такой код называется **обработчиком** — это класс с двумя строчками объявления:
 
 ```python
-from cdc_1c import Handler1C, HandlerContext
+from onecdc import Handler, HandlerContext
 
-class ZakazyKlientov(Handler1C):
+class ZakazyKlientov(Handler):
     ON = ["AccumulationRegister_ZakazyKlientov"]   # имена ТАБЛИЦ в БД, не объектов 1С
 
     def handle(self, context: HandlerContext) -> None:
@@ -201,10 +208,15 @@ DDL можно прописать прямо в обработчике (`setup`)
 | файл | описание |
 |---|---|
 | [README.md](README.md) | этот файл: обзор, установка, запуск |
-| [README_ENV.md](README_ENV.md) | запуск из окружения: все переменные `CDC1C_*`, значения по умолчанию, ошибки конфигурации |
-| [README_API.md](README_API.md) | классы, которые собирает пользователь: `Replicator1C`, `Handler1C`, `HandlerLoop`, `FullLoadCron`; обработчики — окно изменений, когда их вызывают, пересборка витрины |
+| [README_ENV.md](README_ENV.md) | запуск из окружения: все переменные `ONECDC_*`, значения по умолчанию, ошибки конфигурации |
+| [README_API.md](README_API.md) | классы, которые собирает пользователь: `Replicator`, `Handler`, `HandlerLoop`, `FullLoadCron`; обработчики — окно изменений, когда их вызывают, пересборка витрины |
 | [README_DB.md](README_DB.md) | что появляется в целевой БД: таблицы, служебные поля, служебные таблицы |
 | [DESIGN.md](DESIGN.md) | внутреннее устройство для тех, кто правит код: интерфейс OData, цикл изменений, пагинация полной выгрузки, гонки со снимком, механика обработчиков |
 | [CHANGELOG.md](CHANGELOG.md) | что менялось от версии к версии |
 | [config/runner.py](config/runner.py) | шаблон точки входа: репликатор, обработчики и расписания в одном файле |
 | [config/handlers](config/handlers/) | примеры обработчиков |
+
+
+---
+
+<sub>Неофициальный проект, не связан с фирмой «1С». «1С» и «1С:Предприятие» — товарные знаки ООО «1С», используются для указания совместимости.</sub>

@@ -6,12 +6,12 @@ from datetime import date, datetime
 import requests
 from sqlalchemy import DateTime, func
 
-from cdc_1c.logging_config import get_logger
+from onecdc.logging_config import get_logger
 
 ODATA_PREFIX = 'StandardODATA.'
 
 # Часы БД без часового пояса. Просто now() не годится: PostgreSQL отдаёт timestamptz, драйвер —
-# offset-aware datetime, а merged_on, started_at и handlers_1c.last_run_at лежат в колонках без
+# offset-aware datetime, а merged_on, started_at и onecdc_handlers.last_run_at лежат в колонках без
 # пояса и читаются offset-naive. Сравнить такие значения в Python нельзя — «can't compare
 # offset-naive and offset-aware datetimes», — а сравниваются они постоянно (граница окна против
 # last_run_at, guard'ы полной выгрузки против merged_on).

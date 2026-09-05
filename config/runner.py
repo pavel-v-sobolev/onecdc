@@ -21,11 +21,11 @@
 остальные. Порядок между ними при этом не определён — на «витрина поверх витрины считается после
 базовой» полагаться нельзя.
 
-Репликатор обработчиков не запускает и о них не знает: сигналы идут через таблицу handlers_1c.
+Репликатор обработчиков не запускает и о них не знает: сигналы идут через таблицу handlers.
 Здесь они просто живут в одном процессе с ним — так проще. Отсюда и другие раскладки, каждая
 правкой этого файла: разнести по контейнерам — убрать репликатор, останутся одни циклы обработчиков;
-несколько планов обмена — завести второй Replicator1C и отправить его в тот же пул; только полные
-выгрузки без чтения изменений — собрать Replicator1C (он исполнитель full_load: метаданные,
+несколько планов обмена — завести второй Replicator и отправить его в тот же пул; только полные
+выгрузки без чтения изменений — собрать Replicator (он исполнитель full_load: метаданные,
 пагинация, запись, журнал) и просто не отправлять его run_forever в пул. В самих обработчиках при
 этом не меняется ничего.
 
@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import create_engine
 
-from cdc_1c import FullLoadCron, HandlerLoop, Replicator1C
+from onecdc import FullLoadCron, HandlerLoop, Replicator
 
 # from handlers import ZakazyKlientov, ZakazyKlientovGrouped
 
@@ -52,21 +52,21 @@ POLL_INTERVAL = 60
 # и каждое расписание, каждое из которых работает своим потоком. Сейчас их нет, отсюда
 # FULL_LOAD_WORKERS + 3; раскомментируете два обработчика и два расписания ниже — станет
 # FULL_LOAD_WORKERS + 7 (подробнее в README_DB.md, «Сколько нужно соединений к БД»).
-engine = create_engine(os.environ["CDC1C_DB_URL"], pool_size=FULL_LOAD_WORKERS + 3)
+engine = create_engine(os.environ["ONECDC_DB_URL"], pool_size=FULL_LOAD_WORKERS + 3)
 
-DB_SCHEMA = os.environ.get("CDC1C_DB_SCHEMA")
+DB_SCHEMA = os.environ.get("ONECDC_DB_SCHEMA")
 # Схема промежуточных таблиц dbmerge — своя, отдельно от данных. Не обязательна (не задана — та же,
 # что у данных), но так таблицы с данными и рабочие таблицы merge не перемешиваются: в этой схеме по
 # определению нет ничего ценного, поэтому таблицу, оставшуюся после падения процесса, там видно и не
 # жалко удалить. Схему создаёт сам dbmerge.
-DB_TEMP_SCHEMA = os.environ.get("CDC1C_DB_TEMP_SCHEMA")
+DB_TEMP_SCHEMA = os.environ.get("ONECDC_DB_TEMP_SCHEMA")
 
-replicator = Replicator1C(
-    odata_url=os.environ["CDC1C_ODATA_URL"],
-    odata_auth=(os.environ["CDC1C_ODATA_USER"], os.environ["CDC1C_ODATA_PASSWORD"]),
-    exchange_name=os.environ["CDC1C_EXCHANGE_NAME"],
+replicator = Replicator(
+    odata_url=os.environ["ONECDC_ODATA_URL"],
+    odata_auth=(os.environ["ONECDC_ODATA_USER"], os.environ["ONECDC_ODATA_PASSWORD"]),
+    exchange_name=os.environ["ONECDC_EXCHANGE_NAME"],
     # Не знаете guid узла — оставьте пустым: в лог выведется список узлов плана обмена.
-    queue_guid=os.environ.get("CDC1C_QUEUE_GUID", ""),
+    queue_guid=os.environ.get("ONECDC_QUEUE_GUID", ""),
     engine=engine,
     db_schema=DB_SCHEMA,
     db_temp_schema=DB_TEMP_SCHEMA,
@@ -99,7 +99,7 @@ replicator = Replicator1C(
 #
 # На объект приходится две строки: что грузим и по какому расписанию. Имена — те, что видны в БД
 # (латиница), как и у обработчиков: настраивая выгрузку, смотрят в базу и в реестр
-# metadata_objects_1c (колонки object_full_name_en / fields_en). Оригинальные имена 1С
+# onecdc_metadata_objects (колонки object_full_name_en / fields_en). Оригинальные имена 1С
 # ("Document_ЗаказКлиента") тоже принимаются. Расписание — обычная crontab-строка, время локальное:
 # в контейнере задавайте TZ.
 #

@@ -1,13 +1,13 @@
-# Образ ставит cdc-1c с PyPI по версии: версия пакета = версия образа, собирать нечего.
-#   docker build --build-arg CDC1C_VERSION=0.1.22 -t sobolevp/cdc-1c:0.1.22 -t sobolevp/cdc-1c:latest .
+# Образ ставит onecdc с PyPI по версии: версия пакета = версия образа, собирать нечего.
+#   docker build --build-arg ONECDC_VERSION=0.1.22 -t sobolevp/onecdc:0.1.22 -t sobolevp/onecdc:latest .
 # Версия должна быть уже опубликована на PyPI, иначе pip внутри сборки её не найдёт.
 FROM python:3.13-slim
 
-ARG CDC1C_VERSION
-LABEL org.opencontainers.image.title="cdc-1c" \
+ARG ONECDC_VERSION
+LABEL org.opencontainers.image.title="onecdc" \
       org.opencontainers.image.description="Change data capture (CDC) from 1C:Enterprise to your data warehouse" \
-      org.opencontainers.image.source="https://github.com/pavel-v-sobolev/cdc_1C" \
-      org.opencontainers.image.version="${CDC1C_VERSION}" \
+      org.opencontainers.image.source="https://github.com/pavel-v-sobolev/onecdc" \
+      org.opencontainers.image.version="${ONECDC_VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
 # tzdata: расписания FullLoadCron считаются в локальном времени (TZ), а в slim-образе базы зон нет.
@@ -21,12 +21,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 # Экстра postgres — psycopg2-binary, колесо, поэтому компилятор и dev-заголовки в образе не нужны.
-RUN test -n "${CDC1C_VERSION}" || (echo "build-arg CDC1C_VERSION is required" >&2; exit 1) \
-    && pip install --no-cache-dir "cdc-1c[postgres]==${CDC1C_VERSION}"
+RUN test -n "${ONECDC_VERSION}" || (echo "build-arg ONECDC_VERSION is required" >&2; exit 1) \
+    && pip install --no-cache-dir "onecdc[postgres]==${ONECDC_VERSION}"
 
 # Шаблон конфига внутри образа: достаётся из него же, версия шаблона совпадает с версией библиотеки.
-#   docker run --rm sobolevp/cdc-1c:latest tar c -C /opt/cdc-1c config | tar x
-COPY config /opt/cdc-1c/config
+#   docker run --rm sobolevp/onecdc:latest tar c -C /opt/onecdc config | tar x
+COPY config /opt/onecdc/config
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 

@@ -6,7 +6,7 @@ Graceful-остановка долгоживущих циклов: и репли
 один раз и только из главного потока (python другого не позволяет), а циклы в рабочих потоках просто
 регистрируются в общем списке.
 
-Отсюда важное следствие, из-за которого перехват ставится в КОНСТРУКТОРАХ Replicator1C и
+Отсюда важное следствие, из-за которого перехват ставится в КОНСТРУКТОРАХ Replicator и
 HandlerLoop, а не только при запуске цикла. Типовая точка входа отправляет все run_forever в
 ThreadPoolExecutor и сама больше ничего не делает — тогда главный поток не создаёт ни одного
 StopSignal, из рабочих потоков signal.signal кидает ValueError, и перехват не ставит никто.
@@ -21,7 +21,7 @@ handlers — общий код пришлось бы тащить через ц�
 import signal
 import weakref
 
-from cdc_1c.logging_config import get_logger
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -61,7 +61,7 @@ def install_signal_handlers(*, quiet: bool = True) -> bool:
             logger.warning(
                 "Signal handlers are not installed: this object was created outside the main "
                 "thread. SIGTERM will kill the process instead of stopping loops gracefully. "
-                "Call cdc_1c.stop_signal.install_signal_handlers() from the main thread, or stop "
+                "Call onecdc.stop_signal.install_signal_handlers() from the main thread, or stop "
                 "the loops with request_stop().")
         return False
     _handlers_installed = True

@@ -17,9 +17,9 @@ from typing import Iterable
 from sqlalchemy import (Column, DateTime, Engine, MetaData, String, Table, delete, func, insert,
                         or_, select, update)
 
-from cdc_1c.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from cdc_1c.db_logs import _check_create_schema
-from cdc_1c.logging_config import get_logger
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.db_logs import _check_create_schema
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 # процесс, который их завёл, умер, а вместе с ним откатились и его транзакции, так что держать по
 # ним границу больше не нужно. TTL с запасом больше периода: разовая задержка не должна выглядеть
 # как смерть процесса.
-WRITES_TABLE = "writes_in_process_1c"
+WRITES_TABLE = "onecdc_writes_in_process"
 MERGE_HEARTBEAT_PERIOD = 20.0
 MERGE_HEARTBEAT_TTL = 90.0
 # Через сколько строка брошенного процесса не просто игнорируется при расчёте границы, а удаляется.
@@ -42,7 +42,7 @@ MERGE_ABANDONED_TTL = 3600.0
 
 class _TrackedWrite:
     """Один merge в реестре: снимается по выходу из блока, т.е. после коммита. Ключ — имя объекта
-    строки в writes_in_process_1c."""
+    строки в onecdc_writes_in_process."""
 
     def __init__(self, tracker, key: str, started_at: datetime):
         self._tracker = tracker
@@ -78,7 +78,7 @@ class WriteTracker:
     Нужен, потому что обработчик может работать отдельно от репликатора. Граница его окна обязана
     быть прижата к незакоммиченным merge: их merged_on уже в прошлом, а строки ещё не видны, и
     отметка, взятая как «сейчас», их бы перешагнула — потеря строк, молча. В памяти такой реестр
-    чужому процессу не виден, поэтому он живёт в таблице writes_in_process_1c: строка появляется
+    чужому процессу не виден, поэтому он живёт в таблице onecdc_writes_in_process: строка появляется
     перед merge и исчезает после коммита.
 
     Брошенные строки (процесс умер между вставкой и удалением) отсекаются по отметке живости: раз

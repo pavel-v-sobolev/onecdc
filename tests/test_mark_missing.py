@@ -12,10 +12,10 @@ from datetime import date, datetime, timedelta
 import pytest
 from sqlalchemy import MetaData, Table, select, text
 
-from cdc_1c import DataObject1C
-from cdc_1c.data_reader import DataReader1C
-from cdc_1c.metadata_reader import MetadataObject1C
-from cdc_1c.replicator import Replicator1C
+from onecdc import DataObject
+from onecdc.data_reader import DataReader
+from onecdc.metadata_reader import MetadataObject
+from onecdc.replicator import Replicator
 from conftest import TEST_QUEUE_GUID
 
 CATALOG = "Catalog_X"
@@ -23,15 +23,15 @@ REGISTER = "InformationRegister_R"
 
 
 def _replicator(db):
-    rep = Replicator1C(odata_url="http://x", odata_auth=None, exchange_name="E",
-                       queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
+    rep = Replicator(odata_url="http://x", odata_auth=None, exchange_name="E",
+                     queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
     rep.metadata.is_loaded = True
-    rep.metadata[CATALOG] = MetadataObject1C(
+    rep.metadata[CATALOG] = MetadataObject(
         CATALOG, {"Ref_Key": "String", "Val": "String", "Date": "DateTime"},
         {"Ref_Key": "String"}, object_key=None)
     # Независимый регистр сведений: ключ составной, регистратора нет — сегодня у него нет вообще
     # никакого механизма удаления, поэтому он здесь и проверяется.
-    rep.metadata[REGISTER] = MetadataObject1C(
+    rep.metadata[REGISTER] = MetadataObject(
         REGISTER, {"Period": "String", "Sklad": "String", "Kolichestvo": "Int64"},
         {"Period": "String", "Sklad": "String"}, object_key=None,
         dimensions=["Sklad"], resources=["Kolichestvo"])
@@ -62,13 +62,13 @@ def _pages(rep, object_name, monkeypatch, pages, recheck_answer=None):
             calls["pages"] += 1
             records = remaining.pop(0) if remaining else []
         self.clear()
-        self[name] = DataObject1C(meta, [dict(r) for r in records])
+        self[name] = DataObject(meta, [dict(r) for r in records])
         return len(records)
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     # Границы периода эти тесты не проверяют: без них выгрузка идёт одной выборкой, как и до
-    # нарезки на периоды (см. Replicator1C._period_partitions).
-    monkeypatch.setattr(DataReader1C, "read_date_bound", lambda *a, **k: None)
+    # нарезки на периоды (см. Replicator._period_partitions).
+    monkeypatch.setattr(DataReader, "read_date_bound", lambda *a, **k: None)
     return calls
 
 
@@ -240,7 +240,7 @@ def test_recheck_batches_by_query_length_not_key_count(db, monkeypatch):
     «Query String Too Long», и перепроверка падала целиком.
     """
     from urllib.parse import quote
-    from cdc_1c.replicator import RECHECK_MAX_QUERY_BYTES, RECHECK_QUERY_RESERVE_BYTES
+    from onecdc.replicator import RECHECK_MAX_QUERY_BYTES, RECHECK_QUERY_RESERVE_BYTES
 
     rep = _replicator(db)
     budget = RECHECK_MAX_QUERY_BYTES - RECHECK_QUERY_RESERVE_BYTES
@@ -250,10 +250,10 @@ def test_recheck_batches_by_query_length_not_key_count(db, monkeypatch):
     long_value = "Документ_РеализацияТоваровУслуг_ДлинноеИмя"
     candidates = [{"Period": f"2026-01-{i:02d}", "Sklad": long_value} for i in range(1, 41)]
     sent = []
-    monkeypatch.setattr(DataReader1C, "read_object",
+    monkeypatch.setattr(DataReader, "read_object",
                         lambda self, name, extra_filter=None, **kw: (sent.append(extra_filter), 0)[1])
 
-    rep._still_in_1c(REGISTER, candidates, DataReader1C("http://x", rep.metadata))
+    rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
 
     assert len(sent) > 1, 'сорок таких ключей обязаны разойтись по нескольким запросам'
     for flt in sent:
@@ -270,7 +270,7 @@ def test_recheck_lowers_the_budget_when_the_server_refuses(db, monkeypatch):
     414, перепроверка опускает бюджет и повторяет ТУ ЖЕ пачку, а не теряет её.
     """
     import requests
-    from cdc_1c.replicator import RECHECK_BUDGET_DIVISOR
+    from onecdc.replicator import RECHECK_BUDGET_DIVISOR
 
     rep = _replicator(db)
     before = rep._recheck_query_budget
@@ -288,8 +288,8 @@ def test_recheck_lowers_the_budget_when_the_server_refuses(db, monkeypatch):
             raise requests.HTTPError('too long', response=_Resp())
         return 0
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
-    rep._still_in_1c(REGISTER, candidates, DataReader1C("http://x", rep.metadata))
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
 
     assert rep._recheck_query_budget == before // RECHECK_BUDGET_DIVISOR, 'бюджет обязан опуститься'
     assert len(sent[1]) < len(sent[0]), 'та же пачка пересобрана короче'
@@ -315,9 +315,9 @@ def test_recheck_does_not_mistake_a_real_404_for_a_long_query(db, monkeypatch):
     def fake_read_object(self, name, extra_filter=None, **kw):
         raise requests.HTTPError('not found', response=_Resp())
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     with pytest.raises(requests.HTTPError):
-        rep._still_in_1c(REGISTER, candidates, DataReader1C("http://x", rep.metadata))
+        rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
     assert rep._recheck_query_budget == before, 'настоящий 404 бюджет трогать не должен'
 
 
@@ -333,11 +333,11 @@ def test_recheck_of_a_record_set_register_asks_by_recorder_only(db, monkeypatch)
     та единица, которая либо существует, либо нет. Один регистратор — один запрос, сколько бы его
     строк ни было в кандидатах, а имя типа в адресе пишется с префиксом StandardODATA.
     """
-    from cdc_1c.metadata_reader import MetadataObject1C
+    from onecdc.metadata_reader import MetadataObject
 
     rep = _replicator(db)
     name = "AccumulationRegister_R"
-    rep.metadata[name] = MetadataObject1C(
+    rep.metadata[name] = MetadataObject(
         name, {"Recorder": "String", "Recorder_Type": "String", "LineNumber": "Int64"},
         {"Recorder": "String", "LineNumber": "Int64", "Recorder_Type": "String"},
         object_key=["Recorder", "Recorder_Type"])
@@ -346,13 +346,13 @@ def test_recheck_of_a_record_set_register_asks_by_recorder_only(db, monkeypatch)
     candidates = [{"Recorder": rec, "Recorder_Type": "Document_X", "LineNumber": n}
                   for rec in ("r-1", "r-2") for n in (1, 2, 3)]
     asked = []
-    monkeypatch.setattr(DataReader1C, "read_by_key",
+    monkeypatch.setattr(DataReader, "read_by_key",
                         lambda self, name, key_values: (asked.append(key_values), 0)[1])
     # $filter-путь для такого объекта не должен использоваться вовсе.
-    monkeypatch.setattr(DataReader1C, "read_object",
+    monkeypatch.setattr(DataReader, "read_object",
                         lambda *a, **k: pytest.fail("перепроверка набора обязана идти по ключу"))
 
-    rep._still_in_1c(name, candidates, DataReader1C("http://x", rep.metadata))
+    rep._still_in_1c(name, candidates, DataReader("http://x", rep.metadata))
 
     assert len(asked) == 2, 'каждый регистратор спрашивается ровно один раз'
     assert [k["Recorder"] for k in asked] == ["r-1", "r-2"]
@@ -369,11 +369,11 @@ def test_recheck_keeps_the_namespace_of_an_unavailable_recorder_type(db, monkeyp
     «Недопустимое значение … для свойства составного типа». Отличаем по точке: в имени объекта 1С
     её нет.
     """
-    from cdc_1c.metadata_reader import MetadataObject1C
+    from onecdc.metadata_reader import MetadataObject
 
     rep = _replicator(db)
     name = "AccumulationRegister_R"
-    rep.metadata[name] = MetadataObject1C(
+    rep.metadata[name] = MetadataObject(
         name, {"Recorder": "String", "Recorder_Type": "String", "LineNumber": "Int64"},
         {"Recorder": "String", "LineNumber": "Int64", "Recorder_Type": "String"},
         object_key=["Recorder", "Recorder_Type"])
@@ -382,10 +382,10 @@ def test_recheck_keeps_the_namespace_of_an_unavailable_recorder_type(db, monkeyp
     candidates = [{"Recorder": "r-1", "Recorder_Type": "Document_X", "LineNumber": 1},
                   {"Recorder": "r-2", "Recorder_Type": unavailable, "LineNumber": 1}]
     asked = []
-    monkeypatch.setattr(DataReader1C, "read_by_key",
+    monkeypatch.setattr(DataReader, "read_by_key",
                         lambda self, name, key_values: (asked.append(key_values), 0)[1])
 
-    rep._still_in_1c(name, candidates, DataReader1C("http://x", rep.metadata))
+    rep._still_in_1c(name, candidates, DataReader("http://x", rep.metadata))
 
     assert asked[0]["Recorder_Type"] == "StandardODATA.Document_X", 'обычному типу префикс нужен'
     assert asked[1]["Recorder_Type"] == unavailable, 'у недоступной сущности своё пространство имён'

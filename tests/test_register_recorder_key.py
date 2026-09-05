@@ -12,9 +12,9 @@ from datetime import datetime
 
 import pytest
 
-from cdc_1c.data_reader import (DataReader1C, EMPTY_UUID, EXCHANGE_MESSAGE_NO_FIELD,
+from onecdc.data_reader import (DataReader, EMPTY_UUID, EXCHANGE_MESSAGE_NO_FIELD,
                                 IS_DELETED_OR_EMPTY_FIELD)
-from cdc_1c.metadata_reader import MetadataObject1C, MetadataReader1C
+from onecdc.metadata_reader import MetadataObject, MetadataReader
 
 REG = "InformationRegister_Forecast"
 REC = "410d24b4-8774-11f1-abae-6cb3117b9496"
@@ -26,13 +26,13 @@ _PRIMARY_KEY = {"Recorder_Key": "Guid", "Period": "DateTime", "Customer_Key": "G
 
 
 def _reader(properties: dict, primary_key: dict | None = None,
-            object_key: list[str] | None = None) -> DataReader1C:
-    """DataReader1C с подставленными метаданными регистра (без сети)."""
-    metadata = MetadataReader1C(odata_url="http://fake")
-    metadata[REG] = MetadataObject1C(REG, dict(properties), dict(primary_key or _PRIMARY_KEY),
+            object_key: list[str] | None = None) -> DataReader:
+    """DataReader с подставленными метаданными регистра (без сети)."""
+    metadata = MetadataReader(odata_url="http://fake")
+    metadata[REG] = MetadataObject(REG, dict(properties), dict(primary_key or _PRIMARY_KEY),
                                      object_key=object_key)
     metadata.is_loaded = True
-    reader = DataReader1C(odata_url="http://fake", metadata=metadata)
+    reader = DataReader(odata_url="http://fake", metadata=metadata)
     reader.exchange_message_no = 7
     return reader
 
@@ -182,7 +182,7 @@ def test_empty_reference_in_key_is_not_null():
 
 def test_object_key_uses_recorder_key():
     # scoped-удаление группы должно идти по Recorder_Key, иначе набор регистратора не заменяется.
-    metadata = MetadataReader1C(odata_url="http://fake")
+    metadata = MetadataReader(odata_url="http://fake")
     assert metadata._get_object_key(REG, _FIELDS, _PRIMARY_KEY) == ["Recorder_Key"]
     assert metadata._get_object_key(
         REG, {"Recorder": "Guid", "Recorder_Type": "String"}, {}) == ["Recorder", "Recorder_Type"]

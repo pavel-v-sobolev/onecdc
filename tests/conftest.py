@@ -9,7 +9,7 @@
 Каждый тест получает СВОЮ схему с уникальным именем, которая создаётся перед ним и сносится после.
 Так тесты не мешают друг другу и не оставляют мусора в рабочих схемах базы.
 
-Адрес базы переопределяется переменной CDC1C_TEST_DB_URL.
+Адрес базы переопределяется переменной ONECDC_TEST_DB_URL.
 """
 
 import os
@@ -19,12 +19,12 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import Engine, create_engine, text
 
-# Узел обмена в тестах: конструктор Replicator1C требует именно guid (см. _check_queue_guid),
+# Узел обмена в тестах: конструктор Replicator требует именно guid (см. _check_queue_guid),
 # поэтому фиктивные "Q"/"guid" не подойдут.
 TEST_QUEUE_GUID = "11111111-2222-3333-4444-555555555555"
 
 TEST_DB_URL = os.environ.get(
-    "CDC1C_TEST_DB_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/cdc_1c")
+    "ONECDC_TEST_DB_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc")
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class TestDB:
 
 @pytest.fixture
 def db():
-    schema = f"cdc_1c_test_{uuid.uuid4().hex[:8]}"
+    schema = f"onecdc_test_{uuid.uuid4().hex[:8]}"
     engine = create_engine(TEST_DB_URL)
     try:
         with engine.begin() as conn:

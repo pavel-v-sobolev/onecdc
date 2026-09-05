@@ -7,12 +7,12 @@
 запустят руками. Репликатор эту информацию имеет — он и сохраняет данные, — поэтому он и
 сообщает, что пора считать.
 
-Обработчик — класс, унаследованный от Handler1C:
+Обработчик — класс, унаследованный от Handler:
 
     # handlers/zakazy_klientov.py
-    from cdc_1c import Handler1C, HandlerContext
+    from onecdc import Handler, HandlerContext
 
-    class ZakazyKlientov(Handler1C):
+    class ZakazyKlientov(Handler):
         ON = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
         ON_FULL_LOAD = True     # вызывать ли на страницах полной выгрузки (по умолчанию да)
         MIN_INTERVAL = 0        # не чаще раза в N секунд (0 — без ограничения)
@@ -23,21 +23,21 @@
 подсказывает поля контекста и их типы, а опечатка в имени поля видна сразу, а не в проде.
 
 Наследование не обязательно: as_handler примет и модуль целиком, и функцию — нужны только те же
-`ON` и `handle`. Базовый класс просто избавляет от копипасты (см. Handler1C).
+`ON` и `handle`. Базовый класс просто избавляет от копипасты (см. Handler).
 
 Каждому обработчику — свой HandlerLoop, и запускается он блокирующим run_forever, как и
 репликатор:
 
     from handlers import ZakazyKlientov, OtpravkaVOchered
 
-    handler_zakazy  = HandlerLoop(engine=engine, schema='cdc_1c', handler=ZakazyKlientov())
-    handler_ochered = HandlerLoop(engine=engine, schema='cdc_1c', handler=OtpravkaVOchered())
+    handler_zakazy  = HandlerLoop(engine=engine, schema='onecdc', handler=ZakazyKlientov())
+    handler_ochered = HandlerLoop(engine=engine, schema='onecdc', handler=OtpravkaVOchered())
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         pool.submit(handler_zakazy.run_forever)
         pool.submit(handler_ochered.run_forever)
 
-Репликатору эти циклы не передаются: он о них не знает, а сообщает через таблицу handlers_1c (см.
+Репликатору эти циклы не передаются: он о них не знает, а сообщает через таблицу handlers (см.
 HandlerSignals). Поэтому обработчики можно запускать где угодно — хоть в отдельном контейнере.
 
 Цикл на обработчика, а не один на всех, — чтобы тяжёлая витрина не задерживала остальные. Порядок
@@ -63,12 +63,12 @@ HandlerSignals). Поэтому обработчики можно запуска
 него один и тот же во всех случаях — без ветки «а если первый раз». Собрать витрину заново можно,
 заказав пересборку:
 
-    UPDATE <схема>.handlers_1c SET full_rebuild_is_required = true WHERE name = '<имя обработчика>';
+    UPDATE <схема>.handlers SET full_rebuild_is_required = true WHERE name = '<имя обработчика>';
 
 Тогда окно откроется с начала времён (`context.last_run_at` = EPOCH), а в `context.full_rebuild`
 придёт True. После успеха требование снимается и в `last_full_rebuild_dt` записывается время.
 
-Пересборку большой витрины стоит нарезать на блоки — объявив генератор `rebuild` (см. Handler1C):
+Пересборку большой витрины стоит нарезать на блоки — объявив генератор `rebuild` (см. Handler):
 между блоками тот же поток применяет накопившиеся изменения, и витрина не стоит холодной все те
 десятки минут, что идёт пересборка. Одним потоком, а не двумя: блок и инкремент тогда никогда не
 выполняются одновременно, и затирать друг друга им нечем.
@@ -101,20 +101,20 @@ from typing import Callable, Iterable, Iterator
 from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, Engine, Float,
                         func, insert, inspect, MetaData, or_, select, String, Table, text, update)
 
-from cdc_1c.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from cdc_1c.db_logs import _check_create_schema
-from cdc_1c.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
-from cdc_1c.name_mapper import NameMapper1C
-from cdc_1c.stop_signal import StopSignal, install_signal_handlers
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.db_logs import _check_create_schema
+from onecdc.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
+from onecdc.name_mapper import NameMapper
+from onecdc.stop_signal import StopSignal, install_signal_handlers
 # Реестр незавершённых merge переехал в свой модуль (им пользуется и репликатор). Имена
 # реэкспортируются: HandlerLoop прижимает к нему границу окна, а внешний код и тесты импортируют
 # WriteTracker отсюда с первых версий.
-from cdc_1c.write_tracker import (MERGE_ABANDONED_TTL, MERGE_HEARTBEAT_PERIOD, MERGE_HEARTBEAT_TTL, WRITES_TABLE,
+from onecdc.write_tracker import (MERGE_ABANDONED_TTL, MERGE_HEARTBEAT_PERIOD, MERGE_HEARTBEAT_TTL, WRITES_TABLE,
                                   WriteTracker, _writes_table)
 
 logger = get_logger(__name__)
 
-HANDLERS_TABLE = "handlers_1c"
+HANDLERS_TABLE = "onecdc_handlers"
 
 # Метка сигнала об изменении подписанной таблицы (см. _handlers_table). Вынесена в
 # константу: на неё смотрят и перенос со старого булева флага, и сам цикл.
@@ -143,7 +143,7 @@ IDLE_POLL = 1.0
 # поэтому без паузы сломанный обработчик повторялся бы каждый холостой цикл.
 RETRY_DELAY = 60.0
 
-# Как часто репликатор перечитывает подписки обработчиков (update_on) из handlers_1c. Меняются они
+# Как часто репликатор перечитывает подписки обработчиков (update_on) из handlers. Меняются они
 # только при перезапуске обработчика, а читать их на каждый сохранённый объект — лишние запросы:
 # при полной выгрузке это запрос на страницу.
 SUBSCRIPTIONS_TTL = 30.0
@@ -151,7 +151,7 @@ SUBSCRIPTIONS_TTL = 30.0
 
 # Начало времён: то, что приезжает в context.last_run_at, когда отметки прошлого прогона ещё нет
 # (первый запуск или запрошена пересборка). Заведомо раньше любого merged_on и при этом валидная
-# дата для всех поддерживаемых СУБД. В колонке handlers_1c.last_run_at на её месте NULL — там он
+# дата для всех поддерживаемых СУБД. В колонке onecdc_handlers.last_run_at на её месте NULL — там он
 # значит «ни разу не отрабатывал», и по нему цикл выбирает пересборку; в контекст этот NULL не
 # доходит, чтобы обработчику не приходилось разбирать None у себя в WHERE.
 EPOCH = datetime(1900, 1, 1)
@@ -179,18 +179,18 @@ class HandlerContext:
     last_run_at: datetime
     boundary: datetime
     # Витрину просят собрать заново: обработчик ещё ни разу не отрабатывал либо кто-то заказал
-    # пересборку (handlers_1c.full_rebuild_is_required). Окно при этом открыто с начала времён —
+    # пересборку (handlers.full_rebuild_is_required). Окно при этом открыто с начала времён —
     # обработчику, который считает только по нему, ничего специально делать не надо. Флаг нужен
     # тем, у кого пересборка идёт иначе: например, не одним merge, а по частям.
     full_rebuild: bool
     # Метка последнего блока, который пересборка успела завершить до перезапуска процесса (см.
-    # Handler1C.rebuild). None — начинаем с начала. Смысл метки известен только обработчику: он
+    # Handler.rebuild). None — начинаем с начала. Смысл метки известен только обработчику: он
     # сам нарезал блоки, он же и решает, какие из них пропустить.
     rebuild_from: str | None
     # Что привело к вызову. Только для логов: выбирать данные обязательно по окну.
     #
     # Точности тут немного, и это осознанно. Репликатор сообщает об изменении меткой времени в
-    # handlers_1c, а метка не несёт ни имени изменившейся таблицы, ни источника — иначе пришлось бы
+    # handlers, а метка не несёт ни имени изменившейся таблицы, ни источника — иначе пришлось бы
     # городить в таблице очередь событий вместо одной колонки. Поэтому objects — это весь ON
     # обработчика,
     # а sources — db_signal (изменение), startup (первый проход процесса) или full_rebuild (заказ
@@ -201,13 +201,13 @@ class HandlerContext:
     logger: object
 
 
-class Handler1C:
+class Handler:
     """
     Базовый класс обработчика. Наследоваться не обязательно — HandlerLoop достаточно `name`, `ON` и
     `handle` (годится и модуль, и функция), — но здесь лежит то, что иначе копируется из
     обработчика в обработчик.
 
-        class ZakazyKlientov(Handler1C):
+        class ZakazyKlientov(Handler):
             # имена ТАБЛИЦ в целевой БД (транслит), а не имена объектов 1С
             ON = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
 
@@ -219,11 +219,11 @@ class Handler1C:
 
     В HandlerLoop передаётся ЭКЗЕМПЛЯР, а не класс: так обработчик можно параметризовать
     конструктором (одна и та же логика на две схемы — два экземпляра). Но имя по умолчанию берётся от
-    класса и служит ключом состояния в handlers_1c, поэтому у параметризованных экземпляров оно
+    класса и служит ключом состояния в handlers, поэтому у параметризованных экземпляров оно
     обязано различаться — иначе они молча поделили бы одну отметку last_run_at на двоих.
 
     Состояние экземпляра — только кэш в пределах процесса (флаг «setup сделан», скомпилированные
-    выражения). Всё, что должно пережить перезапуск, живёт в handlers_1c.
+    выражения). Всё, что должно пережить перезапуск, живёт в handlers.
     """
 
     # Таблицы (транслит, как в БД), на изменения которых реагирует обработчик. Это же список
@@ -236,7 +236,7 @@ class Handler1C:
     # Не чаще раза в N секунд. Ограничитель для тяжёлых витрин: во время полной выгрузки сигналы
     # идут постранично, и без паузы инкремент конкурировал бы с самой выгрузкой за БД.
     MIN_INTERVAL: float = 0
-    # Имя (ключ в handlers_1c). None — имя класса. Переименование заводит новую строку состояния,
+    # Имя (ключ в handlers). None — имя класса. Переименование заводит новую строку состояния,
     # то есть первый прогон после переименования пойдёт с начала времён.
     NAME: str | None = None
 
@@ -345,10 +345,13 @@ class Handler1C:
 
 
 @dataclass(frozen=True)
-class Handler:
+class _ResolvedHandler:
     """
-    Нормализованный обработчик: то, с чем работает HandlerLoop, независимо от того, чем он был объявлен
-    (экземпляр Handler1C, модуль или функция). Собирается функцией as_handler.
+    Нормализованный обработчик: то, с чем работает HandlerLoop, независимо от того, чем он был
+    объявлен (экземпляр Handler, модуль или функция). Собирается функцией as_handler.
+
+    Имя с подчёркиванием, потому что снаружи этот класс не нужен: пользователь объявляет
+    обработчика, а не собирает его нормализованный вид.
     """
 
     name: str
@@ -357,20 +360,20 @@ class Handler:
     min_interval: float
     handle: Callable[[HandlerContext], None]
     setup: Callable[[HandlerContext], None] | None = None
-    # Пересборка по блокам (см. Handler1C.rebuild). Не объявлена — подставляется обёртка вокруг
+    # Пересборка по блокам (см. Handler.rebuild). Не объявлена — подставляется обёртка вокруг
     # handle: один блок, прежнее поведение.
     rebuild: Callable[[HandlerContext], object] | None = None
 
 
-def as_handler(obj) -> Handler:
+def as_handler(obj) -> _ResolvedHandler:
     """
-    Приводит объявленный пользователем обработчик к Handler.
+    Приводит объявленный пользователем обработчик к _ResolvedHandler.
 
-    Принимается всё, у чего есть `handle` и непустой `ON`: экземпляр Handler1C, модуль
+    Принимается всё, у чего есть `handle` и непустой `ON`: экземпляр Handler, модуль
     (`from handlers import zakazy` → модуль целиком) или функция с теми же атрибутами. Нужны
     только имя, набор объектов и вызываемое — обязательного базового класса нет.
     """
-    if isinstance(obj, Handler):
+    if isinstance(obj, _ResolvedHandler):
         return obj
     if isinstance(obj, type):
         # Класс вместо экземпляра — типичная опечатка (`ZakazyKlientov` вместо `ZakazyKlientov()`).
@@ -395,7 +398,7 @@ def as_handler(obj) -> Handler:
             raise ValueError(
                 f"Handler {_handler_name(obj)}: ON must list TABLE names as they appear in the "
                 f"database, not 1C object names. Replace {name!r} with "
-                f"{NameMapper1C().map_object_name(name)!r}")
+                f"{NameMapper().map_object_name(name)!r}")
 
     setup = getattr(obj, 'setup', None)
     rebuild = getattr(obj, 'rebuild', None)
@@ -404,15 +407,15 @@ def as_handler(obj) -> Handler:
         def rebuild(context, _handle=handle):
             _handle(context)
             yield 'all'
-    return Handler(name=_handler_name(obj), on=on,
-                   on_full_load=bool(getattr(obj, 'ON_FULL_LOAD', True)),
-                   min_interval=float(getattr(obj, 'MIN_INTERVAL', 0)),
-                   handle=handle, setup=setup if callable(setup) else None,
-                   rebuild=rebuild)
+    return _ResolvedHandler(name=_handler_name(obj), on=on,
+                            on_full_load=bool(getattr(obj, 'ON_FULL_LOAD', True)),
+                            min_interval=float(getattr(obj, 'MIN_INTERVAL', 0)),
+                            handle=handle, setup=setup if callable(setup) else None,
+                            rebuild=rebuild)
 
 
 def _handler_name(obj) -> str:
-    """Имя обработчика: NAME → .name (Handler1C) → имя модуля/функции без пути пакета."""
+    """Имя обработчика: NAME → .name (Handler) → имя модуля/функции без пути пакета."""
     name = getattr(obj, 'NAME', None) or getattr(obj, 'name', None)
     if isinstance(name, str) and name:
         return name
@@ -446,12 +449,12 @@ def _handlers_table(metadata: MetaData, schema_name: str | None) -> Table:
         # _save_success): обработчик будет вызван ещё раз.
         Column(UPDATE_REQUESTED_FIELD, DateTime, nullable=True),
         # Заказ полной пересборки витрины — руками или автоматически (см. request_full_rebuild) —
-        # и метрики последней пересборки. Названы по образцу metadata_objects_1c, где так же
+        # и метрики последней пересборки. Названы по образцу onecdc_metadata_objects, где так же
         # устроена полная выгрузка объекта.
         Column("full_rebuild_is_required", Boolean, nullable=False, server_default=text('false')),
         Column("last_full_rebuild_dt", DateTime, nullable=True),
         Column("last_full_rebuild_minutes", Float, nullable=True),
-        # Метка последнего ЗАВЕРШЁННОГО блока идущей пересборки (см. Handler1C.rebuild). Нужна,
+        # Метка последнего ЗАВЕРШЁННОГО блока идущей пересборки (см. Handler.rebuild). Нужна,
         # чтобы пересборка на десятки минут переживала перезапуск процесса: генератор блоков живёт
         # в памяти и рестарта не переживает, а метка лежит в БД и возвращается обработчику в
         # context.rebuild_from. NULL — пересборка не идёт либо не сделала ни одного блока.
@@ -509,7 +512,7 @@ class HandlerSignals:
     """
     Сторона РЕПЛИКАТОРА: как он вызывает обработчиков, не зная о них ничего.
 
-    Обработчик при старте объявляет себя в handlers_1c и перечисляет в update_on таблицы, на
+    Обработчик при старте объявляет себя в handlers и перечисляет в update_on таблицы, на
     которые подписан. Репликатор перечитывает эту таблицу и, увидев изменение подписанной таблицы,
     просто ставит метку update_requested_at. Дальше обработчик сам заметит её своим циклом.
 
@@ -621,7 +624,7 @@ class HandlerLoop:
     два обработчика, пишущие в одну целевую таблицу, теперь могут делать это одновременно. Если
     витрина строится поверх другой витрины, полагаться на «сначала базовая» нельзя.
 
-    Сигнал — метка update_requested_at в handlers_1c, а не очередь событий. Пока обработчик
+    Сигнал — метка update_requested_at в handlers, а не очередь событий. Пока обработчик
     считает, прилетевшие страницы поднимают тот же флаг ещё раз, а не выстраиваются в очередь из
     тысячи вызовов. Поэтому репликатор может сигналить на каждую страницу полной выгрузки: витрина
     начинает наполняться после первой же и догоняет выгрузку с задержкой в один свой прогон.
@@ -632,13 +635,13 @@ class HandlerLoop:
     поднимают флаг.
 
     Планов обмена может быть сколько угодно: все репликаторы поднимают тот же флаг и публикуют свои
-    незавершённые merge в общую writes_in_process_1c, поэтому обработчику безразлично, кто его кормит.
+    незавершённые merge в общую onecdc_writes_in_process, поэтому обработчику безразлично, кто его кормит.
     """
 
     def __init__(self, engine: Engine, schema: str | None, handler,
                  temp_schema: str | None = None,
                  write_tracker: "WriteTracker | None" = None):
-        # Перехват SIGTERM/SIGINT — по той же причине, что у Replicator1C: run_forever уходит в
+        # Перехват SIGTERM/SIGINT — по той же причине, что у Replicator: run_forever уходит в
         # пул потоков, а поставить перехват можно только из главного (см. stop_signal).
         install_signal_handlers(quiet=False)
         # Объявление разбирается и проверяется ДО первого обращения к БД: кривое (нет handle,
@@ -651,10 +654,10 @@ class HandlerLoop:
         self.schema_name = _check_create_schema(engine, schema)
         self.schema = schema
         # Схема промежуточных таблиц dbmerge — обработчику она нужна затем же, зачем репликатору
-        # (см. Replicator1C): держать их в стороне от таблиц с данными. Сам цикл её не использует,
+        # (см. Replicator): держать их в стороне от таблиц с данными. Сам цикл её не использует,
         # он лишь передаёт её обработчику в контексте.
         self.temp_schema = temp_schema
-        # Реестр незавершённых merge. По умолчанию — общий, из таблицы writes_in_process_1c
+        # Реестр незавершённых merge. По умолчанию — общий, из таблицы onecdc_writes_in_process
         # (см. свойство writes); подменяется только в тестах.
         self._writes = write_tracker
 
@@ -684,7 +687,7 @@ class HandlerLoop:
         """
         Реестр незавершённых merge, по которому считается верхняя граница окна.
 
-        По умолчанию — общий, из таблицы writes_in_process_1c: обработчик обязан видеть merge ЛЮБОГО
+        По умолчанию — общий, из таблицы onecdc_writes_in_process: обработчик обязан видеть merge ЛЮБОГО
         репликатора, в том числе работающего в другом процессе или контейнере. Его незакоммиченные
         строки имеют merged_on в прошлом, и граница, взятая как «сейчас», их бы перешагнула.
         Подменяется только в тестах.
@@ -695,11 +698,11 @@ class HandlerLoop:
 
     def _register_handler(self) -> None:
         """
-        Объявляет себя в handlers_1c: заводит строку состояния и — главное — записывает в update_on
+        Объявляет себя в handlers: заводит строку состояния и — главное — записывает в update_on
         список таблиц, на которые подписан.
 
         update_on пишется на КАЖДОМ старте, а не только при первой регистрации: подписка живёт в
-        коде обработчика (Handler1C.ON), и после её правки таблица обязана догнать код. Читает
+        коде обработчика (Handler.ON), и после её правки таблица обязана догнать код. Читает
         update_on репликатор — так ему не нужны ни объекты обработчиков, ни их импорт, и обработчик
         может работать в другом процессе или контейнере.
 
@@ -725,10 +728,10 @@ class HandlerLoop:
 
     def run_forever(self, poll_interval: float = IDLE_POLL) -> None:
         """
-        Блокирующий цикл обработчика — та же форма, что у Replicator1C.run_forever: где ему
+        Блокирующий цикл обработчика — та же форма, что у Replicator.run_forever: где ему
         крутиться, решает точка входа, а не библиотека.
 
-        Опрос, а не ожидание события: сигнал приходит флагом в handlers_1c, поднять его может любой
+        Опрос, а не ожидание события: сигнал приходит флагом в handlers, поднять его может любой
         процесс, и подписаться на такое изменение нечем. Заодно опрос сам подхватывает всё
         остальное, что меняется в таблице снаружи, — enabled, заказ пересборки, обнулённую отметку.
 
@@ -820,7 +823,7 @@ class HandlerLoop:
         retry_delay = 0.0
         # Всё, что может упасть, — внутри try, включая расчёт границы. Иначе отметки, снятые выше,
         # пропадут вместе с исключением: обработчик перестанет вставать в очередь до следующего
-        # изменения, а в handlers_1c не появится last_error, и со стороны БД он будет выглядеть
+        # изменения, а в handlers не появится last_error, и со стороны БД он будет выглядеть
         # исправным. Так уже случалось на сравнении границы с last_run_at.
         window_start = last_run_at
 
@@ -880,7 +883,7 @@ class HandlerLoop:
             last_run_at=window_start, boundary=boundary,
             objects=frozenset(objects), sources=frozenset(sources), full_rebuild=full_rebuild,
             rebuild_from=rebuild_from or None,
-            logger=get_logger(f'cdc_1c.handler.{self.name}'))
+            logger=get_logger(f'onecdc.handler.{self.name}'))
 
     def _prepare(self, context: HandlerContext) -> None:
         """Разовая подготовка (DDL вьюшек и целевых таблиц) — до первого handle и только один раз
@@ -897,7 +900,7 @@ class HandlerLoop:
 
     def _run_rebuild(self, last_run_at: datetime | None, cursor: str | None) -> None:
         """
-        Полная пересборка витрины блоками, которые нарезал сам обработчик (Handler1C.rebuild).
+        Полная пересборка витрины блоками, которые нарезал сам обработчик (Handler.rebuild).
         Между блоками применяются накопившиеся изменения — витрина не стоит холодной все те
         десятки минут, что идёт пересборка.
 

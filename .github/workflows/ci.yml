@@ -22,7 +22,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: cdc_1c
+          POSTGRES_DB: onecdc
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -40,7 +40,7 @@ jobs:
       # Postgres нужен всем остальным — его и поднимает services выше.
       - run: uv run pytest -q
         env:
-          CDC1C_TEST_DB_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/cdc_1c
+          ONECDC_TEST_DB_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc
 
   publish:
     # Публикация на PyPI по git-тегу vX.Y.Z. Требует настроенного Trusted Publishing на стороне PyPI

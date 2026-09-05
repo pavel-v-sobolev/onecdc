@@ -2,17 +2,17 @@ import requests
 
 import xmltodict
 
-from cdc_1c.data_reader import DataReader1C
-from cdc_1c.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader1C, resolve_timeout
-from cdc_1c.common_functions import format_bytes, raise_for_status
-from cdc_1c.logging_config import get_logger
+from onecdc.data_reader import DataReader
+from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, resolve_timeout
+from onecdc.common_functions import format_bytes, raise_for_status
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-class ChangeReader1C(DataReader1C):
+class ChangeReader(DataReader):
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
-                 metadata: MetadataReader1C, odata_auth: tuple[str, str] | None = None,
+                 metadata: MetadataReader, odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None):
         super().__init__(odata_url, metadata, odata_auth, request_timeout)
         self.exchange_name = exchange_name

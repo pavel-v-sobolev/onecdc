@@ -9,10 +9,10 @@ import logging
 import pytest
 import requests
 
-from cdc_1c import Replicator1C
-from cdc_1c.common_functions import MAX_ERROR_BODY_CHARS, extract_error_text, raise_for_status
-from cdc_1c.replicator import _log_failure
-from cdc_1c.replicator import DEFAULT_MAX_BACKOFF
+from onecdc import Replicator
+from onecdc.common_functions import MAX_ERROR_BODY_CHARS, extract_error_text, raise_for_status
+from onecdc.replicator import _log_failure
+from onecdc.replicator import DEFAULT_MAX_BACKOFF
 from conftest import TEST_QUEUE_GUID
 
 
@@ -112,7 +112,7 @@ def test_log_failure_http_error_without_traceback_and_text(db, caplog):
     # Описание от 1С уже вывел raise_for_status строкой выше — второй раз не повторяем,
     # и traceback (внутренности requests) не тащим.
     exc = requests.HTTPError('1C request failed: 403 Forbidden: Ведутся технические работы')
-    with caplog.at_level(logging.ERROR, logger='cdc_1c.replicator'):
+    with caplog.at_level(logging.ERROR, logger='onecdc.replicator'):
         _log_failure(exc, "Replication cycle failed, retry in %ss", 1800.0)
 
     record = caplog.records[-1]
@@ -124,7 +124,7 @@ def test_log_failure_http_error_without_traceback_and_text(db, caplog):
 
 def test_log_failure_connection_error_keeps_text(db, caplog):
     # Таймаут/обрыв нигде не логируется до этого — текст нужен, traceback по-прежнему нет.
-    with caplog.at_level(logging.ERROR, logger='cdc_1c.replicator'):
+    with caplog.at_level(logging.ERROR, logger='onecdc.replicator'):
         _log_failure(requests.ConnectTimeout('connect timed out'), "Cycle failed")
 
     record = caplog.records[-1]
@@ -134,7 +134,7 @@ def test_log_failure_connection_error_keeps_text(db, caplog):
 
 def test_log_failure_keeps_traceback_for_code_errors(db, caplog):
     # Не ошибка обмена — похоже на баг в коде, traceback оставляем.
-    with caplog.at_level(logging.ERROR, logger='cdc_1c.replicator'):
+    with caplog.at_level(logging.ERROR, logger='onecdc.replicator'):
         try:
             raise ValueError('boom')
         except ValueError as exc:
@@ -148,7 +148,7 @@ def test_raise_for_status_passes_ok_response(db):
 
 
 def _replicator(db):
-    return Replicator1C(
+    return Replicator(
         odata_url='http://1c/odata',
         odata_auth=('u', 'p'),
         exchange_name='X',
@@ -168,7 +168,7 @@ def _run_and_collect_delays(db, monkeypatch, error: Exception, waits: int, inter
         raise error
 
     monkeypatch.setattr(repl, 'run_once', fake_run_once)
-    monkeypatch.setattr('cdc_1c.stop_signal.StopSignal.wait', lambda self, d: delays.append(d))
+    monkeypatch.setattr('onecdc.stop_signal.StopSignal.wait', lambda self, d: delays.append(d))
     repl.run_forever(interval=interval, max_iterations=waits + 1)
     return delays
 
@@ -207,7 +207,7 @@ def test_backoff_resets_after_success(db, monkeypatch):
 
     monkeypatch.setattr(repl, 'run_once', flaky_run_once)
     monkeypatch.setattr(repl, '_dispatch_full_loads', lambda executor: None)
-    monkeypatch.setattr('cdc_1c.stop_signal.StopSignal.wait', lambda self, d: delays.append(d))
+    monkeypatch.setattr('onecdc.stop_signal.StopSignal.wait', lambda self, d: delays.append(d))
     repl.run_forever(interval=60.0, max_iterations=4)
 
     assert delays == [120.0, 240.0, 60.0]

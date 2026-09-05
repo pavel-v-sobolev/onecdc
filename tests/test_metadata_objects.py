@@ -1,5 +1,5 @@
 """
-Оффлайн-тесты реестра объектов metadata_objects_1c (внутри MetadataReader1C).
+Оффлайн-тесты реестра объектов onecdc_metadata_objects (внутри MetadataReader).
 Проверяют синхронизацию с $metadata (dbmerge delete — пропавшие объекты удаляются из реестра)
 и флаги полной выгрузки (require/list/mark). Ключ реестра — полное имя объекта (object_full_name).
 Без живой 1С, но с локальным PostgreSQL (см. conftest.py).
@@ -7,11 +7,11 @@
 
 from sqlalchemy import select
 
-from cdc_1c.metadata_reader import MetadataReader1C
+from onecdc.metadata_reader import MetadataReader
 
 
 def _reader(db):
-    return MetadataReader1C("http://x", engine=db.engine, schema=db.schema)
+    return MetadataReader("http://x", engine=db.engine, schema=db.schema)
 
 
 def _row(reader, object_full_name):

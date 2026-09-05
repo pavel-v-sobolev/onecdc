@@ -13,14 +13,14 @@ import logging
 
 from sqlalchemy import create_engine
 
-from cdc_1c import ChangeReader1C, DBWriter1C, MetadataReader1C, NameMapper1C, Replicator1C
+from onecdc import ChangeReader, DBWriter, MetadataReader, NameMapper, Replicator
 
 ODATA_URL = "http://192.168.56.101/trade_demo/odata/standard.odata"
 ODATA_AUTH = ('odata_user', 'secret')
 EXCHANGE_NAME = 'ДляODATA'
 QUEUE_GUID = 'a9bc23c5-3689-11f1-926c-0800270bc6cb'
-DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/cdc_1c"
-DB_SCHEMA = 'cdc_1c_trade_demo'
+DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc"
+DB_SCHEMA = 'onecdc_trade_demo'
 
 
 def main() -> None:
@@ -28,9 +28,9 @@ def main() -> None:
     engine = create_engine(DB_URL)
 
     # Компоненты по отдельности — чтобы смотреть промежуточный результат каждого.
-    metadata = MetadataReader1C(ODATA_URL, odata_auth=ODATA_AUTH, engine=engine, schema=DB_SCHEMA)
-    changes = ChangeReader1C(ODATA_URL, EXCHANGE_NAME, QUEUE_GUID, metadata, odata_auth=ODATA_AUTH)
-    writer = DBWriter1C(engine=engine, name_mapper=NameMapper1C(), schema=DB_SCHEMA)
+    metadata = MetadataReader(ODATA_URL, odata_auth=ODATA_AUTH, engine=engine, schema=DB_SCHEMA)
+    changes = ChangeReader(ODATA_URL, EXCHANGE_NAME, QUEUE_GUID, metadata, odata_auth=ODATA_AUTH)
+    writer = DBWriter(engine=engine, name_mapper=NameMapper(), schema=DB_SCHEMA)
 
     changes.read_changes()
     for object_name, data_object in changes.items():
@@ -41,9 +41,9 @@ def main() -> None:
     # changes.notify_changes_received()
 
     # То же самое целиком, оркестратором.
-    replicator = Replicator1C(odata_url=ODATA_URL, odata_auth=ODATA_AUTH,
-                              exchange_name=EXCHANGE_NAME, queue_guid=QUEUE_GUID,
-                              engine=engine, db_schema=DB_SCHEMA)
+    replicator = Replicator(odata_url=ODATA_URL, odata_auth=ODATA_AUTH,
+                            exchange_name=EXCHANGE_NAME, queue_guid=QUEUE_GUID,
+                            engine=engine, db_schema=DB_SCHEMA)
     print(replicator.list_objects())
     replicator.run_once(notify_changes=False)
 

@@ -9,13 +9,13 @@ import uuid
 
 import xmltodict
 
-from cdc_1c.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_VALUE_SUFFIX,
+from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_VALUE_SUFFIX,
                                     ENTITY_TYPES, EXT_DIMENSIONS_FIELDS, REGISTER_TYPES,
-                                    SUPPORTED_TYPES, MetadataReader1C, resolve_timeout)
-from cdc_1c.name_mapper import NameMapper1C
-from cdc_1c.common_functions import (format_bytes, odata_datetime_value,
+                                    SUPPORTED_TYPES, MetadataReader, resolve_timeout)
+from onecdc.name_mapper import NameMapper
+from onecdc.common_functions import (format_bytes, odata_datetime_value,
                                      parse_object_full_name, raise_for_status)
-from cdc_1c.logging_config import get_logger
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -42,7 +42,7 @@ DELETION_MARK_FIELD = 'DeletionMark'
 # в итогах 1С, поэтому не должна участвовать и в наших расчетах.
 ACTIVE_FIELD = 'Active'
 # Поле 1С «версия данных» у ссылочных объектов. Меняется при КАЖДОЙ записи объекта, даже если
-# ни один реквизит не изменился, поэтому в сравнении строк не участвует (см. DBWriter1C.save).
+# ни один реквизит не изменился, поэтому в сравнении строк не участвует (см. DBWriter.save).
 #
 # Имён два, потому что документация и реальный ответ расходятся: «Приложение 12. Описание
 # сущностей, предоставляемых через стандартный интерфейс OData» описывает свойство как Version
@@ -160,13 +160,13 @@ def _odata_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-class DataObject1C(UserDict):
+class DataObject(UserDict):
     def __init__(self, metadata_obj=None, records: list = []):
         super().__init__()
-        self.metadata_obj = metadata_obj  # MetadataObject1C
-        # Табличные части этого объекта: {имя_части: DataObject1C}. Заполняются при чтении
+        self.metadata_obj = metadata_obj  # MetadataObject
+        # Табличные части этого объекта: {имя_части: DataObject}. Заполняются при чтении
         # (_get_entity_records связывает владельца с его ТЧ), используются to_nested_records.
-        self.table_parts: dict[str, DataObject1C] = {}
+        self.table_parts: dict[str, DataObject] = {}
         self.data_length = 0
         self.add_records(records)
 
@@ -205,7 +205,7 @@ class DataObject1C(UserDict):
             return [dict(zip(out_keys, (_json_safe(v) for v in row))) for row in zip(*cols)]
         return [dict(zip(out_keys, row)) for row in zip(*cols)]
 
-    def group_by(self, key_field: str = 'Ref_Key', name_mapper: NameMapper1C | None = None,
+    def group_by(self, key_field: str = 'Ref_Key', name_mapper: NameMapper | None = None,
                  json_safe: bool = False, skip_deleted: bool = False) -> dict[Any, list[dict]]:
         """
         Группирует записи объекта в {значение key_field: [записи]} одним проходом (hash group-by).
@@ -227,7 +227,7 @@ class DataObject1C(UserDict):
             grouped.setdefault(row.get(key), []).append(row)
         return grouped
 
-    def to_nested_records(self, name_mapper: NameMapper1C | None = None,
+    def to_nested_records(self, name_mapper: NameMapper | None = None,
                           json_safe: bool = False) -> list[dict]:
         """
         Записи этого объекта (list of dict) с вложенными табличными частями — например, чтобы
@@ -276,8 +276,8 @@ def _composite_primitive_fields(raw: dict, metadata_obj) -> dict:
     return primitives
 
 
-class DataReader1C(UserDict):
-    def __init__(self, odata_url: str, metadata: MetadataReader1C,
+class DataReader(UserDict):
+    def __init__(self, odata_url: str, metadata: MetadataReader,
                  odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None):
         super().__init__()
@@ -289,7 +289,7 @@ class DataReader1C(UserDict):
         self.exchange_message_no = None  
 
         # Размер последнего ответа 1С в байтах — по нему вызывающий подбирает размер страницы
-        # (вес одной entry у разных объектов различается на порядки, см. Replicator1C.full_load).
+        # (вес одной entry у разных объектов различается на порядки, см. Replicator.full_load).
         self.last_response_bytes = 0
 
         # Объекты, ради неизвестного поля которых метаданные уже перечитывались (см. _get_record_fields).
@@ -317,7 +317,7 @@ class DataReader1C(UserDict):
         у регистра, измерение `*_Key` у независимого регистра), а по ссылке 1С не даёт ни сравнения,
         ни осмысленной сортировки — см. DESIGN.md, «Почему страницы берутся только через $skip».
         Цену глубокого $skip платит не эта функция: глубокий объект вызывающий режет окнами по
-        периоду и в каждом окне начинает смещение заново (см. Replicator1C._load_by_windows).
+        периоду и в каждом окне начинает смещение заново (см. Replicator._load_by_windows).
 
         key_fields (порядок = порядок сортировки):
         - справочник/документ: ['Ref_Key'];
@@ -348,7 +348,7 @@ class DataReader1C(UserDict):
         #
         # Сам репликатор так табличные части НЕ грузит: они приезжают вложенными в entry своего
         # документа или справочника, то есть целой группой, и страницы владельца их не режут
-        # (см. Replicator1C.run_once, list_objects). Отдельная сущность у табличной части в OData
+        # (см. Replicator.run_once, list_objects). Отдельная сущность у табличной части в OData
         # всё же есть, и full_load, если его натравить прямо на неё, будет листать её этим самым
         # Ref_Key — ради такого случая ничья и разрешается. Измерено: 87 строк, страницы по 2,
         # $orderby=Ref_Key — 4 дубля и 5 потерянных строк; с LineNumber — ровно 87.
@@ -417,7 +417,7 @@ class DataReader1C(UserDict):
         | `Condition` по `Recorder` строкой  | **200 и НОЛЬ строк** (молча врёт)              |
 
         Отсюда курсор: `Period gt <последний период>` плюс `Top`. Ни смещения, ни сортировки нет,
-        поэтому хвостовой неполный период отбрасывает вызывающий (см. Replicator1C._load_pages) —
+        поэтому хвостовой неполный период отбрасывает вызывающий (см. Replicator._load_pages) —
         иначе движения одной секунды разорвались бы между страницами.
 
         condition — дополнительное условие (диапазон дат), объединяется с курсором по AND.
@@ -604,7 +604,7 @@ class DataReader1C(UserDict):
         # отчитывался бы изменёнными строками, хотя в 1С ничего не менялось.
         # Выравниваем на НУЛЕ, а не на NULL: у ресурса регистра пустого значения не бывает вовсе,
         # пустой ресурс в 1С — это ноль, и набор записей говорит ровно это. NULL в этих колонках
-        # остаётся признаком погашенной строки (см. DBWriter1C._resource_reset_values).
+        # остаётся признаком погашенной строки (см. DBWriter._resource_reset_values).
         for field, type_name in metadata_obj.items():
             if type_name in NUMERIC_TYPES and record.get(field) is None:
                 record[field] = 0
@@ -772,7 +772,7 @@ class DataReader1C(UserDict):
         """
         Самая ранняя (newest=False) или самая поздняя (newest=True) дата объекта — одной строкой:
         `$top=1` с сортировкой по этому полю. Нужна, чтобы обойти полную выгрузку окнами по
-        периоду и не гонять `$skip` по всей таблице (см. Replicator1C.full_load).
+        периоду и не гонять `$skip` по всей таблице (см. Replicator.full_load).
 
         Запрос дешёвый именно потому, что поле даты у документа входит в индекс: 1С отдаёт первую
         строку упорядоченной выборки, а не сортирует всё.
@@ -783,7 +783,7 @@ class DataReader1C(UserDict):
         `$orderby=Period desc` и запрос без сортировки отдают одну и ту же первую entry. Так что
         «первая строка упорядоченной выборки» там не значит ничего, и доставать дату из вложенного
         RecordSet, чтобы «починить» этот метод, НЕЛЬЗЯ — вернётся не граница, а произвольное
-        значение. Кому этот метод годится, решает Replicator1C._supports_date_bounds.
+        значение. Кому этот метод годится, решает Replicator._supports_date_bounds.
 
         None — объект пуст (или пуст заданный диапазон), а также если в первой строке даты не
         оказалось (тогда пишем warning): границу взять неоткуда.
@@ -817,7 +817,7 @@ class DataReader1C(UserDict):
         """
         Разбирает entry ответа 1С в объекты reader. Возвращает счётчик entry по объектам —
         вызывающий логирует итог одной строкой: entry в ответе бывают тысячами, и лог на каждую
-        забивает вывод (см. read_object / ChangeReader1C.read_changes).
+        забивает вывод (см. read_object / ChangeReader.read_changes).
 
         Объекты неподдерживаемых классов (см. SUPPORTED_TYPES) пропускаются с предупреждением в
         логе: пакет изменений подтверждается целиком, поэтому такие изменения 1С больше не пришлёт —
@@ -869,7 +869,7 @@ class DataReader1C(UserDict):
                 self[object_name].add_records(new_records)
             else:
                 metadata_obj = self.metadata.get(object_name)
-                self[object_name] = DataObject1C(metadata_obj=metadata_obj, records=new_records)
+                self[object_name] = DataObject(metadata_obj=metadata_obj, records=new_records)
 
     @staticmethod
     def _convert_value(value: Any, type_name: str, context: str = '') -> Any:

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Две раскладки одного образа:
 #   смонтирован /config со своим runner.py — запускается он (обработчики, расписания, свой pool_size);
-#   не смонтирован — запускается `cdc-1c`, то есть репликатор, настроенный переменными CDC1C_*.
+#   не смонтирован — запускается `onecdc`, то есть репликатор, настроенный переменными ONECDC_*.
 set -e
 
 # Аргументы docker run имеют приоритет: `docker run image python -c ...` должен работать.
@@ -9,7 +9,7 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
-RUNNER="${CDC1C_RUNNER:-/config/runner.py}"
+RUNNER="${ONECDC_RUNNER:-/config/runner.py}"
 
 # exec обязателен: python должен остаться PID 1, иначе SIGTERM от `docker stop` не дойдёт
 # до перехвата в stop_signal.py — циклы не дорабатывают итерацию, а незавершённые merge
@@ -20,4 +20,4 @@ if [ -f "$RUNNER" ]; then
     exec python "$RUNNER"
 fi
 
-exec cdc-1c
+exec onecdc

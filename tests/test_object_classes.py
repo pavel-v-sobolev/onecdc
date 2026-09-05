@@ -10,10 +10,10 @@ import logging
 
 import pytest
 
-from cdc_1c import DataReader1C, MetadataReader1C
-from cdc_1c.data_reader import IS_DELETED_OR_EMPTY_FIELD
-from cdc_1c.db_writer import save_order_key
-from cdc_1c.metadata_reader import MetadataObject1C
+from onecdc import DataReader, MetadataReader
+from onecdc.data_reader import IS_DELETED_OR_EMPTY_FIELD
+from onecdc.db_writer import save_order_key
+from onecdc.metadata_reader import MetadataObject
 
 REF = "5e51e8e9-6821-11ec-a232-00155de3390c"
 
@@ -23,14 +23,14 @@ def _entry(object_full_name: str, properties: dict) -> dict:
             "content": {"m:properties": properties}}
 
 
-def _reader(*objects: str) -> DataReader1C:
-    metadata = MetadataReader1C(odata_url="http://fake")
+def _reader(*objects: str) -> DataReader:
+    metadata = MetadataReader(odata_url="http://fake")
     for name in objects:
-        metadata[name] = MetadataObject1C(
+        metadata[name] = MetadataObject(
             name, {"Ref_Key": "Guid", "Description": "String", "DeletionMark": "Boolean"},
             {"Ref_Key": "Guid"})
     metadata.is_loaded = True
-    reader = DataReader1C(odata_url="http://fake", metadata=metadata)
+    reader = DataReader(odata_url="http://fake", metadata=metadata)
     reader.exchange_message_no = 7
     return reader
 
@@ -57,14 +57,14 @@ def test_accounting_register_is_parsed_like_accumulation_register(caplog):
     # Регистр бухгалтерии в OData устроен как регистраторный регистр накопления: Recorder на уровне
     # entry + коллекция RecordSet, поэтому разбирается тем же кодом.
     name = "AccountingRegister_Hozraschetnyi"
-    metadata = MetadataReader1C(odata_url="http://fake")
-    metadata[name] = MetadataObject1C(
+    metadata = MetadataReader(odata_url="http://fake")
+    metadata[name] = MetadataObject(
         name, {"Recorder": "Guid", "Recorder_Type": "String", "LineNumber": "Int64",
                "AccountDr_Key": "Guid", "AccountCr_Key": "Guid", "Summa": "Double"},
         {"Recorder": "Guid", "LineNumber": "Int64", "Recorder_Type": "String"},
         ["Recorder", "Recorder_Type"])
     metadata.is_loaded = True
-    reader = DataReader1C(odata_url="http://fake", metadata=metadata)
+    reader = DataReader(odata_url="http://fake", metadata=metadata)
     reader.exchange_message_no = 7
 
     with caplog.at_level(logging.ERROR):

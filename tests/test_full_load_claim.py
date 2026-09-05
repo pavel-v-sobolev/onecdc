@@ -1,8 +1,8 @@
 """
 Оффлайн-тесты межпроцессного захвата объекта под полную выгрузку (full_load_claim).
 
-Два процесса изображаются двумя экземплярами Replicator1C над одной базой: множества занятых
-объектов в памяти у них разные, поэтому развести их может только отметка в metadata_objects_1c.
+Два процесса изображаются двумя экземплярами Replicator над одной базой: множества занятых
+объектов в памяти у них разные, поэтому развести их может только отметка в onecdc_metadata_objects.
 """
 
 import os
@@ -10,20 +10,20 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, update
 
-from cdc_1c.full_load_claim import (CLAIM_HEARTBEAT_PERIOD, CLAIM_HEARTBEAT_RETRY_PERIOD,
+from onecdc.full_load_claim import (CLAIM_HEARTBEAT_PERIOD, CLAIM_HEARTBEAT_RETRY_PERIOD,
                                     CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD, OWNER_FIELD)
-from cdc_1c.metadata_reader import MetadataObject1C
-from cdc_1c.replicator import Replicator1C
+from onecdc.metadata_reader import MetadataObject
+from onecdc.replicator import Replicator
 from conftest import TEST_QUEUE_GUID
 
 OBJECT = "Catalog_X"
 
 
 def _replicator(db):
-    rep = Replicator1C(odata_url="http://x", odata_auth=None, exchange_name="E",
-                       queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
+    rep = Replicator(odata_url="http://x", odata_auth=None, exchange_name="E",
+                     queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
     rep.metadata.is_loaded = True
-    rep.metadata[OBJECT] = MetadataObject1C(OBJECT, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
+    rep.metadata[OBJECT] = MetadataObject(OBJECT, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
     # Реестр объектов заводит синхронизация метаданных — в тестах зовём её напрямую, без сети.
     rep.metadata._sync_objects([OBJECT])
     return rep

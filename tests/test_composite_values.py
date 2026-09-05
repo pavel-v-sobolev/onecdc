@@ -12,8 +12,8 @@
 
 import uuid
 
-from cdc_1c.data_reader import DataReader1C
-from cdc_1c.metadata_reader import COMPOSITE_VALUE_SUFFIX, MetadataObject1C, MetadataReader1C
+from onecdc.data_reader import DataReader
+from onecdc.metadata_reader import COMPOSITE_VALUE_SUFFIX, MetadataObject, MetadataReader
 
 OBJ = "Catalog_Товары_ДополнительныеРеквизиты"
 REF = "621d8c1b-e663-11df-aebd-0015e9b8c48d"
@@ -23,11 +23,11 @@ _FIELDS = {"Ref_Key": "Guid", "LineNumber": "Int64", "Значение": "Guid",
 _PRIMARY_KEY = {"Ref_Key": "Guid", "LineNumber": "Int64"}
 
 
-def _reader() -> DataReader1C:
-    metadata = MetadataReader1C(odata_url="http://fake")
-    metadata[OBJ] = MetadataObject1C(OBJ, dict(_FIELDS), dict(_PRIMARY_KEY))
+def _reader() -> DataReader:
+    metadata = MetadataReader(odata_url="http://fake")
+    metadata[OBJ] = MetadataObject(OBJ, dict(_FIELDS), dict(_PRIMARY_KEY))
     metadata.is_loaded = True
-    reader = DataReader1C(odata_url="http://fake", metadata=metadata)
+    reader = DataReader(odata_url="http://fake", metadata=metadata)
     reader.exchange_message_no = 1
     return reader
 
@@ -57,11 +57,11 @@ def test_primitive_value_goes_to_sibling_column():
 def test_unconvertible_value_becomes_null_instead_of_breaking_the_batch():
     # Поле объявлено ссылкой, парного _Type нет, значение не guid — молча ронять загрузку объекта
     # нельзя: пишем NULL, а в логе остаётся объект, поле и значение.
-    metadata = MetadataReader1C(odata_url="http://fake")
-    metadata[OBJ] = MetadataObject1C(OBJ, {"Ref_Key": "Guid", "Значение": "Guid"},
-                                     {"Ref_Key": "Guid"})
+    metadata = MetadataReader(odata_url="http://fake")
+    metadata[OBJ] = MetadataObject(OBJ, {"Ref_Key": "Guid", "Значение": "Guid"},
+                                   {"Ref_Key": "Guid"})
     metadata.is_loaded = True
-    reader = DataReader1C(odata_url="http://fake", metadata=metadata)
+    reader = DataReader(odata_url="http://fake", metadata=metadata)
     reader.exchange_message_no = 1
 
     fields = reader._get_record_fields({"d:Ref_Key": REF, "d:Значение": "не guid"}, OBJ)

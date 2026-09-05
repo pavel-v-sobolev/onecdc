@@ -1,20 +1,20 @@
 from importlib.metadata import version, PackageNotFoundError
 
 try:
-    __version__ = version("cdc-1c")
+    __version__ = version("onecdc")
 except PackageNotFoundError:
     __version__ = "dev"
 
-from .metadata_reader import MetadataReader1C
-from .data_reader import DataReader1C, DataObject1C
-from .change_reader import ChangeReader1C
-from .name_mapper import NameMapper1C
-from .db_writer import DBWriter1C
-from .handlers import Handler1C, HandlerContext, HandlerLoop
-from .replicator import Replicator1C
+from .metadata_reader import MetadataReader
+from .data_reader import DataReader, DataObject
+from .change_reader import ChangeReader
+from .name_mapper import NameMapper
+from .db_writer import DBWriter
+from .handlers import Handler, HandlerContext, HandlerLoop
+from .replicator import Replicator
 from .cron_runner import FullLoadCron
 
-__all__ = ["MetadataReader1C", "DataReader1C", "DataObject1C", "ChangeReader1C", "NameMapper1C",
-           "DBWriter1C", "Handler1C", "HandlerContext", "HandlerLoop", "Replicator1C",
+__all__ = ["MetadataReader", "DataReader", "DataObject", "ChangeReader", "NameMapper",
+           "DBWriter", "Handler", "HandlerContext", "HandlerLoop", "Replicator",
            "FullLoadCron", "__version__"]
 

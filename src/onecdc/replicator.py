@@ -15,20 +15,20 @@ from dbmerge import mergeResult
 from sqlalchemy import Engine, Integer, Numeric, and_
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
-from cdc_1c.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader1C, type_mapping
-from cdc_1c.common_functions import format_duration, odata_datetime_value
-from cdc_1c.data_reader import (DataReader1C, IS_DELETED_OR_EMPTY_FIELD, ODATA_PREFIX,
+from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, type_mapping
+from onecdc.common_functions import format_duration, odata_datetime_value
+from onecdc.data_reader import (DataReader, IS_DELETED_OR_EMPTY_FIELD, ODATA_PREFIX,
                                 RECORDER_FIELDS, _odata_literal)
-from cdc_1c.change_reader import ChangeReader1C
-from cdc_1c.full_load_claim import FullLoadClaim
-from cdc_1c.name_mapper import NameMapper1C
-from cdc_1c.db_writer import DBWriter1C, save_order_key
-from cdc_1c.db_logs import Replicator1CLog, LOAD_TYPE_CHANGES, LOAD_TYPE_FULL
-from cdc_1c.full_load_keys import FullLoadKeys
-from cdc_1c.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
-from cdc_1c.stop_signal import StopSignal, install_signal_handlers
-from cdc_1c.write_tracker import WriteTracker
-from cdc_1c.logging_config import _ensure_handler, get_logger, load_mode, LOAD_MODE_CHANGES, LOAD_MODE_FULL
+from onecdc.change_reader import ChangeReader
+from onecdc.full_load_claim import FullLoadClaim
+from onecdc.name_mapper import NameMapper
+from onecdc.db_writer import DBWriter, save_order_key
+from onecdc.db_logs import ReplicatorLog, LOAD_TYPE_CHANGES, LOAD_TYPE_FULL
+from onecdc.full_load_keys import FullLoadKeys
+from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
+from onecdc.stop_signal import StopSignal, install_signal_handlers
+from onecdc.write_tracker import WriteTracker
+from onecdc.logging_config import _ensure_handler, get_logger, load_mode, LOAD_MODE_CHANGES, LOAD_MODE_FULL
 
 logger = get_logger(__name__)
 
@@ -169,7 +169,7 @@ def _is_query_too_long(exc: BaseException) -> bool:
 
 def _recorder_type_for_url(field: str, value) -> str:
     """
-    Значение поля ключа для прямого адреса (см. DataReader1C.read_by_key). Всё, кроме `<Имя>_Type`,
+    Значение поля ключа для прямого адреса (см. DataReader.read_by_key). Всё, кроме `<Имя>_Type`,
     идёт как есть; типу возвращается пространство имён, которое разбор снял.
 
     Снимаем мы только `StandardODATA.` (см. _get_record_fields), и в адресе его действительно надо
@@ -225,7 +225,7 @@ def _check_odata_auth(odata_auth):
 
 def _check_exchange_name(exchange_name) -> str:
     """Имя плана обмена так, как оно уходит в URL: ExchangePlan_<имя>. Префикс/точечное имя
-    (ПланОбмена.Х, ExchangePlan_Х) снимаем: в URL их дописывает сам ChangeReader1C."""
+    (ПланОбмена.Х, ExchangePlan_Х) снимаем: в URL их дописывает сам ChangeReader."""
     if not isinstance(exchange_name, str) or not exchange_name.strip():
         raise ValueError("exchange_name is required: name of the 1C exchange plan "
                          "(as in the configuration, e.g. ДляВитрины)")
@@ -242,7 +242,7 @@ def _check_exchange_name(exchange_name) -> str:
 
 def _check_queue_guid(queue_guid) -> str:
     """Ref_Key узла обмена. Пустой — допустим: чтение изменений тогда выведет в лог список узлов
-    (см. ChangeReader1C._raise_no_queue_guid). Непустой обязан быть guid: имя или код узла в URL
+    (см. ChangeReader._raise_no_queue_guid). Непустой обязан быть guid: имя или код узла в URL
     даст ответ 1С, по которому это не угадать."""
     if queue_guid is None:
         return ''
@@ -363,7 +363,7 @@ def _log_failure(exc: BaseException, message: str, *args) -> None:
 
 def _load_mode_tag(mode: str):
     """
-    Помечает режимом загрузки все сообщения лога cdc_1c, выданные внутри метода: полная выгрузка
+    Помечает режимом загрузки все сообщения лога onecdc, выданные внутри метода: полная выгрузка
     идёт фоновыми потоками параллельно с чтением изменений, и в общем логе иначе не разобрать, к
     чему относится строка. Декоратором, а не блоком with — чтобы не заворачивать тело целиком.
     """
@@ -422,9 +422,9 @@ class _Window:
         field = (f'{RECORD_SET_LAMBDA}/{self.date_field}' if self.record_set else self.date_field)
         clauses = []
         if self.start is not None:
-            clauses.append(f"{field} ge {Replicator1C._odata_datetime(self.start)}")
+            clauses.append(f"{field} ge {Replicator._odata_datetime(self.start)}")
         if self.end is not None:
-            clauses.append(f"{field} lt {Replicator1C._odata_datetime(self.end)}")
+            clauses.append(f"{field} lt {Replicator._odata_datetime(self.end)}")
         if not clauses:
             return None
         expression = " and ".join(clauses)
@@ -442,13 +442,13 @@ class _Window:
         return f"[{left} .. {right})"
 
 
-class Replicator1C:
+class Replicator:
     """
     Оркестратор CDC: читает изменения из 1С (OData) и сохраняет их в БД, подтверждая получение
     только после успешного сохранения.
 
-    Компоненты (MetadataReader1C / ChangeReader1C / NameMapper1C / DBWriter1C) строятся в
-    конструкторе, но без обращения к сети: MetadataReader1C создаётся пустым, а фактическая
+    Компоненты (MetadataReader / ChangeReader / NameMapper / DBWriter) строятся в
+    конструкторе, но без обращения к сети: MetadataReader создаётся пустым, а фактическая
     загрузка метаданных (сетевой запрос) откладывается до первого run_once (по флагу
     metadata.is_loaded). Поэтому недоступность 1С на старте не роняет конструктор — ошибка загрузки
     всплывает уже в run_once: в run_forever она попадает в его try/except и повторяется, а в
@@ -457,7 +457,7 @@ class Replicator1C:
     Принимает отдельные аргументы, а не объект настроек: параметры присваиваются явно и на месте
     вызова видно, что именно передано — одинаково и в python-приложении с литералами, и в
     контейнере, где значения берутся из окружения. БД передаётся готовым engine: пользователь сам
-    управляет пулом и опциями, а тот же engine прокидывается в DBWriter1C.
+    управляет пулом и опциями, а тот же engine прокидывается в DBWriter.
     """
 
     def __init__(self, odata_url: str, odata_auth: tuple[str, str] | None,
@@ -478,7 +478,7 @@ class Replicator1C:
         self.engine = _check_db_connection(_check_engine(engine))
         self.db_schema = _check_db_schema(db_schema)
         # Схема промежуточных таблиц dbmerge. Не задана — та же, что у данных. Отдельная схема
-        # (например cdc_1c_tmp) держит их в стороне от таблиц с данными: в ней по определению нет
+        # (например onecdc_tmp) держит их в стороне от таблиц с данными: в ней по определению нет
         # ничего ценного, поэтому таблицу, оставшуюся после падения процесса, там видно и не жалко.
         self.db_temp_schema = _check_db_schema(db_temp_schema)
         self._odata_url = _check_odata_url(odata_url)
@@ -489,14 +489,14 @@ class Replicator1C:
         # None → таймаут не задан явно: ридеры подставят DEFAULT_REQUEST_TIMEOUT (metadata_reader).
         self._request_timeout = _check_request_timeout(request_timeout)
 
-        # Компоненты строятся сразу, но в сеть не ходят: MetadataReader1C создаётся пустым,
-        # метаданные подгрузятся лениво при первом run_once. MetadataReader1C получает engine —
-        # он же ведёт реестр объектов metadata_objects_1c (состояние полной выгрузки).
-        self.metadata = MetadataReader1C(self._odata_url, odata_auth=self._odata_auth,
-                                         request_timeout=self._request_timeout,
-                                         engine=self.engine, schema=self.db_schema,
-                                         temp_schema=self.db_temp_schema)
-        self.name_mapper = NameMapper1C()
+        # Компоненты строятся сразу, но в сеть не ходят: MetadataReader создаётся пустым,
+        # метаданные подгрузятся лениво при первом run_once. MetadataReader получает engine —
+        # он же ведёт реестр объектов onecdc_metadata_objects (состояние полной выгрузки).
+        self.metadata = MetadataReader(self._odata_url, odata_auth=self._odata_auth,
+                                       request_timeout=self._request_timeout,
+                                       engine=self.engine, schema=self.db_schema,
+                                       temp_schema=self.db_temp_schema)
+        self.name_mapper = NameMapper()
 
         # Фоновая полная выгрузка: пул потоков.
         self._full_load_workers = _check_full_load_workers(full_load_workers)
@@ -518,19 +518,19 @@ class Replicator1C:
         self._full_load_claim = FullLoadClaim(
             engine, lambda: self.metadata.objects_table,
             owner=f'{exchange_name}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}')
-        self.changes = ChangeReader1C(self._odata_url, self._exchange_name, self._queue_guid,
-                                      self.metadata, odata_auth=self._odata_auth,
-                                      request_timeout=self._request_timeout)
-        self.writer = DBWriter1C(engine=self.engine, name_mapper=self.name_mapper,
-                                 schema=self.db_schema, temp_schema=self.db_temp_schema)
+        self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
+                                    self.metadata, odata_auth=self._odata_auth,
+                                    request_timeout=self._request_timeout)
+        self.writer = DBWriter(engine=self.engine, name_mapper=self.name_mapper,
+                               schema=self.db_schema, temp_schema=self.db_temp_schema)
         # Лог загрузки (строка на объект) пишет оркестратор: только здесь есть контекст обмена
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
-        self.replicator_log = Replicator1CLog(self.engine, self.db_schema)
+        self.onecdc_replicator_log = ReplicatorLog(self.engine, self.db_schema)
 
         # Реестр идущих merge — в БД, а не в памяти: обработчик может считать витрину в другом
         # процессе, и границу своего окна он обязан прижимать к НАШИМ незавершённым merge.
         self.writes = WriteTracker(self.engine, self.db_schema, self._exchange_name)
-        # Сигналы обработчикам идут через handlers_1c, а не через объекты: репликатору не нужны
+        # Сигналы обработчикам идут через handlers, а не через объекты: репликатору не нужны
         # ни их код, ни общий с ними процесс (см. HandlerSignals).
         self.handler_signals = HandlerSignals(self.engine, self.db_schema)
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи,
@@ -594,8 +594,8 @@ class Replicator1C:
     def _save_changes(self) -> None:
         """
         Сохраняет объекты пакета по одному, записывая лог загрузки на каждый объект
-        (replicator_1c_log). finish() — только после успешного save: упавший объект остаётся с
-        finished_at=NULL и не двигает границу окна обработчика. Лог здесь, а не в DBWriter1C,
+        (onecdc_replicator_log). finish() — только после успешного save: упавший объект остаётся с
+        finished_at=NULL и не двигает границу окна обработчика. Лог здесь, а не в DBWriter,
         потому что только тут есть контекст обмена (exchange_name/message_no).
 
         Порядок сохранения — справочники → документы → регистры (save_order_key): документы ссылаются
@@ -604,18 +604,18 @@ class Replicator1C:
         """
         for object_name, data_object in sorted(self.changes.items(),
                                                key=lambda kv: save_order_key(kv[0])):
-            log_id = self.replicator_log.start(
+            log_id = self.onecdc_replicator_log.start(
                 self.changes.exchange_name, object_name, self.changes.message_no, LOAD_TYPE_CHANGES)
             table_name = self._handler_key(object_name)
             with self.writes.track(table_name):
                 result = self.writer.save(object_name, data_object)
             # Одно сохранение на строку лога: счётчики и завершение — одним запросом.
-            self.replicator_log.write_result(log_id, result, finish=True)
+            self.onecdc_replicator_log.write_result(log_id, result, finish=True)
             self._signal_handlers(table_name, result, SOURCE_CHANGES)
 
     def _handler_key(self, object_name: str) -> str:
         """
-        Имя таблицы объекта в БД — под ним объект и известен обработчикам (см. Handler1C.ON).
+        Имя таблицы объекта в БД — под ним объект и известен обработчикам (см. Handler.ON).
         Подписка идёт по имени таблицы, а не по имени объекта 1С, потому что обработчик пишет SQL
         по таблицам: имя 1С он в глаза не видит, а транслит стоит у него в запросе.
         """
@@ -626,10 +626,10 @@ class Replicator1C:
         Сообщает обработчикам, что таблица изменилась — но только если merge реально что-то сделал.
         1С регистрирует изменение объекта на любую перезапись, и в пакет приезжает масса записей,
         идентичных тому, что уже лежит в БД (шумные поля при сравнении не учитываются, см.
-        DBWriter1C._noisy_fields). Обработчик всё равно выбирает данные сам, и на пустом прогоне
+        DBWriter._noisy_fields). Обработчик всё равно выбирает данные сам, и на пустом прогоне
         его SELECT вернул бы пусто — вызывать незачем.
 
-        Сообщаем через БД: ставим метку update_requested_at в handlers_1c тем, у кого эта таблица есть
+        Сообщаем через БД: ставим метку update_requested_at в handlers тем, у кого эта таблица есть
         в update_on. Ни объектов обработчиков, ни их кода репликатору для этого не нужно, поэтому
         они могут работать в другом процессе или контейнере.
 
@@ -650,13 +650,13 @@ class Replicator1C:
         Список имён объектов 1С, доступных для выгрузки (документы/справочники и регистры).
         Табличные части исключаются: они приходят вложенно с владельцем и грузятся вместе с ним.
         Отдельная сущность в OData у них есть, и full_load её примет, но выгружать табличную часть
-        отдельно не нужно — а страницей меньше её группы ещё и вредно (см. DataReader1C.read_object).
+        отдельно не нужно — а страницей меньше её группы ещё и вредно (см. DataReader.read_object).
         Метаданные при необходимости подгружаются (первый сетевой запрос). Удобно, чтобы узнать,
         что передавать в full_load.
 
         Имена — как в 1С (кириллица). В full_load годится и такое имя, и имя таблицы в БД: он
-        принимает обе формы (см. MetadataReader1C.resolve_object_name). Список имён таблиц лежит в
-        реестре metadata_objects_1c, колонка object_full_name_en.
+        принимает обе формы (см. MetadataReader.resolve_object_name). Список имён таблиц лежит в
+        реестре onecdc_metadata_objects, колонка object_full_name_en.
         """
         if not self.metadata.is_loaded:
             self.metadata.get_metadata()
@@ -673,14 +673,14 @@ class Replicator1C:
         подбирается по их весу (batch_size — лишь верхняя граница, см. ниже), и каждая страница
         сразу сохраняется через writer.save(full_load_started_at=...). Идемпотентно — повторный
         прогон обновляет строки по ключу. Документ/справочник — чистый upsert; регистр/табличная часть —
-        own-or-skip группы целиком (группа умещается на одной странице), см. DBWriter1C.save.
+        own-or-skip группы целиком (группа умещается на одной странице), см. DBWriter.save.
 
         Документ/справочник выгружается вместе с табличными частями — они приходят вложенно в той же
         странице и сохраняются как отдельные объекты. Сортировка страниц — по первичному ключу
         (см. _full_load_key), переход к следующей странице — смещением $skip: курсора по ключу 1С
         не даёт, потому что в ключе стоит ссылка (см. DESIGN.md, «Почему страницы берутся только
         через $skip»). Глубину лечит не курсор, а нарезка окнами по периоду (см. ниже).
-        Один прогон = одна строка в replicator_1c_log (message_no=NULL — это не пакет обмена);
+        Один прогон = одна строка в onecdc_replicator_log (message_no=NULL — это не пакет обмена);
         finished_at проставляется после успеха всех страниц.
 
         batch_size — верхняя граница, а не жёсткий размер. Реальный размер страницы подбирается по
@@ -698,7 +698,7 @@ class Replicator1C:
         (WriteTracker.boundary, см. _load_pages). Снимок не трогает строки, переписанные уже после
         этой отметки, и не воскрешает удалённые за это время строки групп (регистр/ТЧ). Всё, что
         старше, снимок перезаписывает: полная выгрузка остаётся способом выровнять данные.
-        См. DBWriter1C.save. Отдельно от этого берётся started_at прогона (writer.db_now()) — он
+        См. DBWriter.save. Отдельно от этого берётся started_at прогона (writer.db_now()) — он
         нужен только пометке пропавших строк (mark_missing).
 
         Необязательный фильтр по периоду: date_field — имя поля даты/времени объекта (Date у
@@ -732,7 +732,7 @@ class Replicator1C:
 
         # Имя объекта и имя поля даты принимаются в ОБЕИХ формах — как в 1С и как в БД
         # (`Document_ЗаказКлиента` / `Document_ZakazKlienta`, `Дата` / `Data`), см.
-        # MetadataReader1C.resolve_object_name. Ровно то же делают FullLoadCron и Handler1C.ON:
+        # MetadataReader.resolve_object_name. Ровно то же делают FullLoadCron и Handler.ON:
         # настраивая выгрузку, смотрят в базу, а не в конфигуратор.
         object_name = self.metadata.resolve_object_name(object_name)
         if date_field:
@@ -746,8 +746,8 @@ class Replicator1C:
         by_period = self._is_accounting_register(object_name)
         date_filter = self._build_date_filter(object_name, date_field, date_from, date_to)
 
-        reader = DataReader1C(self._odata_url, self.metadata, odata_auth=self._odata_auth,
-                              request_timeout=self._request_timeout)
+        reader = DataReader(self._odata_url, self.metadata, odata_auth=self._odata_auth,
+                            request_timeout=self._request_timeout)
         # Полная выгрузка = базовая версия: emn=0 (ниже любого номера пакета изменений >=1).
         reader.exchange_message_no = 0
 
@@ -762,7 +762,7 @@ class Replicator1C:
         partition_field = (None if by_period
                            else self._partition_date_field(object_name, date_field))
 
-        log_id = self.replicator_log.start(self._exchange_name, object_name, None, LOAD_TYPE_FULL)
+        log_id = self.onecdc_replicator_log.start(self._exchange_name, object_name, None, LOAD_TYPE_FULL)
         logger.info("Full load of %s started (batch_size=%s, key=%s, paging=%s, date_filter=%s, "
                     "partition_field=%s)", object_name, batch_size, key_fields,
                     'period' if by_period else 'skip',
@@ -834,13 +834,13 @@ class Replicator1C:
                     date_column=(self.name_mapper.map_field_name(date_field)
                                  if date_field else None),
                     date_from=date_from, date_to=date_to)
-        self.replicator_log.write_result(log_id, finish=True)
+        self.onecdc_replicator_log.write_result(log_id, finish=True)
         logger.info("Full load of %s finished (%s records, %s rows modified)",
                     object_name, total, rows_modified)
         return rows_modified
 
 
-    def _load_pages(self, object_name: str, *, reader: DataReader1C, key_fields: list[str],
+    def _load_pages(self, object_name: str, *, reader: DataReader, key_fields: list[str],
                     extra_filter: str | None, batch_size: int, keys, log_id,
                     max_pages: int | None, by_period: bool = False) -> tuple[int, int, bool]:
         """
@@ -852,7 +852,7 @@ class Replicator1C:
         вызывающий режет её на меньшие периоды (см. full_load). None — читать до конца.
 
         by_period — регистр бухгалтерии: читается из виртуальной таблицы, где нет ни $skip, ни
-        сортировки, и курсором служит сам ПЕРИОД (см. DataReader1C.read_accounting_register).
+        сортировки, и курсором служит сам ПЕРИОД (см. DataReader.read_accounting_register).
         """
         skip = 0
         total = 0
@@ -927,10 +927,10 @@ class Replicator1C:
                 with self.writes.track(table_name):
                     result = self.writer.save(obj_name, data_object,
                                               full_load_started_at=page_started_at)
-                self.replicator_log.write_result(log_id, result)
+                self.onecdc_replicator_log.write_result(log_id, result)
                 rows_modified += _rows_modified(result)
                 # Сигнал на каждую страницу, а не один в конце прогона: это метка времени в
-                # одной колонке (handlers_1c.update_requested_at), а не очередь событий, — тысяча
+                # одной колонке (onecdc_handlers.update_requested_at), а не очередь событий, — тысяча
                 # страниц тысячу раз перепишет ту же метку, а не выстроит тысячу вызовов. Зато
                 # витрина начинает наполняться после первой же страницы, а не через часы, когда
                 # выгрузка закончится.
@@ -968,7 +968,7 @@ class Replicator1C:
                 return candidate
         return None
 
-    def _load_by_windows(self, object_name: str, *, reader: DataReader1C, date_field: str,
+    def _load_by_windows(self, object_name: str, *, reader: DataReader, date_field: str,
                          date_filter: str | None, page_args: dict) -> tuple[int, int]:
         """
         Перечитывает объект ОКНАМИ ПО ПЕРИОДУ, от свежих к старым. Возвращает (прочитано записей,
@@ -1110,7 +1110,7 @@ class Replicator1C:
     def _supports_date_bounds(self, object_name: str) -> bool:
         """
         Можно ли узнать у 1С самую раннюю и самую позднюю дату объекта одним запросом
-        (`$top=1&$orderby=<дата>`, см. DataReader1C.read_date_bound).
+        (`$top=1&$orderby=<дата>`, см. DataReader.read_date_bound).
 
         У документа — можно: `Date` лежит на верхнем уровне entry и входит в индекс.
 
@@ -1125,7 +1125,7 @@ class Replicator1C:
 
     def _is_accounting_register(self, object_name: str) -> bool:
         """Регистр бухгалтерии: читается из виртуальной таблицы RecordsWithExtDimensions, потому
-        что субконто есть только там (см. DataReader1C.read_accounting_register)."""
+        что субконто есть только там (см. DataReader.read_accounting_register)."""
         return object_name.startswith(ACCOUNTING_REGISTER_TYPE)
 
     def _window(self, object_name: str, date_field: str,
@@ -1141,7 +1141,7 @@ class Replicator1C:
         собираются ключи прогона и по нему же идёт анти-join пометки.
 
         Типы берём из самого primary_key, а не из полного набора полей: там лежат те же имена типов
-        1С (см. MetadataReader1C._read_metadata_item_key), но набор гарантированно полный. У полей
+        1С (см. MetadataReader._read_metadata_item_key), но набор гарантированно полный. У полей
         ключа, собранных не из $metadata напрямую, соответствия в списке полей может не быть —
         и обращение по ключу роняло бы прогон.
         """
@@ -1155,7 +1155,7 @@ class Replicator1C:
                             key_columns=self._primary_key_columns(object_name),
                             schema=self.db_temp_schema or self.db_schema)
 
-    def _page_keys(self, object_name: str, reader: DataReader1C) -> list[dict]:
+    def _page_keys(self, object_name: str, reader: DataReader) -> list[dict]:
         """Ключи строк одной страницы — только самого объекта: табличные части приезжают вложенно и
         помечаются вместе с владельцем (own-or-skip группы), отдельного снимка по ним нет."""
         data_object = reader.get(object_name)
@@ -1168,7 +1168,7 @@ class Replicator1C:
                 for i in range(data_object.data_length)]
 
     def _mark_missing_rows(self, object_name: str, keys: FullLoadKeys, started_at,
-                           reader: DataReader1C, recheck: bool, log_id: int | None = None,
+                           reader: DataReader, recheck: bool, log_id: int | None = None,
                            date_column: str | None = None,
                            date_from: date | datetime | str | None = None,
                            date_to: date | datetime | str | None = None) -> int:
@@ -1207,13 +1207,13 @@ class Replicator1C:
             # В журнал пометка идёт как deleted_row_count — тем же счётчиком, которым dbmerge
             # считает строки, помеченные удалёнными.
             if log_id is not None:
-                self.replicator_log.write_result(log_id, _marked_result(marked))
+                self.onecdc_replicator_log.write_result(log_id, _marked_result(marked))
             self.handler_signals.signal(table_name, SOURCE_FULL_LOAD)
         return marked
 
     def _resource_reset_values(self, object_name: str, target) -> dict:
         """Числовые ресурсы регистра гасим в NULL вместе с пометкой — ровно как при выпадении
-        строки из набора (см. DBWriter1C._resource_reset_values): SUM игнорирует NULL, и итог
+        строки из набора (см. DBWriter._resource_reset_values): SUM игнорирует NULL, и итог
         остаётся верным даже в запросе, забывшем фильтр по is_deleted_or_empty."""
         metadata_obj = self.metadata.get(object_name)
         column_types = metadata_obj.get_column_types()
@@ -1245,10 +1245,10 @@ class Replicator1C:
         return batch
 
     def _still_in_1c_by_recorder(self, object_name: str, candidates: list[dict],
-                                 reader: DataReader1C, metadata_obj) -> list[dict]:
+                                 reader: DataReader, metadata_obj) -> list[dict]:
         """
         Перепроверка кандидатов у регистра, подчинённого регистратору: по одному запросу НА НАБОР,
-        прямым адресом (DataReader1C.read_by_key).
+        прямым адресом (DataReader.read_by_key).
 
         Пачками через `$filter` тут нельзя вообще ничем: `Recorder` — поле неограниченной длины, и
         `eq guid'…'` 1С отвергает с 500, а `eq '…'` строкой отвечает 200 и НОЛЬ строк, то есть
@@ -1281,7 +1281,7 @@ class Replicator1C:
         return alive
 
     def _still_in_1c(self, object_name: str, candidates: list[dict],
-                     reader: DataReader1C) -> list[dict]:
+                     reader: DataReader) -> list[dict]:
         """
         Кандидаты, которые в 1С всё-таки есть: запрашиваем их по ключу пачками и возвращаем те,
         что пришли в ответе.
@@ -1401,13 +1401,13 @@ class Replicator1C:
         field = f'{RECORD_SET_LAMBDA}/{date_field}' if record_set else date_field
         clauses = []
         if date_from is not None:
-            clauses.append(f"{field} ge {Replicator1C._odata_datetime(date_from)}")
+            clauses.append(f"{field} ge {Replicator._odata_datetime(date_from)}")
         if date_to is not None:
             if isinstance(date_to, date) and not isinstance(date_to, datetime):
                 next_day = date_to + timedelta(days=1)
-                clauses.append(f"{field} lt {Replicator1C._odata_datetime(next_day)}")
+                clauses.append(f"{field} lt {Replicator._odata_datetime(next_day)}")
             else:
-                clauses.append(f"{field} le {Replicator1C._odata_datetime(date_to)}")
+                clauses.append(f"{field} le {Replicator._odata_datetime(date_to)}")
         expression = " and ".join(clauses)
         if not record_set:
             return expression
@@ -1563,10 +1563,10 @@ class Replicator1C:
         стороны.
 
         Нужен вызывающим извне цикла — прежде всего FullLoadCron: две одновременные выгрузки одного
-        объекта данные не портят (у каждого снимка свой full_load_started_at, см. DBWriter1C.save),
-        но дают 1С двойную работу и две параллельные строки в replicator_1c_log.
+        объекта данные не портят (у каждого снимка свой full_load_started_at, см. DBWriter.save),
+        но дают 1С двойную работу и две параллельные строки в onecdc_replicator_log.
 
-        Заслон один и живёт в БД — отметкой в metadata_objects_1c (см. full_load_claim). Множества
+        Заслон один и живёт в БД — отметкой в onecdc_metadata_objects (см. full_load_claim). Множества
         в памяти процесса тут мало: репликатор и расписание могут работать в разных контейнерах, и
         памятью их не развести. Занять объект удаётся тому, чей UPDATE изменил строку.
 

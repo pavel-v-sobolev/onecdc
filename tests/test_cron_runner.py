@@ -9,10 +9,10 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from cdc_1c import FullLoadCron
-from cdc_1c.metadata_reader import MetadataObject1C
-from cdc_1c.replicator import Replicator1C
-from cdc_1c.stop_signal import StopSignal
+from onecdc import FullLoadCron
+from onecdc.metadata_reader import MetadataObject
+from onecdc.replicator import Replicator
+from onecdc.stop_signal import StopSignal
 from conftest import TEST_QUEUE_GUID
 
 OBJECT_1C = "Document_ЗаказКлиента"
@@ -26,12 +26,12 @@ def _replicator(db, calls, rows_modified=0, fully_loaded=True):
     fully_loaded — выгружался ли объект целиком раньше. По умолчанию да: первый прогон читает
     объект целиком, игнорируя период (см. FullLoadCron), и тесты границ проверяли бы не то.
     """
-    rep = Replicator1C(odata_url="http://x", odata_auth=None, exchange_name="E",
-                       queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
+    rep = Replicator(odata_url="http://x", odata_auth=None, exchange_name="E",
+                     queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
     rep.metadata.is_loaded = True
     rep.metadata.was_fully_loaded = lambda object_name: fully_loaded
     properties = {"Ref_Key": "Guid", "Date": "DateTime", "ДатаОтгрузки": "DateTime"}
-    rep.metadata[OBJECT_1C] = MetadataObject1C(OBJECT_1C, properties, {"Ref_Key": "Guid"})
+    rep.metadata[OBJECT_1C] = MetadataObject(OBJECT_1C, properties, {"Ref_Key": "Guid"})
     # Реестр объектов: в бою его создаёт первая синхронизация метаданных, и без него не работает
     # захват объекта под выгрузку (см. full_load_claim).
     rep.metadata._sync_objects([OBJECT_1C])

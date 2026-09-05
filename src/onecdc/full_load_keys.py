@@ -26,8 +26,8 @@ from sqlalchemy import (Column, Index, MetaData, Table, and_, exists, func, inse
                         select, update)
 from sqlalchemy.engine import Engine
 
-from cdc_1c.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from cdc_1c.logging_config import get_logger
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -115,7 +115,7 @@ class FullLoadKeys:
     @staticmethod
     def _older_than_run(target: Table, started_at):
         """«Строку не переписывали с момента старта прогона» — тот же guard, что у самой выгрузки
-        (DBWriter1C._not_touched_since), включая ветку NULL: строка из времён, когда колонки
+        (DBWriter._not_touched_since), включая ветку NULL: строка из времён, когда колонки
         merged_on ещё не было, заведомо старше любого прогона. Без этой ветки такую строку не
         пометила бы никакая выгрузка — NULL не меньше и не больше отметки."""
         merged_on = target.c['merged_on']
@@ -130,7 +130,7 @@ class FullLoadKeys:
 
         scope — необязательное условие «строка входит в то, что прогон вообще читал». Нужно
         выгрузке за период: она видела только своё окно, и без такого ограничения кандидатом
-        оказалась бы вся остальная таблица. См. Replicator1C._marking_scope.
+        оказалась бы вся остальная таблица. См. Replicator._marking_scope.
         """
         query = (select(*(target.c[c] for c in self.key_columns))
                  .where(and_(*self._conditions(target, started_at, mark_field, scope))))

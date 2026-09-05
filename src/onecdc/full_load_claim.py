@@ -3,12 +3,12 @@
 
 Зачем. Полную выгрузку одного объекта могут начать сразу двое: фоновый воркер репликатора (по
 full_load_is_required) и расписание (FullLoadCron). Данные от этого не портятся — у каждого снимка
-свой full_load_started_at, и guard'ы DBWriter1C.save не дают устаревшему снимку затереть свежие
+свой full_load_started_at, и guard'ы DBWriter.save не дают устаревшему снимку затереть свежие
 строки, — но 1С делает двойную работу, а она здесь самая дорогая. Множества в памяти процесса для
 разведения мало: репликатор и расписание могут работать в РАЗНЫХ процессах (и контейнерах), а тогда
 они друг о друге не знают ничего.
 
-Где. Отдельной таблицы нет: захват живёт двумя колонками в metadata_objects_1c, где уже лежит всё
+Где. Отдельной таблицы нет: захват живёт двумя колонками в onecdc_metadata_objects, где уже лежит всё
 остальное состояние полной выгрузки объекта (full_load_is_required, last_full_load_dt, метрики).
 Строка на объект там и так одна, поэтому захват — это один атомарный UPDATE вида
 compare-and-swap: занять удаётся тому, чей UPDATE изменил строку, а разводит гонку сама СУБД.
@@ -36,8 +36,8 @@ from datetime import timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import Engine
 
-from cdc_1c.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from cdc_1c.logging_config import get_logger
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -61,7 +61,7 @@ class FullLoadClaim:
     Захваты полной выгрузки одного процесса: занять, продлевать, отпустить.
 
     Таблицу отдаёт не конструктор, а callable: реестр создаётся первой синхронизацией метаданных
-    (MetadataReader1C._sync_objects), то есть позже, чем строится репликатор.
+    (MetadataReader._sync_objects), то есть позже, чем строится репликатор.
     """
 
     def __init__(self, engine: Engine, table_provider, owner: str):

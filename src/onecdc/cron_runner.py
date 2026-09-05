@@ -1,5 +1,5 @@
 """
-Полная выгрузка объекта по расписанию: третий вечный цикл проекта, рядом с Replicator1C.run_forever
+Полная выгрузка объекта по расписанию: третий вечный цикл проекта, рядом с Replicator.run_forever
 (изменения) и HandlerLoop.run_forever (витрины).
 
 Цикл изменений догоняет данные событиями, а полная выгрузка — сверяет: она читает объект из 1С
@@ -19,8 +19,8 @@ from datetime import date, datetime, timedelta
 
 from croniter import croniter
 
-from cdc_1c.logging_config import get_logger
-from cdc_1c.stop_signal import StopSignal, install_signal_handlers
+from onecdc.logging_config import get_logger
+from onecdc.stop_signal import StopSignal, install_signal_handlers
 
 logger = get_logger(__name__)
 
@@ -37,7 +37,7 @@ class FullLoadCron:
 
     Имена — те, что видны в БД (латиница): table_name="Document_ZakazKlienta",
     date_field="DataOtgruzki". По той же причине, что и у обработчиков: настраивая выгрузку,
-    смотрят в базу и в реестр metadata_objects_1c (колонки object_full_name_en / fields_en), а не
+    смотрят в базу и в реестр onecdc_metadata_objects (колонки object_full_name_en / fields_en), а не
     в конфигуратор. Оригинальные имена 1С тоже принимаются — разбирается само, см. _resolve.
 
     Период необязателен и задаётся с обеих сторон независимо: нет date_from — с начала, нет
@@ -46,7 +46,7 @@ class FullLoadCron:
     за последние трое суток. Фиксированные date/datetime/str уходят в full_load как есть.
 
     Гонки. С потоком изменений — уже решено в full_load: снимок берёт отметку на каждую страницу
-    и не трогает строки, переписанные после неё (см. DBWriter1C.save, full_load_started_at). Со
+    и не трогает строки, переписанные после неё (см. DBWriter.save, full_load_started_at). Со
     второй полной выгрузкой ТОГО ЖЕ объекта (фоновая выгрузка репликатора или второе расписание)
     прогон разводится claim'ом: занятый объект — срабатывание пропускается, ждём следующего по
     расписанию. Догонять пропущенное незачем: следующий прогон прочитает тот же период заново.
@@ -62,9 +62,9 @@ class FullLoadCron:
     full_history_on_first_run — первый прогон идёт БЕЗ границ периода, то есть читает объект
     целиком. Иначе объекта, которого нет в плане обмена, не появится вовсе: полную выгрузку по
     флагу full_load_is_required репликатор заводит только тем, кто пришёл в пакете изменений
-    (Replicator1C._save_changes → require_full_load_if_new), а такой объект в пакете не появляется
+    (Replicator._save_changes → require_full_load_if_new), а такой объект в пакете не появляется
     никогда. Скользящее окно при этом собирало бы только свежий хвост, и история не приехала бы.
-    Признак «уже выгружался» — last_full_load_dt в metadata_objects_1c: он в БД, поэтому
+    Признак «уже выгружался» — last_full_load_dt в onecdc_metadata_objects: он в БД, поэтому
     перезапуск процесса историю заново не перечитывает.
 
     Время локальное — в контейнере задавайте TZ, иначе "0 3 * * *" сработает по UTC.
@@ -74,7 +74,7 @@ class FullLoadCron:
                  date_field: str | None = None,
                  date_from: DateBound = None, date_to: DateBound = None,
                  batch_size: int = 1000, full_history_on_first_run: bool = True):
-        # Перехват SIGTERM/SIGINT — по той же причине, что у Replicator1C и HandlerLoop: run_forever
+        # Перехват SIGTERM/SIGINT — по той же причине, что у Replicator и HandlerLoop: run_forever
         # уходит в пул потоков, а поставить перехват можно только из главного (см. stop_signal).
         install_signal_handlers(quiet=False)
 
@@ -110,7 +110,7 @@ class FullLoadCron:
 
     def run_forever(self, max_runs: int = 0) -> None:
         """
-        Блокирующий цикл — та же форма, что у Replicator1C.run_forever и HandlerLoop.run_forever:
+        Блокирующий цикл — та же форма, что у Replicator.run_forever и HandlerLoop.run_forever:
         где ему крутиться, решает точка входа, а не библиотека.
 
         Останавливается по SIGTERM/SIGINT (перехват процессный, см. stop_signal) либо точечно через
@@ -196,7 +196,7 @@ class FullLoadCron:
         """
         Имена 1С для объекта и поля даты по тому, что задано в расписании.
 
-        Транслитерация детерминирована (NameMapper1C), поэтому обратное соответствие ищется прямым
+        Транслитерация детерминирована (NameMapper), поэтому обратное соответствие ищется прямым
         перебором метаданных — отдельная таблица соответствий не нужна. Имя 1С, написанное как
         есть, тоже принимается: сначала пробуем его.
 
@@ -211,7 +211,7 @@ class FullLoadCron:
             if not metadata.is_loaded:
                 metadata.get_metadata()
 
-            # Разбор имён — общий с full_load (MetadataReader1C.resolve_*): обе формы, имя 1С и
+            # Разбор имён — общий с full_load (MetadataReader.resolve_*): обе формы, имя 1С и
             # имя таблицы/колонки в БД. Раньше это же правило жило здесь своей копией.
             object_name = metadata.resolve_object_name(self.table_name)
             date_field = (metadata.resolve_field_name(object_name, self.date_field)

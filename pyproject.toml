@@ -3,8 +3,8 @@ requires = ["hatchling >= 1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cdc-1c"
-version = "0.1.25"
+name = "onecdc"
+version = "0.2.0"
 description = "Change data capture (CDC) from 1C:Enterprise to your data warehouse"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -55,16 +55,16 @@ dev = [
     "pytest>=8",
     # Тесты идут против локального PostgreSQL (см. tests/conftest.py), поэтому драйвер входит
     # в dev-окружение, а не ставится отдельно.
-    "cdc-1c[postgres]",
+    "onecdc[postgres]",
 ]
 
 [project.scripts]
-cdc-1c = "cdc_1c.__main__:main"
+onecdc = "onecdc.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/pavel-v-sobolev/cdc_1C"
-Repository = "https://github.com/pavel-v-sobolev/cdc_1C"
-Issues = "https://github.com/pavel-v-sobolev/cdc_1C/issues"
+Homepage = "https://github.com/pavel-v-sobolev/onecdc"
+Repository = "https://github.com/pavel-v-sobolev/onecdc"
+Issues = "https://github.com/pavel-v-sobolev/onecdc/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -79,4 +79,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cdc_1c"]
+packages = ["src/onecdc"]

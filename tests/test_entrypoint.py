@@ -1,13 +1,13 @@
 """
-Оффлайн-тесты entrypoint (python -m cdc_1c): выбор режима CDC1C_MODE и параметров из окружения.
-Конструктор Replicator1C подменяется — сеть/БД не задействуются.
+Оффлайн-тесты entrypoint (python -m onecdc): выбор режима ONECDC_MODE и параметров из окружения.
+Конструктор Replicator подменяется — сеть/БД не задействуются.
 """
 
 import pytest
 
 from sqlalchemy.engine import make_url
 
-import cdc_1c.__main__ as entry
+import onecdc.__main__ as entry
 from conftest import TEST_DB_URL
 
 
@@ -23,8 +23,8 @@ class _FakeReplicator:
 
 
 def _set_env(monkeypatch, **extra):
-    env = {"CDC1C_ODATA_URL": "http://x", "CDC1C_EXCHANGE_NAME": "E",
-           "CDC1C_QUEUE_GUID": "Q", "CDC1C_DB_URL": TEST_DB_URL}
+    env = {"ONECDC_ODATA_URL": "http://x", "ONECDC_EXCHANGE_NAME": "E",
+           "ONECDC_QUEUE_GUID": "Q", "ONECDC_DB_URL": TEST_DB_URL}
     env.update(extra)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -40,14 +40,14 @@ def _patch_replicator(monkeypatch, replicator):
         captured.update(kwargs)
         return replicator
 
-    monkeypatch.setattr(entry, "Replicator1C", fake_constructor)
+    monkeypatch.setattr(entry, "Replicator", fake_constructor)
     return captured
 
 
 def test_main_maps_environment_to_arguments(monkeypatch):
-    _set_env(monkeypatch, CDC1C_MODE="once", CDC1C_ODATA_USER="odata",
-             CDC1C_ODATA_PASSWORD="secret", CDC1C_DB_SCHEMA="cdc_1c",
-             CDC1C_FULL_LOAD_WORKERS="4")
+    _set_env(monkeypatch, ONECDC_MODE="once", ONECDC_ODATA_USER="odata",
+             ONECDC_ODATA_PASSWORD="secret", ONECDC_DB_SCHEMA="onecdc",
+             ONECDC_FULL_LOAD_WORKERS="4")
     captured = _patch_replicator(monkeypatch, _FakeReplicator())
 
     entry.main()
@@ -56,14 +56,14 @@ def test_main_maps_environment_to_arguments(monkeypatch):
     assert captured["odata_auth"] == ("odata", "secret")
     assert captured["exchange_name"] == "E"
     assert captured["queue_guid"] == "Q"
-    assert captured["db_schema"] == "cdc_1c"
+    assert captured["db_schema"] == "onecdc"
     assert captured["full_load_workers"] == 4
     assert captured["engine"].url.database == make_url(TEST_DB_URL).database
 
 
 def test_main_without_user_means_no_auth(monkeypatch):
     # Пользователь не задан — авторизации нет; пустой кортеж ридерам не подсунуть.
-    _set_env(monkeypatch, CDC1C_MODE="once")
+    _set_env(monkeypatch, ONECDC_MODE="once")
     captured = _patch_replicator(monkeypatch, _FakeReplicator())
 
     entry.main()
@@ -74,7 +74,7 @@ def test_main_without_user_means_no_auth(monkeypatch):
 
 
 def test_main_loop_mode(monkeypatch):
-    _set_env(monkeypatch, CDC1C_MODE="loop", CDC1C_POLL_INTERVAL="5")
+    _set_env(monkeypatch, ONECDC_MODE="loop", ONECDC_POLL_INTERVAL="5")
     rep = _FakeReplicator()
     _patch_replicator(monkeypatch, rep)
 
@@ -83,7 +83,7 @@ def test_main_loop_mode(monkeypatch):
 
 
 def test_main_loop_is_default(monkeypatch):
-    _set_env(monkeypatch)   # без CDC1C_MODE → loop, период по умолчанию 60
+    _set_env(monkeypatch)   # без ONECDC_MODE → loop, период по умолчанию 60
     rep = _FakeReplicator()
     _patch_replicator(monkeypatch, rep)
 
@@ -92,7 +92,7 @@ def test_main_loop_is_default(monkeypatch):
 
 
 def test_main_once_mode(monkeypatch):
-    _set_env(monkeypatch, CDC1C_MODE="once")
+    _set_env(monkeypatch, ONECDC_MODE="once")
     rep = _FakeReplicator()
     _patch_replicator(monkeypatch, rep)
 
@@ -101,7 +101,7 @@ def test_main_once_mode(monkeypatch):
 
 
 def test_main_unknown_mode(monkeypatch):
-    _set_env(monkeypatch, CDC1C_MODE="bogus")
+    _set_env(monkeypatch, ONECDC_MODE="bogus")
     _patch_replicator(monkeypatch, _FakeReplicator())
 
     with pytest.raises(SystemExit):

@@ -40,7 +40,7 @@ from sqlalchemy import text, tuple_
 
 from dbmerge import dbmerge
 
-from cdc_1c import Handler1C, HandlerContext
+from onecdc import Handler, HandlerContext
 
 DDL = """
 CREATE OR REPLACE VIEW {schema}."ZakazyKlientovGrouped_rows_view"
@@ -187,7 +187,7 @@ ORDER BY 1
 """
 
 
-class ZakazyKlientovGrouped(Handler1C):
+class ZakazyKlientovGrouped(Handler):
     # Имена ТАБЛИЦ в целевой БД (транслит), а не имена объектов 1С — те же, что стоят в SQL выше:
     #   AccumulationRegister_ZakazyKlientov  ← РегистрНакопления.ЗаказыКлиентов
     #   Document_ZakazKlienta                ← Документ.ЗаказКлиента
@@ -202,7 +202,7 @@ class ZakazyKlientovGrouped(Handler1C):
     def rebuild(self, context: HandlerContext):
         """
         Пересборка ПО МЕСЯЦАМ. Между блоками цикл применяет накопившиеся изменения, поэтому витрина
-        не стоит холодной все те десятки минут, что идёт пересборка (см. Handler1C.rebuild).
+        не стоит холодной все те десятки минут, что идёт пересборка (см. Handler.rebuild).
 
         Блок берёт из источника весь месяц и весь месяц в витрине и заменяет. Отбирать группы, как
         это делает инкремент, не нужно: инкремент видит лишь часть групп месяца, а блок — все.

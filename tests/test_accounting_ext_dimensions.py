@@ -12,9 +12,9 @@ from urllib.parse import unquote
 
 import pytest
 
-from cdc_1c.data_reader import DataReader1C
-from cdc_1c.metadata_reader import (ACCOUNTING_REGISTER_TYPE, EXT_DIMENSIONS_FIELDS,
-                                    EXT_DIMENSIONS_TYPE, MetadataObject1C, MetadataReader1C)
+from onecdc.data_reader import DataReader
+from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, EXT_DIMENSIONS_FIELDS,
+                                    EXT_DIMENSIONS_TYPE, MetadataObject, MetadataReader)
 
 REG = f"{ACCOUNTING_REGISTER_TYPE}_Main"
 REC = "6a85159f-8ba8-11dd-89d9-00055dcfc5ca"
@@ -93,22 +93,22 @@ class _Response:
 
 @pytest.fixture
 def reader(monkeypatch):
-    """DataReader1C с метаданными регистра бухгалтерии; запросы в 1С перехвачены."""
-    metadata = MetadataReader1C(odata_url="http://fake")
-    metadata[REG] = MetadataObject1C(REG, dict(_FIELDS), dict(_PRIMARY_KEY),
+    """DataReader с метаданными регистра бухгалтерии; запросы в 1С перехвачены."""
+    metadata = MetadataReader(odata_url="http://fake")
+    metadata[REG] = MetadataObject(REG, dict(_FIELDS), dict(_PRIMARY_KEY),
                                      object_key=["Recorder", "Recorder_Type"])
     # План видов характеристик, в котором лежат виды субконто. Его приходится искать перебором:
     # в поле вида субконто голый Guid, а навигационной ссылки на владельца 1С не отдаёт.
-    metadata[CHART] = MetadataObject1C(CHART, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
+    metadata[CHART] = MetadataObject(CHART, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
     metadata.is_loaded = True
-    obj = DataReader1C(odata_url="http://fake", metadata=metadata)
+    obj = DataReader(odata_url="http://fake", metadata=metadata)
     obj.exchange_message_no = 7
     obj.requested_urls = []
     obj.response_text = _result(_element())
     # Очередь подставных ответов: (код, тело). Пусто — обычный 200 с response_text.
     obj.response_queue = []
 
-    import cdc_1c.data_reader as module
+    import onecdc.data_reader as module
 
     # Ответы плана видов характеристик: None — плана нет вовсе (прямой адрес отдаёт 404,
     # как это делает 1С для отсутствующего элемента), иначе {Ref_Key: PredefinedDataName}.

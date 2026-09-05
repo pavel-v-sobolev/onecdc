@@ -1,8 +1,8 @@
 """
-Оффлайн-тест постраничной полной выгрузки Replicator1C.full_load. Без живой 1С: чтение страниц
+Оффлайн-тест постраничной полной выгрузки Replicator.full_load. Без живой 1С: чтение страниц
 подменяется (read_object), проверяется логика цикла — постраничная пагинация ($skip), условие
 останова, сохранение в режиме полной выгрузки (full_load_started_at) для каждого объекта страницы
-и одна строка в replicator_1c_log.
+и одна строка в onecdc_replicator_log.
 """
 
 import uuid
@@ -13,11 +13,11 @@ import requests
 from sqlalchemy import select
 from dbmerge import mergeResult
 
-from cdc_1c import DataObject1C
-from cdc_1c.data_reader import DataReader1C
-from cdc_1c.metadata_reader import MetadataObject1C, MetadataReader1C
-from cdc_1c.replicator import (FULL_LOAD_EMPTY_WINDOWS_TO_STOP,
-                              FULL_LOAD_PARTITION_MAX_PAGES, Replicator1C)
+from onecdc import DataObject
+from onecdc.data_reader import DataReader
+from onecdc.metadata_reader import MetadataObject, MetadataReader
+from onecdc.replicator import (FULL_LOAD_EMPTY_WINDOWS_TO_STOP,
+                              FULL_LOAD_PARTITION_MAX_PAGES, Replicator)
 from conftest import TEST_QUEUE_GUID
 
 # Нулевой результат merge — writer.save в тестах замокан, но full_load агрегирует его результат.
@@ -33,20 +33,20 @@ def _response(status_code: int):
 
 def _replicator(db):
     engine = db.engine
-    rep = Replicator1C(odata_url="http://x", odata_auth=None,
-                       exchange_name="E", queue_guid=TEST_QUEUE_GUID, engine=engine, db_schema=db.schema)
+    rep = Replicator(odata_url="http://x", odata_auth=None,
+                     exchange_name="E", queue_guid=TEST_QUEUE_GUID, engine=engine, db_schema=db.schema)
     # Метаданные «уже загружены» — full_load не пойдёт в сеть; primary_key даёт $orderby.
     rep.metadata.is_loaded = True
     # Date в полях — чтобы date_field проходил проверку существования (full_load разрешает имя
     # поля по метаданным, принимая и имя 1С, и имя колонки в БД).
-    rep.metadata["Catalog_X"] = MetadataObject1C("Catalog_X",
-                                                 {"Ref_Key": "Guid", "Date": "DateTime"},
-                                                 {"Ref_Key": "Guid"}, object_key=None)
+    rep.metadata["Catalog_X"] = MetadataObject("Catalog_X",
+                                               {"Ref_Key": "Guid", "Date": "DateTime"},
+                                               {"Ref_Key": "Guid"}, object_key=None)
     return rep
 
 
 def test_full_load_paging(db, monkeypatch):
-    # Страницы берутся смещением $skip — единственным способом (см. DataReader1C.read_object).
+    # Страницы берутся смещением $skip — единственным способом (см. DataReader.read_object).
     rep = _replicator(db)
     meta = rep.metadata["Catalog_X"]
     pages = iter([2, 2, 1])      # batch_size=2: две полные страницы и хвост → останов
@@ -62,10 +62,10 @@ def test_full_load_paging(db, monkeypatch):
             counter["v"] += 1
             keys.append(uuid.UUID(int=counter["v"]))
         self.clear()
-        self[object_name] = DataObject1C(meta, [{"Ref_Key": k} for k in keys])
+        self[object_name] = DataObject(meta, [{"Ref_Key": k} for k in keys])
         return n
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
 
     saved = []
     def fake_save(name, obj, full_load_started_at=None):
@@ -89,7 +89,7 @@ def test_full_load_paging(db, monkeypatch):
     assert sum(s[1] for s in saved) == 5
 
     # одна строка лога: это не пакет обмена (message_no=NULL), загрузка завершена (finished_at set).
-    log = rep.replicator_log.table
+    log = rep.onecdc_replicator_log.table
     with rep.engine.connect() as conn:
         rows = conn.execute(select(log.c.object, log.c.message_no, log.c.finished_at)).all()
     assert len(rows) == 1
@@ -100,7 +100,7 @@ def test_full_load_paging(db, monkeypatch):
 def test_full_load_register_paging(db, monkeypatch):
     # Регистр: сортировка по Recorder, но Recorder — ссылка, поэтому страницы через $skip.
     rep = _replicator(db)
-    rep.metadata["AccumulationRegister_R"] = MetadataObject1C(
+    rep.metadata["AccumulationRegister_R"] = MetadataObject(
         "AccumulationRegister_R", {"Recorder": "Guid"},
         {"Recorder": "Guid", "LineNumber": "Int64", "Recorder_Type": "String"},
         object_key=["Recorder", "Recorder_Type"])
@@ -121,12 +121,12 @@ def test_full_load_register_paging(db, monkeypatch):
         # две строки движений на регистратора — страница считается по entry (наборам), не по строкам.
         # Все поля ключа, а не только читаемые страницей: по ключу собирается снимок прогона
         # (пометка пропавших строк включена по умолчанию).
-        self[object_name] = DataObject1C(meta, [{"Recorder": r, "LineNumber": ln,
+        self[object_name] = DataObject(meta, [{"Recorder": r, "LineNumber": ln,
                                                  "Recorder_Type": "StandardODATA.Document_X"}
                                                 for r in recs for ln in (1, 2)])
         return n
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("AccumulationRegister_R", batch_size=2)
@@ -140,7 +140,7 @@ def test_full_load_key_recorder_key(db):
     # Recorder/Recorder_Type — сортировать страницы всё равно надо по регистратору, а не по
     # составному ключу: одна entry = набор записей, и страница не должна рвать набор.
     rep = _replicator(db)
-    rep.metadata["InformationRegister_R"] = MetadataObject1C(
+    rep.metadata["InformationRegister_R"] = MetadataObject(
         "InformationRegister_R", {"Recorder_Key": "Guid", "Period": "DateTime"},
         {"Recorder_Key": "Guid", "Period": "DateTime"}, object_key=["Recorder_Key"])
 
@@ -164,7 +164,7 @@ def test_full_load_shrinks_to_single_entry(db, monkeypatch):
     # Смещение при этом не сдвигается: повторяем ту же страницу, а не следующую.
     rep = _replicator(db)
     calls = []
-    monkeypatch.setattr(DataReader1C, "read_object", _failing_above(1, calls))
+    monkeypatch.setattr(DataReader, "read_object", _failing_above(1, calls))
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("Catalog_X", batch_size=1000)
@@ -178,7 +178,7 @@ def test_full_load_remembers_reduced_page_size(db, monkeypatch):
     # Повторный прогон объекта начинает с уже подобранного размера, а не с пробной страницы.
     rep = _replicator(db)
     calls = []
-    monkeypatch.setattr(DataReader1C, "read_object", _failing_above(4, calls))
+    monkeypatch.setattr(DataReader, "read_object", _failing_above(4, calls))
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("Catalog_X", batch_size=1000)
@@ -212,7 +212,7 @@ def test_full_load_reraises_permanent_error(db, monkeypatch):
                          extra_filter=None, skip=None):
         raise requests.HTTPError("403", response=_response(403))
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     with pytest.raises(requests.HTTPError):
@@ -227,7 +227,7 @@ def test_full_load_empty_object(db, monkeypatch):
         self.clear()
         return 0     # объект пуст: первая же страница неполная → один запрос и останов
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     saved = []
     def fake_save(name, obj, full_load_started_at=None):
         saved.append(name)
@@ -237,15 +237,15 @@ def test_full_load_empty_object(db, monkeypatch):
     rep.full_load("Catalog_X", batch_size=2)
     assert saved == []   # сохранять нечего, но лог-строка с finished_at должна появиться
     with rep.engine.connect() as conn:
-        rows = conn.execute(select(rep.replicator_log.table.c.finished_at)).all()
+        rows = conn.execute(select(rep.onecdc_replicator_log.table.c.finished_at)).all()
     assert len(rows) == 1 and rows[0].finished_at is not None
 
 
 def test_full_load_composite_key(db, monkeypatch):
     # Независимый регистр: ключ составной, сортировка идёт по всем его полям, страницы — $skip.
     rep = _replicator(db)
-    meta = MetadataObject1C("InformationRegister_Indep", {"Period": "DateTime", "Dim_Key": "Guid"},
-                            {"Period": "DateTime", "Dim_Key": "Guid"}, object_key=None)
+    meta = MetadataObject("InformationRegister_Indep", {"Period": "DateTime", "Dim_Key": "Guid"},
+                          {"Period": "DateTime", "Dim_Key": "Guid"}, object_key=None)
     rep.metadata["InformationRegister_Indep"] = meta
     calls = []
 
@@ -254,16 +254,16 @@ def test_full_load_composite_key(db, monkeypatch):
         calls.append({"key_fields": key_fields, "skip": skip})
         self.clear()
         if len(calls) == 1:      # одна полная страница, затем пустая → останов
-            self[object_name] = DataObject1C(meta, [
+            self[object_name] = DataObject(meta, [
                 {"Period": datetime(2026, 1, 1), "Dim_Key": uuid.UUID(int=1)},
                 {"Period": datetime(2026, 1, 2), "Dim_Key": uuid.UUID(int=2)}])
             return 2
         return 0
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     # Границы периода тест не проверяет: объект мелкий, до нарезки дело не доходит
-    # (см. Replicator1C._period_partitions).
-    monkeypatch.setattr(DataReader1C, "read_date_bound", lambda *a, **k: None)
+    # (см. Replicator._period_partitions).
+    monkeypatch.setattr(DataReader, "read_date_bound", lambda *a, **k: None)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("InformationRegister_Indep", batch_size=2)
@@ -274,8 +274,8 @@ def test_full_load_composite_key(db, monkeypatch):
 
 def test_read_object_page_url(db, monkeypatch):
     # Формирование URL страницы: $top, $skip, $orderby.
-    md = MetadataReader1C("http://x")
-    reader = DataReader1C("http://x", md)
+    md = MetadataReader("http://x")
+    reader = DataReader("http://x", md)
     captured = {}
 
     class _Resp:
@@ -287,7 +287,7 @@ def test_read_object_page_url(db, monkeypatch):
         captured["url"] = url
         return _Resp()
 
-    monkeypatch.setattr("cdc_1c.data_reader.requests.get", fake_get)
+    monkeypatch.setattr("onecdc.data_reader.requests.get", fake_get)
 
     # Смещение в URL; без фильтра $filter не появляется вовсе.
     reader.read_object("Catalog_X", top=500, key_fields=["Ref_Key"], skip=1000)
@@ -361,7 +361,7 @@ def test_dispatch_skips_claimed_object(db):
 
 def test_build_date_filter(db):
     rep = _replicator(db)
-    rep.metadata["Document_Y"] = MetadataObject1C(
+    rep.metadata["Document_Y"] = MetadataObject(
         "Document_Y", {"Ref_Key": "Guid", "Date": "DateTime"}, {"Ref_Key": "Guid"})
 
     assert rep._build_date_filter("Document_Y", None, None, None) is None
@@ -382,11 +382,11 @@ def test_full_load_accepts_db_names(db, monkeypatch):
     """
     Имя объекта и имя поля даты принимаются в ОБЕИХ формах: как в 1С (`Catalog_Номенклатура`,
     `Дата`) и как в БД (`Catalog_Nomenklatura`, `Data`). Настраивая выгрузку, смотрят в базу и в
-    реестр metadata_objects_1c, а не в конфигуратор, и то же имя таблицы стоит у обработчиков
+    реестр onecdc_metadata_objects, а не в конфигуратор, и то же имя таблицы стоит у обработчиков
     в `ON` — API не должен требовать переключаться между двумя словарями.
     """
     rep = _replicator(db)
-    rep.metadata["Catalog_Номенклатура"] = MetadataObject1C(
+    rep.metadata["Catalog_Номенклатура"] = MetadataObject(
         "Catalog_Номенклатура", {"Ref_Key": "Guid", "Дата": "DateTime"},
         {"Ref_Key": "Guid"}, object_key=None)
     captured = {}
@@ -398,8 +398,8 @@ def test_full_load_accepts_db_names(db, monkeypatch):
         self.clear()
         return 0
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
-    monkeypatch.setattr(DataReader1C, "read_date_bound", lambda *a, **k: None)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_date_bound", lambda *a, **k: None)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     # Имя таблицы и имя колонки — в 1С уходят имена 1С.
@@ -412,7 +412,7 @@ def test_full_load_accepts_db_names(db, monkeypatch):
     assert captured["object_name"] == "Catalog_Номенклатура"
 
     # Один и тот же объект, названный по-разному, занимает ОДНУ позицию: иначе claim пропустил бы
-    # вторую выгрузку того же объекта (см. Replicator1C.claim_full_load). Захват живёт в реестре,
+    # вторую выгрузку того же объекта (см. Replicator.claim_full_load). Захват живёт в реестре,
     # поэтому реестр для этой проверки нужен настоящий.
     rep.metadata._sync_objects(["Catalog_Номенклатура"])
     with rep.claim_full_load("Catalog_Nomenklatura") as first:
@@ -442,10 +442,10 @@ def test_odata_datetime_pads_the_year():
     курсор по периоду и перепроверка кандидатов на пометку. Из-за этого `mark_missing` падал на
     любом регистре с пустой датой в ключе.
     """
-    from cdc_1c.data_reader import _odata_literal
+    from onecdc.data_reader import _odata_literal
 
-    assert Replicator1C._odata_datetime(date(1, 1, 1)) == "datetime'0001-01-01T00:00:00'"
-    assert Replicator1C._odata_datetime(datetime(209, 1, 1)) == "datetime'0209-01-01T00:00:00'"
+    assert Replicator._odata_datetime(date(1, 1, 1)) == "datetime'0001-01-01T00:00:00'"
+    assert Replicator._odata_datetime(datetime(209, 1, 1)) == "datetime'0209-01-01T00:00:00'"
     assert _odata_literal(datetime(1, 1, 1), 'DateTime') == "datetime'0001-01-01T00:00:00'"
     # Обычная дата-время не пострадала, доли секунды усекаются.
     assert _odata_literal(datetime(2026, 4, 22, 13, 5, 9, 7777), 'DateTime') \
@@ -460,7 +460,7 @@ def test_build_date_filter_wraps_record_set_register(db):
     коллекции.
     """
     rep = _replicator(db)
-    rep.metadata["AccumulationRegister_R"] = MetadataObject1C(
+    rep.metadata["AccumulationRegister_R"] = MetadataObject(
         "AccumulationRegister_R", {"Recorder": "Guid", "Period": "DateTime"},
         {"Recorder": "Guid", "Recorder_Type": "String"},
         object_key=["Recorder", "Recorder_Type"])
@@ -473,7 +473,7 @@ def test_build_date_filter_wraps_record_set_register(db):
 
     # Табличная часть тоже имеет object_key (Ref_Key), но читается плоскими строками — её
     # оборачивать нельзя.
-    rep.metadata["Document_Y_Tovary"] = MetadataObject1C(
+    rep.metadata["Document_Y_Tovary"] = MetadataObject(
         "Document_Y_Tovary", {"Ref_Key": "Guid", "Date": "DateTime"},
         {"Ref_Key": "Guid", "LineNumber": "Int64"}, object_key=["Ref_Key"], is_table_part=True)
     assert not rep._is_record_set_object("Document_Y_Tovary")
@@ -484,7 +484,7 @@ def test_build_date_filter_wraps_record_set_register(db):
     # object_key пуст), и дата-измерение лежит на верхнем уровне — лямбда ему не нужна и не
     # подходит. Имя поля при этом произвольное: у документа это Date, у регистра с регистратором
     # Period, а у независимого — как назвал разработчик конфигурации.
-    rep.metadata["InformationRegister_P"] = MetadataObject1C(
+    rep.metadata["InformationRegister_P"] = MetadataObject(
         "InformationRegister_P", {"Номенклатура_Key": "Guid", "Дата": "DateTime"},
         {"Номенклатура_Key": "Guid", "Дата": "DateTime"}, object_key=None)
     assert not rep._is_record_set_object("InformationRegister_P")
@@ -504,10 +504,10 @@ def test_full_load_passes_date_filter(db, monkeypatch):
         self.clear()
         return 0
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     # Границы периода тест не проверяет: объект мелкий, до нарезки дело не доходит
-    # (см. Replicator1C._period_partitions).
-    monkeypatch.setattr(DataReader1C, "read_date_bound", lambda *a, **k: None)
+    # (см. Replicator._period_partitions).
+    monkeypatch.setattr(DataReader, "read_date_bound", lambda *a, **k: None)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("Catalog_X", batch_size=2, date_field="Date",
@@ -519,8 +519,8 @@ def test_full_load_passes_date_filter(db, monkeypatch):
 
 def test_read_object_extra_filter(db, monkeypatch):
     # extra_filter уходит в $filter как есть: пробелы кодируются, двоеточия datetime сохраняются.
-    md = MetadataReader1C("http://x")
-    reader = DataReader1C("http://x", md)
+    md = MetadataReader("http://x")
+    reader = DataReader("http://x", md)
     captured = {}
 
     class _Resp:
@@ -528,7 +528,7 @@ def test_read_object_extra_filter(db, monkeypatch):
         text = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         content = text.encode()
 
-    monkeypatch.setattr("cdc_1c.data_reader.requests.get",
+    monkeypatch.setattr("onecdc.data_reader.requests.get",
                         lambda url, **kw: captured.__setitem__("url", url) or _Resp())
 
     reader.read_object("Document_X", top=100, key_fields=["Ref_Key"], skip=100,
@@ -554,10 +554,10 @@ def test_page_timestamp_is_clamped_to_unfinished_merges(db, monkeypatch):
     def fake_read_object(self, object_name, top=None, key_fields=None,
                          extra_filter=None, skip=None):
         self.clear()
-        self[object_name] = DataObject1C(meta, [{"Ref_Key": uuid.UUID(int=1)}])
+        self[object_name] = DataObject(meta, [{"Ref_Key": uuid.UUID(int=1)}])
         return 1
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
 
     saved = []
     rep.writer.save = lambda name, obj, full_load_started_at=None: (
@@ -579,8 +579,8 @@ def _partitioned(db, monkeypatch, rows_per_page, *, date_field="Date"):
     где calls — список $filter каждой прочитанной страницы: по ним и видно нарезку.
     """
     rep = _replicator(db)
-    meta = MetadataObject1C("Document_Y", {"Ref_Key": "Guid", date_field: "DateTime"},
-                            {"Ref_Key": "Guid"}, object_key=None)
+    meta = MetadataObject("Document_Y", {"Ref_Key": "Guid", date_field: "DateTime"},
+                          {"Ref_Key": "Guid"}, object_key=None)
     rep.metadata["Document_Y"] = meta
     calls = []
     counter = {"v": 0}
@@ -594,11 +594,11 @@ def _partitioned(db, monkeypatch, rows_per_page, *, date_field="Date"):
             counter["v"] += 1
             keys.append(uuid.UUID(int=counter["v"]))
         self.clear()
-        self[object_name] = DataObject1C(meta, [{"Ref_Key": k} for k in keys])
+        self[object_name] = DataObject(meta, [{"Ref_Key": k} for k in keys])
         return n
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
-    monkeypatch.setattr(DataReader1C, "read_date_bound",
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_date_bound",
                         lambda self, name, field, *, newest, extra_filter=None:
                         datetime(2026, 3, 20) if newest else datetime(2026, 1, 15))
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
@@ -663,7 +663,7 @@ def test_absurd_oldest_date_does_not_walk_the_calendar(db, monkeypatch):
     # древней записью.
     rep, calls = _partitioned(db, monkeypatch,
                               lambda flt, skip: 10 if flt is None else (1 if 'lt' not in flt else 0))
-    monkeypatch.setattr(DataReader1C, "read_date_bound",
+    monkeypatch.setattr(DataReader, "read_date_bound",
                         lambda self, name, field, *, newest, extra_filter=None:
                         datetime(2026, 3, 20) if newest else datetime(209, 1, 1))
 
@@ -724,7 +724,7 @@ def test_window_keeps_time_of_day(db, monkeypatch):
     окно, обрезанное до полуночи, либо оставило бы дыру, либо заставило перечитывать сутки.
     """
     rep, calls = _partitioned(db, monkeypatch, lambda flt, skip: 1 if flt else 10)
-    monkeypatch.setattr(DataReader1C, "read_date_bound",
+    monkeypatch.setattr(DataReader, "read_date_bound",
                         lambda self, name, field, *, newest, extra_filter=None:
                         datetime(2026, 3, 20, 14, 25, 37) if newest
                         else datetime(2026, 3, 1, 9, 5, 1))
@@ -755,7 +755,7 @@ def test_deep_object_without_date_bounds_is_probed_and_read_through(db, monkeypa
             return 10 if skip < 120 else 3  # хвостовое окно: только верхняя граница
         return 0                            # пробные окна пусты
     rep, calls = _partitioned(db, monkeypatch, rows)
-    monkeypatch.setattr(DataReader1C, "read_date_bound", lambda *a, **k: None)
+    monkeypatch.setattr(DataReader, "read_date_bound", lambda *a, **k: None)
 
     rep.full_load("Document_Y", batch_size=10)
 
@@ -778,7 +778,7 @@ def test_record_set_register_is_read_by_lambda_windows(db, monkeypatch):
     окнами от «сейчас» вниз.
     """
     rep = _replicator(db)
-    rep.metadata["AccumulationRegister_R"] = MetadataObject1C(
+    rep.metadata["AccumulationRegister_R"] = MetadataObject(
         "AccumulationRegister_R", {"Recorder": "Guid", "Period": "DateTime"},
         {"Recorder": "Guid", "Recorder_Type": "String"},
         object_key=["Recorder", "Recorder_Type"])
@@ -795,12 +795,12 @@ def test_record_set_register_is_read_by_lambda_windows(db, monkeypatch):
             counter["v"] += 1
             rows.append({"Recorder": uuid.UUID(int=counter["v"]), "Recorder_Type": "T"})
         if rows:
-            self[object_name] = DataObject1C(rep.metadata["AccumulationRegister_R"], rows)
+            self[object_name] = DataObject(rep.metadata["AccumulationRegister_R"], rows)
         return n
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     bounds = []
-    monkeypatch.setattr(DataReader1C, "read_date_bound",
+    monkeypatch.setattr(DataReader, "read_date_bound",
                         lambda *a, **k: bounds.append(1))     # звать её тут вообще нельзя
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
@@ -835,12 +835,12 @@ def test_page_size_does_not_climb_back_after_a_refusal(db, monkeypatch):
         # Ответ лёгкий: сам по себе он попросил бы у _next_page_size сразу batch_size.
         self.last_response_bytes = 1024
         if len(calls) < 6:
-            self[object_name] = DataObject1C(
+            self[object_name] = DataObject(
                 meta, [{"Ref_Key": uuid.UUID(int=i)} for i in range(top)])
             return top
         return 0
 
-    monkeypatch.setattr(DataReader1C, "read_object", fake_read_object)
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
     rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
 
     rep.full_load("Catalog_X", batch_size=1000)
@@ -857,11 +857,11 @@ def test_orderby_is_extended_to_the_whole_primary_key(db, monkeypatch):
     внутри ничьей (одинаковый Period, разный Code) 1С порядок не гарантирует, и на границе
     страниц это давало и дубли, и потерянные строки.
     """
-    md = MetadataReader1C("http://x")
-    md["InformationRegister_Scalar"] = MetadataObject1C(
+    md = MetadataReader("http://x")
+    md["InformationRegister_Scalar"] = MetadataObject(
         "InformationRegister_Scalar", {"Period": "DateTime", "Code": "Int64", "Note": "String"},
         {"Period": "DateTime", "Code": "Int64"}, object_key=None)
-    reader = DataReader1C("http://x", md)
+    reader = DataReader("http://x", md)
     captured = []
 
     class _Resp:
@@ -869,7 +869,7 @@ def test_orderby_is_extended_to_the_whole_primary_key(db, monkeypatch):
         text = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         content = text.encode()
 
-    monkeypatch.setattr("cdc_1c.data_reader.requests.get",
+    monkeypatch.setattr("onecdc.data_reader.requests.get",
                         lambda url, **kw: (captured.append(url), _Resp())[1])
 
     # Первая страница и следующая сортируются одинаково — иначе смещение указывало бы в другой
@@ -881,7 +881,7 @@ def test_orderby_is_extended_to_the_whole_primary_key(db, monkeypatch):
 
 def test_window_title_and_filter(db):
     """Заголовок окна в логе и его $filter, включая открытые границы и режим набора записей."""
-    from cdc_1c.replicator import _Window
+    from onecdc.replicator import _Window
 
     closed = _Window("Date", datetime(2026, 2, 1, 10, 30), datetime(2026, 3, 1))
     up = _Window("Date", datetime(2026, 3, 1), None)
@@ -913,7 +913,7 @@ def _mark_missing_spy(rep, monkeypatch):
         captured["recheck"] = recheck
         return 0
 
-    monkeypatch.setattr(Replicator1C, "_mark_missing_rows", spy)
+    monkeypatch.setattr(Replicator, "_mark_missing_rows", spy)
     return captured
 
 
