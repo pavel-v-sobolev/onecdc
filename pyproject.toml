@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "onecdc"
-version = "0.2.0"
+version = "0.2.1"
 description = "Change data capture (CDC) from 1C:Enterprise to your data warehouse"
 readme = "README.md"
 requires-python = ">=3.10"
