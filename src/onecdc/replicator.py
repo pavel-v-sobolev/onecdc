@@ -1332,7 +1332,18 @@ class Replicator:
     def _odata_datetime(value: date | datetime | str) -> str:
         """OData-литерал datetime'YYYY-MM-DDTHH:MM:SS' из datetime/date (date → полночь) или строки.
         Форматирование — odata_datetime_value: год обязан быть четырёхзначным, иначе 1С отвечает
-        400 (важно для пустой даты 1С, 0001-01-01)."""
+        400 (важно для пустой даты 1С, 0001-01-01).
+
+        ISO-строка проходит через тот же форматтер, а не подставляется как есть: 1С требует
+        ПОЛНЫЙ литерал со временем, и datetime'2026-09-01' она отвергает с 400 «Ошибка при разборе
+        опции запроса $filter» (проверено на живой 1С), хотя ровно такую границу естественно
+        написать в расписании. Строка, которую разобрать не удалось, идёт в запрос как есть —
+        подставлять её пользователь мог осознанно, а 1С сама скажет, если литерал неверен."""
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return f"datetime'{value}'"
         if isinstance(value, (datetime, date)):
             value = odata_datetime_value(value)
         return f"datetime'{value}'"

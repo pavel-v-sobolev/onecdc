@@ -65,7 +65,7 @@ rep.run_forever(interval=60)               # цикл опроса раз в 60 
 ```
 
 Вариант многопоточного запуска, дающий возможность добавления нескольких обработчиков (Handler) и 
-дополнительных репликаторов (Replicator) для других планов обмена, можно посмотреть в этом файле: [runner.py](config/runner.py)
+дополнительных репликаторов (Replicator) для других планов обмена, можно посмотреть в этом файле: [runner.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/runner.py)
 
 
 
@@ -83,15 +83,15 @@ docker run --rm --network host \
   sobolevp/onecdc:latest
 ```
 
-`-v "$PWD/config:/config:ro"` — монтирует папку `config` из текущего каталога. В ней лежит файл [runner.py](config/runner.py), а также подпапка с примерами обработчиков (config/handlers).
+`-v "$PWD/config:/config:ro"` — монтирует папку `config` из текущего каталога. В ней лежит файл [runner.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/runner.py), а также подпапка с примерами обработчиков (config/handlers).
 
-**docker compose.** Пример — [docker-compose.yml](docker-compose.yml) в репозитории.
+**docker compose.** Пример — [docker-compose.yml](https://github.com/pavel-v-sobolev/onecdc/blob/main/docker-compose.yml) в репозитории.
 
 
 ## Запуск из окружения
 
 Если хочется не писать код вовсе, есть готовый entrypoint — `python -m onecdc` (он же команда
-`onecdc`). Он читает те же параметры из переменных окружения, см описание: [README_ENV.md](README_ENV.md)
+`onecdc`). Он читает те же параметры из переменных окружения, см описание: [README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md)
 
 
 
@@ -136,14 +136,14 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 загрузки: журнал `onecdc_replicator_log`, реестр объектов `onecdc_metadata_objects`, состояние обработчиков
 `onecdc_handlers` и реестр незавершённых записей `onecdc_writes_in_process`.
 
-Подробно — [README_DB.md](README_DB.md): состав полей, что означает `is_deleted_or_empty`, зачем
+Подробно — [README_DB.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_DB.md): состав полей, что означает `is_deleted_or_empty`, зачем
 отдельная схема промежуточных таблиц и что лежит в каждой служебной таблице.
 
 ## Классы библиотеки
 
 `Replicator` читает изменения и пишет их в БД, `Handler` + `HandlerLoop` дают возможность запуска своего кода
 по событию изменения, `FullLoadCron` — полную выгрузку по расписанию. Что каждый из них принимает и
-что у него можно вызвать — [README_API.md](README_API.md).
+что у него можно вызвать — [README_API.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_API.md).
 
 ## Логирование
 
@@ -194,11 +194,11 @@ DDL можно прописать прямо в обработчике (`setup`)
 В примерах разобраны два варианта — с кодом и подробными пояснениями:
 
 1) ключ витрины совпадает с первичным ключом объекта 1С (суррогатный guid). Годится для таблицы
-   фактов: [config/handlers/zakazy_klientov.py](config/handlers/zakazy_klientov.py);
+   фактов: [config/handlers/zakazy_klientov.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/handlers/zakazy_klientov.py);
 2) ключ витрины заменён на бизнес-ключ — например, номер документа вместо guid. Связь с «сырыми»
    данными хранится в колонках-массивах (`ARRAY`) с индексами *GIN*: по ним обработчик быстро
    находит, какие агрегированные ключи задело изменение в источнике.
-   [config/handlers/zakazy_klientov_grouped.py](config/handlers/zakazy_klientov_grouped.py).
+   [config/handlers/zakazy_klientov_grouped.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/handlers/zakazy_klientov_grouped.py).
 
 
 ---
@@ -207,14 +207,14 @@ DDL можно прописать прямо в обработчике (`setup`)
 
 | файл | описание |
 |---|---|
-| [README.md](README.md) | этот файл: обзор, установка, запуск |
-| [README_ENV.md](README_ENV.md) | запуск из окружения: все переменные `ONECDC_*`, значения по умолчанию, ошибки конфигурации |
-| [README_API.md](README_API.md) | классы, которые собирает пользователь: `Replicator`, `Handler`, `HandlerLoop`, `FullLoadCron`; обработчики — окно изменений, когда их вызывают, пересборка витрины |
-| [README_DB.md](README_DB.md) | что появляется в целевой БД: таблицы, служебные поля, служебные таблицы |
-| [DESIGN.md](DESIGN.md) | внутреннее устройство для тех, кто правит код: интерфейс OData, цикл изменений, пагинация полной выгрузки, гонки со снимком, механика обработчиков |
-| [CHANGELOG.md](CHANGELOG.md) | что менялось от версии к версии |
-| [config/runner.py](config/runner.py) | шаблон точки входа: репликатор, обработчики и расписания в одном файле |
-| [config/handlers](config/handlers/) | примеры обработчиков |
+| [README.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README.md) | этот файл: обзор, установка, запуск |
+| [README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md) | запуск из окружения: все переменные `ONECDC_*`, значения по умолчанию, ошибки конфигурации |
+| [README_API.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_API.md) | классы, которые собирает пользователь: `Replicator`, `Handler`, `HandlerLoop`, `FullLoadCron`; обработчики — окно изменений, когда их вызывают, пересборка витрины |
+| [README_DB.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_DB.md) | что появляется в целевой БД: таблицы, служебные поля, служебные таблицы |
+| [DESIGN.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/DESIGN.md) | внутреннее устройство для тех, кто правит код: интерфейс OData, цикл изменений, пагинация полной выгрузки, гонки со снимком, механика обработчиков |
+| [CHANGELOG.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/CHANGELOG.md) | что менялось от версии к версии |
+| [config/runner.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/runner.py) | шаблон точки входа: репликатор, обработчики и расписания в одном файле |
+| [config/handlers](https://github.com/pavel-v-sobolev/onecdc/tree/main/config/handlers) | примеры обработчиков |
 
 
 ---

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Запуск docker-образа против отладочного контура (тестовая база торговли + dev-Postgres).
 #
-# Параметры не дублируются, а берутся из debug.py — там же, где их берут живые тесты, чтобы контуры
-# не разъезжались. Меняете адрес 1С или базу — правите debug.py, и здесь ничего трогать не нужно.
+# Параметры не дублируются, а берутся из debug_trade.py — там же, где их берут живые тесты, чтобы контуры
+# не разъезжались. Меняете адрес 1С или базу — правите debug_trade.py, и здесь ничего трогать не нужно.
 #
 # --network host обязателен: Postgres слушает только 127.0.0.1 хоста, а у контейнера свой сетевой
 # стек, где localhost означает сам контейнер. Заодно так видна host-only сеть VirtualBox с 1С.
@@ -27,7 +27,7 @@ MODE="${1:-once}"
 PYTHON="${PYTHON:-../.venv/bin/python}"
 eval "$("$PYTHON" - <<'PY'
 import shlex
-import debug
+import debug_trade as debug
 
 print(f"ODATA_URL={shlex.quote(debug.ODATA_URL)}")
 print(f"ODATA_USER={shlex.quote(debug.ODATA_AUTH[0] if debug.ODATA_AUTH else '')}")

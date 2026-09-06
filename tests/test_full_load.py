@@ -452,6 +452,25 @@ def test_odata_datetime_pads_the_year():
         == "datetime'2026-04-22T13:05:09'"
 
 
+def test_odata_datetime_completes_iso_string_bound():
+    """
+    Граница периода строкой — задокументированная форма (README_API: «дата, дата-время,
+    ISO-строка»), и в расписании её естественно написать коротко: date_from='2026-09-01'.
+    Раньше строка подставлялась в литерал как есть, а 1С требует ПОЛНЫЙ литерал со временем и
+    отвечает 400 «Ошибка при разборе опции запроса $filter» — проверено на живой 1С:
+    datetime'2026-09-01' → 400, datetime'2026-09-01T00:00:00' → 200. Поэтому ISO-строка
+    разбирается и форматируется тем же способом, что date и datetime.
+    """
+    assert Replicator._odata_datetime('2026-09-01') == "datetime'2026-09-01T00:00:00'"
+    assert Replicator._odata_datetime('2026-09-01T13:05:09') == "datetime'2026-09-01T13:05:09'"
+    assert Replicator._odata_datetime('2026-09-01 13:05:09') == "datetime'2026-09-01T13:05:09'"
+    # Строка, которую разобрать не удалось (в том числе год без ведущих нулей — такой ISO
+    # fromisoformat не принимает), идёт в запрос как есть: свой литерал пользователь мог
+    # подставить осознанно, а неверный 1С отвергнет сама и скажет чем именно.
+    assert Replicator._odata_datetime('1-01-01T00:00:00') == "datetime'1-01-01T00:00:00'"
+    assert Replicator._odata_datetime('не дата') == "datetime'не дата'"
+
+
 def test_build_date_filter_wraps_record_set_register(db):
     """
     У регистра, подчинённого регистратору, entry — это НАБОР записей, и поля Period на верхнем
