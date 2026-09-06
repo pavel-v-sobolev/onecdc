@@ -117,7 +117,14 @@ def test_failed_heartbeat_is_retried_sooner(db, monkeypatch):
     """
     rep = _replicator(db)
     claim = rep._full_load_claim
+    # Цикл прогоняется здесь вручную, поэтому фоновый поток claim() поднимать не должен: он крутил
+    # бы тот же _heartbeat_loop параллельно, писал бы в те же delays и взводил бы _closed. Успеет
+    # он дойти до wait раньше подмены или позже — вопрос скорости машины, и на медленном раннере
+    # тест падал с [20.0, 5.0] вместо [5.0]. Взведённый флаг заставляет _start_heartbeat выйти сразу.
+    claim._closed.set()
     claim.claim(OBJECT)
+    claim._closed.clear()
+    assert claim._heartbeat_thread is None, 'фоновый поток испортит замер: цикл крутится вручную'
     delays = []
     monkeypatch.setattr(claim, 'heartbeat', lambda: (_ for _ in ()).throw(RuntimeError('no connection')))
     monkeypatch.setattr(claim._closed, 'wait', lambda delay: delays.append(delay) or claim._closed.set())
