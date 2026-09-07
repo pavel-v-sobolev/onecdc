@@ -11,11 +11,11 @@
   </picture>
 </p>
 
-**OneCDC** is a docker container and a Python library, that provides 1C system data loading to data warehouse using Change Data Capture apporach. \
+**OneCDC** is a docker container and a Python library, that provides **1C** system data loading to data warehouse using Change Data Capture apporach. \
 It engages standard ODATA mechanism and standard 1C exchange plan mechanism to extract data from 1C system and upsert changes to the target DB.
 
-**OneCDC** — это докер контейнер и python-библиотека, предназначенные для получения данных из 1С, использующий подход CDC (загрузка изменений данных). \
-Продукт использует стандартный интерфейс ODATA и механизм планов обмена для выгрузки изменений данных из системы 1С и обновления данных в целевой БД.
+**OneCDC** — это докер контейнер и python-библиотека, предназначенные для получения данных из **1С**, использующий подход CDC (загрузка изменений данных). \
+Продукт использует стандартный интерфейс **ODATA** и механизм **планов обмена** для выгрузки изменений данных из системы **1С** и обновления данных в целевой БД.
 
 # Общий принцип действия
 1) Основной объект библиотеки это оркестратор `Replicator`, который циклично читает изменения из 1С (через OData + план обмена) и
@@ -40,7 +40,7 @@ pip install onecdc
 ```
 
 Для записи изменений необходим **PostgreSQL** (Другие СУБД не тестировались, хотя в теории возможны).
-Для записи используется библиотека dbmerge. Все необходимые схемы, таблицы и поля модуль создает сам.
+Для записи используется библиотека [dbmerge](https://github.com/pavel-v-sobolev/dbmerge). Все необходимые схемы, таблицы и поля модуль создает сам.
 
 
 ```python
