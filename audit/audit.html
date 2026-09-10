@@ -1,0 +1,1315 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OneCDC 0.2.1 — аудит исполнения</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void: #030806;
+  --abyss: #07140f;
+  --panel: rgba(8, 22, 17, .78);
+  --panel-solid: #0b1914;
+  --glass: rgba(10, 28, 22, .62);
+  --line: rgba(141, 255, 196, .14);
+  --line-2: rgba(141, 255, 196, .28);
+  --phos: #8dffc4;
+  --phos-2: #5eead4;
+  --phos-dim: #3e8f68;
+  --ink: #e8f6ee;
+  --muted: #93b3a6;
+  --faint: #6a8a7d;
+  --crit: #ff5c7a;
+  --crit-bg: rgba(255, 92, 122, .12);
+  --high: #ff8a4c;
+  --high-bg: rgba(255, 138, 76, .12);
+  --med: #e7c34a;
+  --med-bg: rgba(231, 195, 74, .12);
+  --low: #6ee7b7;
+  --low-bg: rgba(110, 231, 183, .1);
+  --ok: #7dffb3;
+  --shadow: 0 24px 80px rgba(0, 0, 0, .45);
+  --font-d: "Unbounded", "Montserrat", sans-serif;
+  --font-b: "Manrope", "IBM Plex Sans", "Liberation Sans", sans-serif;
+  --font-m: "JetBrains Mono", "Source Code Pro", ui-monospace, monospace;
+  --rail: 280px;
+  --max: 1240px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; color-scheme: dark; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  #rain { display: none !important; }
+}
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--void);
+  color: var(--ink);
+  font: 16.5px/1.55 var(--font-b);
+  overflow-x: hidden;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(900px 520px at 12% -10%, rgba(94, 234, 212, .09), transparent 55%),
+    radial-gradient(700px 480px at 110% 8%, rgba(255, 92, 122, .07), transparent 50%),
+    radial-gradient(1000px 700px at 50% 120%, rgba(61, 143, 104, .08), transparent 55%),
+    linear-gradient(180deg, #06110d 0%, var(--void) 18%, var(--void) 100%);
+}
+#rain {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: .4;
+}
+.scan {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, .08) 0 1px,
+    transparent 1px 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: .35;
+}
+.noise {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: .035;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+a { color: var(--phos-2); text-underline-offset: 3px; }
+a:hover { color: var(--phos); }
+:focus-visible {
+  outline: 2px solid var(--phos);
+  outline-offset: 3px;
+}
+::selection { background: rgba(141, 255, 196, .28); color: #04110c; }
+
+.skip {
+  position: absolute;
+  left: -999px;
+  top: 8px;
+  background: var(--phos);
+  color: #04110c;
+  padding: 8px 12px;
+  z-index: 50;
+  font-weight: 700;
+}
+.skip:focus { left: 8px; }
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 1fr minmax(220px, 520px) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 22px;
+  background: rgba(4, 10, 8, .72);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(16px) saturate(1.2);
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+.brand .mark {
+  font: 700 13px/1 var(--font-d);
+  letter-spacing: .18em;
+  color: var(--phos);
+}
+.brand .sub {
+  font: 500 11px/1 var(--font-m);
+  color: var(--muted);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search {
+  position: relative;
+}
+.search input {
+  width: 100%;
+  background: rgba(7, 20, 16, .9);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+  font: 14px/1.2 var(--font-m);
+  padding: 10px 14px 10px 38px;
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+}
+.search input::placeholder { color: var(--faint); }
+.search .slash {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 500 12px/1 var(--font-m);
+  color: var(--phos-dim);
+}
+.hud-meta {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.pill {
+  font: 500 11px/1 var(--font-m);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(8, 22, 17, .6);
+}
+.pill b { color: var(--phos); font-weight: 600; }
+.pill.crit { color: var(--crit); border-color: rgba(255, 92, 122, .35); }
+.pill.high { color: var(--high); border-color: rgba(255, 138, 76, .35); }
+.pill.live { color: var(--phos); border-color: var(--line-2); }
+
+.wrap {
+  position: relative;
+  z-index: 2;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0 22px 80px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: 1.15fr .85fr;
+  gap: 36px;
+  padding: 42px 0 28px;
+  align-items: end;
+}
+.kicker {
+  margin: 0 0 14px;
+  font: 500 12px/1 var(--font-m);
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--phos);
+}
+h1 {
+  margin: 0 0 16px;
+  font: 800 clamp(2rem, 4.6vw, 3.35rem)/1.08 var(--font-d);
+  letter-spacing: -.03em;
+  text-wrap: balance;
+}
+h1 .glitch {
+  display: inline-block;
+  text-shadow: 2px 0 rgba(255, 92, 122, .45), -2px 0 rgba(94, 234, 212, .45);
+}
+.lede {
+  margin: 0;
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+.hero-side { display: grid; gap: 14px; }
+.stat-jumbo {
+  position: relative;
+  padding: 8px 4px 0;
+}
+.stat-jumbo .num {
+  font: 800 clamp(5.5rem, 12vw, 8.5rem)/.85 var(--font-d);
+  letter-spacing: -.06em;
+  color: var(--phos);
+  text-shadow: 0 0 40px rgba(141, 255, 196, .28);
+}
+.stat-jumbo .lbl {
+  margin-top: 8px;
+  font: 500 12px/1.3 var(--font-m);
+  color: var(--muted);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.promises {
+  display: grid;
+  gap: 8px;
+}
+.promise {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+.promise .x {
+  font: 700 11px/1 var(--font-m);
+  color: var(--crit);
+  border: 1px solid rgba(255, 92, 122, .4);
+  padding: 5px 6px;
+}
+.promise p { margin: 0; font-size: 13.5px; color: var(--ink); }
+.promise p span { color: var(--muted); }
+
+.matrix {
+  margin: 10px 0 8px;
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 6px;
+}
+.cell {
+  appearance: none;
+  background: rgba(8, 24, 18, .75);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  cursor: pointer;
+  min-height: 64px;
+  padding: 8px 6px 7px;
+  text-align: left;
+  font: 500 10px/1 var(--font-m);
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  transition: transform .18s ease, border-color .18s ease, background .18s ease;
+}
+.cell:hover, .cell:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--phos);
+  background: rgba(20, 48, 36, .95);
+}
+.cell .id { display: block; color: var(--phos); margin-bottom: 6px; letter-spacing: .04em; }
+.cell { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.cell.crit { border-color: rgba(255, 92, 122, .55); box-shadow: inset 3px 0 0 var(--crit); }
+.cell.high { box-shadow: inset 3px 0 0 var(--high); }
+.cell.med  { box-shadow: inset 3px 0 0 var(--med); }
+.cell.low  { box-shadow: inset 3px 0 0 var(--low); }
+.cell.is-dim { opacity: .22; }
+.cell.is-hit { border-color: var(--phos); background: rgba(141, 255, 196, .12); }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 12px 0 0;
+  font: 500 11px/1 var(--font-m);
+  color: var(--muted);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.legend .c { background: var(--crit); }
+.legend .h { background: var(--high); }
+.legend .m { background: var(--med); }
+.legend .l { background: var(--low); }
+
+.toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 18px 0 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font: 500 12px/1 var(--font-m);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.toc a { color: var(--muted); text-decoration: none; }
+.toc a:hover { color: var(--phos); }
+
+.finding, section.block, .group { scroll-margin-top: 76px; }
+.finding.flash { outline: 1px solid var(--phos); }
+kbd {
+  font: 500 11px/1 var(--font-m);
+  border: 1px solid var(--line-2);
+  padding: 2px 5px;
+  color: var(--phos);
+}
+
+section.block {
+  margin-top: 28px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 28px 28px 32px;
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow);
+  clip-path: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
+}
+section.block > h2 {
+  margin: 0 0 14px;
+  font: 700 1.35rem/1.2 var(--font-d);
+  letter-spacing: -.02em;
+}
+section.block h3 {
+  margin: 1.35em 0 .45em;
+  font: 700 1.02rem/1.3 var(--font-b);
+}
+section.block p { margin: 0 0 .85em; }
+section.block p:last-child { margin-bottom: 0; }
+.muted { color: var(--muted); }
+
+.g4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+}
+.tile {
+  background: rgba(5, 16, 12, .55);
+  border: 1px solid var(--line);
+  padding: 14px 14px 16px;
+  min-height: 100%;
+}
+.tile b {
+  display: block;
+  font: 600 12px/1 var(--font-m);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--phos);
+  margin-bottom: 8px;
+}
+.tile p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.pipe {
+  appearance: none;
+  background: rgba(5, 16, 12, .7);
+  border: 1px solid var(--line);
+  color: inherit;
+  text-align: left;
+  padding: 12px 10px;
+  cursor: pointer;
+  min-height: 124px;
+  min-width: 0;
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+.pipe:hover, .pipe.is-on {
+  border-color: var(--phos);
+  background: rgba(20, 52, 38, .85);
+}
+.pipe .n {
+  font: 600 10px/1 var(--font-m);
+  color: var(--phos);
+  letter-spacing: .14em;
+}
+.pipe h3 { margin: 8px 0 6px; font-size: .92rem; }
+.pipe p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.pipe-hint {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font: 400 12px/1.5 var(--font-m);
+  color: var(--faint);
+  max-width: 92ch;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14.5px;
+  margin: 8px 0 4px;
+}
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  font: 600 11px/1 var(--font-m);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+td code, .path code, code {
+  font-family: var(--font-m);
+  font-size: .86em;
+  background: rgba(141, 255, 196, .08);
+  padding: .1em .35em;
+}
+pre {
+  background: #07140f;
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+  overflow: auto;
+  font: 12.4px/1.45 var(--font-m);
+  color: #cfeedd;
+  margin: 10px 0 14px;
+}
+.path {
+  font: 400 12px/1.45 var(--font-m);
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 4px 0 18px;
+}
+.filters label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font: 500 12px/1 var(--font-m);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.filters label:has(:checked) {
+  color: var(--ink);
+  border-color: var(--phos-dim);
+  background: rgba(141, 255, 196, .08);
+}
+.filters input { accent-color: var(--phos); }
+.filters button {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--phos);
+  font: 500 12px/1 var(--font-m);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+#shown { font: 500 12px/1 var(--font-m); color: var(--faint); margin-left: auto; }
+
+.group { margin-top: 28px; }
+.group > header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.group .idx {
+  font: 800 1.6rem/1 var(--font-d);
+  color: var(--phos);
+  letter-spacing: -.04em;
+}
+.group h2 { margin: 0; font: 700 1.2rem/1.2 var(--font-d); }
+.group .sum { margin: 4px 0 0; color: var(--muted); font-size: 14.5px; }
+
+.finding {
+  margin-top: 12px;
+  background: rgba(5, 14, 11, .72);
+  border: 1px solid var(--line);
+  overflow: clip;
+}
+.finding.crit { border-left: 3px solid var(--crit); }
+.finding.high { border-left: 3px solid var(--high); }
+.finding.med  { border-left: 3px solid var(--med); }
+.finding.low  { border-left: 3px solid var(--low); }
+.finding[hidden], .group[hidden] { display: none !important; }
+.finding > summary {
+  list-style: none;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 88px 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 16px;
+}
+.finding > summary::-webkit-details-marker { display: none; }
+.fid {
+  font: 600 12px/1 var(--font-m);
+  color: var(--phos);
+  padding-top: 4px;
+  letter-spacing: .04em;
+}
+.finding h3 { margin: 0; font-size: 1.02rem; font-weight: 700; }
+.meta-row {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font: 500 11px/1 var(--font-m);
+  color: var(--faint);
+}
+.sev {
+  font: 600 10px/1 var(--font-m);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.sev.crit { color: var(--crit); background: var(--crit-bg); border-color: rgba(255, 92, 122, .35); }
+.sev.high { color: var(--high); background: var(--high-bg); border-color: rgba(255, 138, 76, .35); }
+.sev.med  { color: var(--med);  background: var(--med-bg);  border-color: rgba(231, 195, 74, .35); }
+.sev.low  { color: var(--low);  background: var(--low-bg);  border-color: rgba(110, 231, 183, .35); }
+.finding .body { padding: 0 16px 18px 16px; border-top: 1px solid var(--line); }
+.finding .body h4 {
+  margin: 1.15em 0 .35em;
+  font: 600 11px/1 var(--font-m);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--phos-dim);
+}
+.finding .body h4:first-child { margin-top: 14px; }
+.finding .body ul, .finding .body ol { margin: 0 0 1em; padding-left: 1.15rem; }
+.finding .body li { margin: .28em 0; }
+a.xid {
+  color: var(--phos);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(141, 255, 196, .35);
+  font-family: var(--font-m);
+  font-size: .92em;
+}
+a.xid:hover { border-bottom-color: var(--phos); }
+
+.waves { display: grid; gap: 10px; }
+.wave {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: rgba(5, 16, 12, .45);
+}
+.wave .w {
+  font: 800 1.1rem/1 var(--font-d);
+  color: var(--phos);
+}
+.wave p { margin: 0; color: var(--muted); }
+.wave b { color: var(--ink); }
+
+.note {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--phos-2);
+  background: rgba(94, 234, 212, .06);
+}
+
+footer.foot {
+  margin-top: 36px;
+  padding: 18px 0 8px;
+  border-top: 1px solid var(--line);
+  font: 400 12px/1.5 var(--font-m);
+  color: var(--faint);
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 980px) {
+  .topbar { grid-template-columns: 1fr; }
+  .hero, .g4 { grid-template-columns: 1fr 1fr; }
+  .matrix { grid-template-columns: repeat(5, 1fr); }
+  .hud-meta { justify-content: flex-start; }
+}
+@media (max-width: 640px) {
+  .hero, .g4, .pipeline, .wave, .finding > summary {
+    grid-template-columns: 1fr;
+  }
+  .matrix { grid-template-columns: repeat(3, 1fr); }
+  section.block { padding: 20px 16px; }
+  .kb { display: none; }
+  h1 { font-size: 1.8rem; }
+}
+
+@media print {
+  #rain, .scan, .noise, .topbar, .kb, .filters, .matrix, .pipeline { display: none !important; }
+  body { background: #fff; color: #111; }
+  section.block, .finding { background: #fff; color: #111; border-color: #ccc; box-shadow: none; clip-path: none; }
+  a { color: #064; }
+  .finding { break-inside: avoid; }
+  details.finding { open: revert; }
+}
+
+</style>
+</head>
+<body>
+<a class="skip" href="#verdict">К выводам</a>
+<canvas id="rain" aria-hidden="true"></canvas>
+<div class="scan" aria-hidden="true"></div>
+<div class="noise" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">ONECDC</span>
+    <span class="sub">audit 0.2.1 · 09.09.2026 · static</span>
+  </div>
+  <div class="search">
+    <span class="slash">/</span>
+    <input id="q" type="search" placeholder="CDC-id, модуль, «артикул», owner, OFFSET…" autocomplete="off">
+  </div>
+  <div class="hud-meta">
+    <span class="pill live">узел <b id="live-node">—</b></span>
+    <span class="pill crit">crit <b>3</b></span>
+    <span class="pill high">high <b>17</b></span>
+    <span class="pill">med 18 · low 7</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="hero" id="top">
+    <div>
+      <p class="kicker">Независимый аудит · исходники · без живой 1С</p>
+      <h1><span class="glitch">Три обещания,</span> которые код не держит</h1>
+      <p class="lede">В 0.2.1 нельзя считать доказанными гарантии «ACK означает полное сохранение», «повтор восстанавливает обработку» и «full_load не затирает свежее». Ниже — один каталог из 45 находок, а не сверка сверок.</p>
+    </div>
+    <div class="hero-side">
+      <div class="stat-jumbo">
+        <div class="num">45</div>
+        <div class="lbl">узлов · 33 по коду · 12 при условиях</div>
+      </div>
+      <div class="promises">
+        <div class="promise"><span class="x">ACK</span><p>Пакет можно подтвердить, не сохранив объект и не поставив сигнал.<span> <a class="xid" href="#cdc-01">CDC-01</a> · <a class="xid" href="#cdc-07">CDC-07</a> · <a class="xid" href="#cdc-13">CDC-13</a></span></p></div>
+        <div class="promise"><span class="x">SNAP</span><p>Снимок устаревает между страницами и может затереть уже подтверждённое состояние.<span> <a class="xid" href="#cdc-04">CDC-04</a> · <a class="xid" href="#cdc-05">CDC-05</a> · <a class="xid" href="#cdc-06">CDC-06</a></span></p></div>
+        <div class="promise"><span class="x">OWN</span><p>Второй процесс того же плана стирает защиту первого; heartbeat не доказывает rollback.<span> <a class="xid" href="#cdc-02">CDC-02</a> · <a class="xid" href="#cdc-08">CDC-08</a> · <a class="xid" href="#cdc-09">CDC-09</a></span></p></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="matrix" id="matrix" aria-label="Матрица находок">
+    <button type="button" class="cell crit" data-target="cdc-01" title="Очистка строкового реквизита в 1С не доезжает до БД: старое значение остаётся навсегда"><span class="id">CDC-01</span>крит</button>
+<button type="button" class="cell crit" data-target="cdc-02" title="Второй процесс с тем же планом обмена стирает реестр незавершённых merge первого — витрина теряет строки"><span class="id">CDC-02</span>крит</button>
+<button type="button" class="cell crit" data-target="cdc-03" title="Транслитерация неинъективна: разные объекты и поля 1С молча попадают в одну таблицу или колонку"><span class="id">CDC-03</span>крит</button>
+<button type="button" class="cell high" data-target="cdc-04" title="Полная выгрузка не вставляет новые строки группы, если в той же странице обновилась существующая строка этой группы"><span class="id">CDC-04</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-05" title="Пометка пропавших строк по $skip-страницам объявляет живые строки удалёнными: изменяемый источник и неуникальная сортировка"><span class="id">CDC-05</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-06" title="Игнорирование «шума» лишает снимок защиты: no-op пакет не обновляет метку, и устаревший снимок затирает подтверждённое состояние"><span class="id">CDC-06</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-07" title="Сбой между commit merge и сигналом теряет уведомление обработчику; повтор пакета его не восстанавливает"><span class="id">CDC-07</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-08" title="Истечение heartbeat принимается за доказательство rollback: живая, но замедленная транзакция теряет защиту границы и захвата"><span class="id">CDC-08</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-09" title="Два процесса с одним именем обработчика исполняют витрину параллельно: CAS проверяется после записи и не откатывает результат"><span class="id">CDC-09</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-10" title="Бухгалтерский full_load скрывает отказ окна, а на однодневном окне зацикливается без backoff и без остановки"><span class="id">CDC-10</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-11" title="Окна по периоду режут набор регистратора бухгалтерии, а writer заменяет группу целиком: страницы помечают строки друг друга"><span class="id">CDC-11</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-12" title="mark_missing не распространяет физическое удаление владельца на его табличные части"><span class="id">CDC-12</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-13" title="Объект с нераспознанным первичным ключом подтверждается без сохранения; частично распознанный ключ склеивает разные записи"><span class="id">CDC-13</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-14" title="Составное примитивное измерение выпадает из первичного ключа: значение уходит в X_Value, а в ключе остаётся нулевой GUID"><span class="id">CDC-14</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-15" title="HTTP 404 и любой неожиданный XML трактуются как «данных нет»: перепроверка и полная выгрузка принимают отказ прокси за пустоту"><span class="id">CDC-15</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-16" title="Кэш подписок на 30 секунд и выключение обработчика оставляют изменения без сигнала"><span class="id">CDC-16</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-17" title="Пакет только из неподдерживаемых объектов зацикливает очередь; смешанный пакет теряет их безвозвратно; дроссель переносит классы, которых Python не знает"><span class="id">CDC-17</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-18" title="Размер ответа 1С и рабочий набор памяти ничем не ограничены; дроссель считает объекты, а не байты"><span class="id">CDC-18</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-19" title="Табличная часть, выгруженная напрямую через full_load, помечает строки собственных предыдущих страниц как выпавшие"><span class="id">CDC-19</span>выс</button>
+<button type="button" class="cell high" data-target="cdc-20" title="Один несохраняемый объект блокирует весь план обмена навсегда: карантина и dead-letter нет"><span class="id">CDC-20</span>выс</button>
+<button type="button" class="cell med" data-target="cdc-21" title="Перепроверка кандидатов строит guid-литерал для составных полей ключа (Recorder_Key, составные измерения): 1С отвечает 500 или пустотой"><span class="id">CDC-21</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-22" title="Таймаут или обрыв на странице не уменьшает страницу, а фоновая выгрузка перезапускается с нуля каждый цикл без backoff"><span class="id">CDC-22</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-23" title="У полностью опустевшего набора ресурсы не гасятся: сброс в NULL зависит от состава колонок текущей пачки"><span class="id">CDC-23</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-24" title="Шторм пересборок витрин при первичной выгрузке: каждая новая колонка, появившаяся на очередной странице, заказывает полную пересборку"><span class="id">CDC-24</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-25" title="Наивные отметки now()::timestamp немонотонны при переводе часов: в повторяющийся час окна обработчиков и guard&#x27;ы ломаются"><span class="id">CDC-25</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-26" title="Реестр объектов синхронизируется с удалением, а словарь метаданных мутируется под чужими потоками: стираются захват и состояние, возможен RuntimeError"><span class="id">CDC-26</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-27" title="Сигнал остановки теряется до создания цикла, а после SIGTERM очередь полных выгрузок дорабатывается целиком; grace period контейнера этого не покрывает"><span class="id">CDC-27</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-28" title="Handler.execute/query: имя схемы не экранируется, а str.format ломает легитимный SQL с фигурными скобками"><span class="id">CDC-28</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-29" title="Пароли, URL с userinfo, значения полей и полные трейсбеки попадают в исключения, лог и таблицу onecdc_handlers"><span class="id">CDC-29</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-30" title="Basic Auth к 1С по незашифрованному HTTP во всех штатных примерах; проверка «https при пароле» отсутствует"><span class="id">CDC-30</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-31" title="Имя плана обмена и значения ключей интерполируются в OData-URL без экранирования"><span class="id">CDC-31</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-32" title="Неверный или иначе записанный GUID узла не роняет запуск, а сбрасывает номер пакета к 1"><span class="id">CDC-32</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-33" title="Публичный claim_full_load до загрузки метаданных «успешно» ничего не захватывает"><span class="id">CDC-33</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-34" title="Шаблон runner.py: ручной max_workers оставляет добавленные циклы в очереди навсегда; auth обязателен в отличие от env-режима"><span class="id">CDC-34</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-35" title="Некорректные параметры зацикливают выгрузку, дают горячий цикл или отключают обработчик без ошибки"><span class="id">CDC-35</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-36" title="Табличная часть, пришедшая как xsi:nil или пустой скаляр, не создаёт надгробие: старые строки остаются живыми"><span class="id">CDC-36</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-37" title="Edm.Double разбирается через float до NUMERIC: значения с более чем 15–17 значащими цифрами теряют точность до записи"><span class="id">CDC-37</span>сред</button>
+<button type="button" class="cell med" data-target="cdc-38" title="Документация обещает свойства, которых код не даёт, и противоречит сама себе"><span class="id">CDC-38</span>сред</button>
+<button type="button" class="cell low" data-target="cdc-39" title="Одновременные merge одной таблицы (страница выгрузки и пакет изменений) могут столкнуться на уникальном ключе"><span class="id">CDC-39</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-40" title="Расчёт пула в документации не учитывает max_overflow, а engine создаётся без pool_pre_ping"><span class="id">CDC-40</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-41" title="Нет lock-файла и закрепления зависимостей: CI, публикация и образ собираются из «последних» версий"><span class="id">CDC-41</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-42" title="Поиск плана видов субконто прерывает выгрузку любой ошибкой, кроме 404"><span class="id">CDC-42</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-43" title="Журнал загрузок и лог растут без ограничений; предупреждения о неизвестном поле пишутся на каждую запись"><span class="id">CDC-43</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-44" title="Учётные данные и адреса лабораторного контура в репозитории; живой тест подтверждает пакеты в 1С"><span class="id">CDC-44</span>низ</button>
+<button type="button" class="cell low" data-target="cdc-45" title="ON_FULL_LOAD=False отключает и сигналы об удалениях, которые находит только полная выгрузка"><span class="id">CDC-45</span>низ</button>
+  </div>
+  <div class="legend"><span><i class="c"></i>критическая</span><span><i class="h"></i>высокая</span><span><i class="m"></i>средняя</span><span><i class="l"></i>низкая</span><span>ячейка открывает карточку</span></div>
+  <nav class="toc" aria-label="Разделы">
+    <a href="#verdict">Вердикт</a>
+    <a href="#pipeline">Конвейер</a>
+    <a href="#catalog">Каталог</a>
+    <a href="#plan">Порядок правок</a>
+    <a href="#design">Замысел</a>
+    <a href="#ops">Эксплуатация</a>
+    <a href="#coverage">Метод</a>
+  </nav>
+
+  <section class="block" id="verdict">
+    <h2>Вердикт</h2>
+    <p><b>OneCDC — зрелый конвейер с честной документацией ограничений 1С, но несколько инвариантов проекта нарушены конкретными ветками кода.</b> Это не список стиля и не «нет pool_pre_ping». Это места, где КХД расходится с источником, витрина теряет строки или очередь обмена встаёт.</p>
+    <div class="g4">
+      <div class="tile"><b>Доставка</b><p>Commit данных, журнал, сигнал и Notify — разные транзакции. Повтор no-op не восстановит потерянное уведомление. Объект без ключа может быть подтверждён без сохранения.</p></div>
+      <div class="tile"><b>Согласованность</b><p>$skip по живому источнику пропускает строки. No-op CDC не двигает защитную метку. Плоские бухгалтерские страницы режут набор регистратора. Новые строки группы теряются после собственного UPDATE.</p></div>
+      <div class="tile"><b>Ключи и значения</b><p>Транслит склеивает имена. Составное примитивное измерение оставляет в ключе нулевой GUID. Очистка строки в 1С не доезжает, если колонки нет в пачке. Double идёт через float.</p></div>
+      <div class="tile"><b>Процессы</b><p>Owner = имя плана уничтожает чужие merge. Heartbeat 90 с не отличает паузу от смерти. Два HandlerLoop одного NAME переписывают витрину без отката.</p></div>
+    </div>
+    <p class="muted" style="margin-top:14px">Критичность — про воздействие, не про «нашлось в diff». Высокая: потеря или искажение данных, ложные удаления, устойчивая остановка. Средняя: формат источника, ошибка конфигурации, условный риск. Низкая: эксплуатация и гигиена. «При указанных условиях» значит: ветка в коде есть, для проявления нужен формат, конкуренция или конфиг — это не рапорт о сбое на боевой базе.</p>
+  </section>
+
+  <section class="block" id="pipeline">
+    <h2>Конвейер и где он рвётся</h2>
+    <p>Один пакет не живёт в одной транзакции: HTTP и PostgreSQL так не умеют. Идемпотентный upsert необходим и недостаточен. Нажмите ступень — каталог оставит только связанные узлы.</p>
+    <div class="pipeline"><button type="button" class="pipe" data-ids="cdc-15 cdc-17 cdc-18 cdc-20 cdc-31 cdc-32"><span class="n">01</span><h3>1С / OData</h3><p>SelectChanges, 404, дроссель, GUID узла</p></button>
+<button type="button" class="pipe" data-ids="cdc-01 cdc-14 cdc-23 cdc-36 cdc-37"><span class="n">02</span><h3>Разбор Atom</h3><p>Пустые поля, ТЧ, float, составные типы</p></button>
+<button type="button" class="pipe" data-ids="cdc-03"><span class="n">03</span><h3>Имена</h3><p>Транслит в таблицы и колонки</p></button>
+<button type="button" class="pipe" data-ids="cdc-04 cdc-06 cdc-11 cdc-19 cdc-39"><span class="n">04</span><h3>Merge</h3><p>Guard, группы, ресурсы, гонки</p></button>
+<button type="button" class="pipe" data-ids="cdc-07 cdc-13 cdc-16"><span class="n">05</span><h3>ACK / сигнал</h3><p>Notify, журнал, обработчики</p></button>
+<button type="button" class="pipe" data-ids="cdc-02 cdc-08 cdc-09 cdc-26 cdc-27"><span class="n">06</span><h3>Процессы</h3><p>Owner, heartbeat, HandlerLoop</p></button>
+<button type="button" class="pipe" data-ids="cdc-05 cdc-10 cdc-12 cdc-19 cdc-21 cdc-22"><span class="n">07</span><h3>Full load</h3><p>OFFSET, окна, ТЧ, бухгалтерия</p></button></div>
+    <p class="pipe-hint">Конструктор → служебные таблицы → run_once: $metadata → ReceivedNo+1 → SelectChanges → разбор → merge → журнал → сигнал → Notify. full_load ставит метку страницы до чтения. HandlerLoop двигает watermark по границе WriteTracker. FullLoadCron берёт захват и вызывает ту же выгрузку.</p>
+  </section>
+
+  <section class="block" id="catalog">
+    <h2>Каталог</h2>
+    <p>Семь глав одного отчёта. Карточки раскрываются; <kbd>j</kbd>/<kbd>k</kbd> листают, <kbd>/</kbd> ищет.</p>
+    <div class="filters">
+      <label><input class="sev-filter" type="checkbox" value="crit" checked> Критическая</label>
+      <label><input class="sev-filter" type="checkbox" value="high" checked> Высокая</label>
+      <label><input class="sev-filter" type="checkbox" value="med" checked> Средняя</label>
+      <label><input class="sev-filter" type="checkbox" value="low" checked> Низкая</label>
+      <label><input class="st-filter" type="checkbox" value="code" checked> По коду</label>
+      <label><input class="st-filter" type="checkbox" value="cond" checked> При условиях</label>
+      <button type="button" id="reset">Сбросить</button>
+      <span id="shown" role="status"></span>
+    </div>
+    <div class="group" id="wave-crit"><header><span class="idx">01</span><div><h2>Критический контур</h2><p class="sum">Три ветки, каждая из которых сама по себе расходится КХД с 1С или ломает витрину в штатной раскладке.</p></div></header>
+<details class="finding crit" id="cdc-01" data-sev="crit" data-status="code">
+<summary><span class="fid">CDC-01</span><div><h3>Очистка строкового реквизита в 1С не доезжает до БД: старое значение остаётся навсегда</h3><div class="meta-row"><span>Данные · цикл изменений</span><span>подтверждено по коду</span></div></div><span class="sev crit">Критическая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>917–922, 173–189</span> · <a href="src/onecdc/db_writer.py">db_writer.py</a> <span>109–112</span> · <a href="dbmerge/dbmerge.py">dbmerge.py</a> <span>745–751, 1292–1374</span> · <a href="tests/responses/trade_demo_8.5/msg002_nomenklatura.xml">msg002_nomenklatura.xml</a> <span>пустые элементы вида &lt;d:Артикул/&gt;</span></p><h4>Механизм</h4><p>Парсер берёт из m:properties только строковые значения: if k.startswith(&#x27;d:&#x27;) and isinstance(v, str). Пустой реквизит 1С отдаёт пустым элементом (&lt;d:Артикул/&gt;, в записанных ответах таких сотни), xmltodict превращает его в None, и поле в запись не попадает вовсе. Дальше два этапа усиливают эффект:</p>
+<ul><li>DataObject.add_records дописывает None только тем записям, у которых поле есть у соседей по пачке. Если поле пусто у всех строк пачки, колонки в данных нет.</li><li>dbmerge формирует список колонок из первой записи (_get_fields_from_list_of_dict) и в фазе UPDATE пишет только эти колонки. Колонка, отсутствующая в данных, в SET не попадает.</li></ul>
+<p>Для чисел, дат, булевых и ссылок 1С присылает текстовое значение (0, 0001-01-01T00:00:00, false, нулевой GUID), они конвертируются и пишутся. Дефект касается ровно строковых полей — а это наименования, артикулы, комментарии, коды, PredefinedDataName, Значение_Value составных реквизитов.</p><h4>Сценарий</h4><ul><li>В 1С у номенклатуры заполнен «Артикул» = A-100; пакет изменений доехал, в БД Artikul = &#x27;A-100&#x27;.</li><li>Пользователь стирает артикул и записывает элемент. В пакете приходит &lt;d:Артикул/&gt;.</li><li>Если в этом же пакете нет другой номенклатуры с непустым артикулом, колонки Artikul в данных нет; UPDATE её не трогает; merged_on может измениться из-за DataVersion… нет — DataVersion в skip_compare_fields, поэтому строка вообще «не изменилась».</li><li>Результат: в КХД навсегда A-100, обработчик не вызван, last_full_load_rows_modified тоже покажет 0 — полная выгрузка страдает тем же самым.</li></ul>
+<p>Результат зависит от состава пачки: та же очистка «сработает», если по соседству окажется запись с непустым значением этого поля. Это делает дефект трудновоспроизводимым в тестах и незаметным в эксплуатации.</p><h4>Последствия</h4><p>Систематическое расхождение КХД с источником по всем строковым полям, которые когда-либо очищались. Полная выгрузка не лечит (та же ветка парсера). Витрины, фильтрующие по пустому значению, дают неверный результат; «самопроверка CDC» через rows_modified = 0 ложно успокаивает.</p><h4>Что исправить</h4><ul><li>В _get_record_fields различать три случая: значение-строка, пустой скаляр (None или словарь с m:null=&quot;true&quot; без m:type) и коллекция (словарь с m:type=&quot;Collection(…)&quot;). Пустой скаляр писать явно как &#x27;&#x27;/None по типу поля из метаданных.</li><li>Состав колонок merge брать из метаданных объекта, а не из фактического состава пачки: тогда UPDATE всегда покрывает все известные поля.</li><li>Регрессия: пакет из одной записи, у которой единственное строковое поле очищено; ожидание — в БД пустая строка/NULL и сдвинутый merged_on.</li></ul><h4>Как проверить</h4><p>Оффлайн: подать в read_data_entries entry с &lt;d:Артикул/&gt; после сохранения строки с Артикул=&#x27;X&#x27; в ту же схему. Проверить значение колонки после DBWriter.save. Тесты test_noise_and_tombstones.py этот случай не покрывают: там сравниваются только равные значения и сокращённый набор.</p>
+</div></details>
+<details class="finding crit" id="cdc-02" data-sev="crit" data-status="code">
+<summary><span class="fid">CDC-02</span><div><h3>Второй процесс с тем же планом обмена стирает реестр незавершённых merge первого — витрина теряет строки</h3><div class="meta-row"><span>Обработчики · граница окна</span><span>подтверждено по коду</span></div></div><span class="sev crit">Критическая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/write_tracker.py">write_tracker.py</a> <span>97, 149–167, 169–186, 217–223</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>532</span> · <a href="src/onecdc/full_load_claim.py">full_load_claim.py</a> <span>24–30 (правильный образец owner)</span> · <a href="tests/test_handlers.py">test_handlers.py</a> <span>696–715 (test_restart_forgets_own_stale_writes закрепляет поведение)</span></p><h4>Механизм</h4><p>WriteTracker получает owner = exchange_name — имя плана обмена без хоста, pid и случайного суффикса. Конструктор вызывает _cleanup(), который удаляет все строки этого owner как «остатки прошлого запуска». У соседнего механизма — FullLoadClaim — авторы уже сделали owner уникальным на экземпляр (exchange:host:pid:hex) ровно по этой причине; реестр merge этот урок не получил.</p>
+<p>Три следствия одного решения:</p>
+<ul><li>живые строки первого процесса удаляются при старте второго;</li><li>счётчик id = f&#x27;{owner}:{n}&#x27; в обоих процессах начинается с нуля — возможна коллизия первичного ключа и падение track();</li><li>heartbeat() продлевает все строки с owner, то есть чужие тоже — брошенная строка умершего процесса-тёзки не протухнет никогда, пока жив второй.</li></ul><h4>Сценарий</h4><ul><li>Процесс A (репликатор) пишет толстую страницу полной выгрузки регистра; в onecdc_writes_in_process его строка держит границу окна на started_at.</li><li>Стартует процесс B с тем же exchange_name: второй контейнер при rolling update, отдельный контейнер с FullLoadCron (рекомендуемая документацией раскладка), ручной run_once рядом с работающим run_forever.</li><li>_cleanup() процесса B удаляет строку A. Обработчик считает boundary = now(), обрабатывает окно и записывает last_run_at.</li><li>A коммитит merge; merged_on его строк — время начала транзакций UPDATE/INSERT, левее уже записанного last_run_at.</li><li>Инкремент merged_on &gt; last_run_at эти строки не увидит никогда. Сырая таблица выглядит здоровой, витрина — нет.</li></ul><h4>Последствия</h4><p>Молчаливая потеря строк витрины в штатной, описанной в README раскладке «репликатор и расписание в разных контейнерах одного плана». Тот же owner ломает и отметку страницы полной выгрузки (page_started_at берётся из той же границы): снимок может затереть свежее изменение.</p><h4>Что исправить</h4><ul><li>Owner уникальный на экземпляр по образцу FullLoadClaim; свои строки прошлого запуска не чистить по имени, а полагаться на MERGE_HEARTBEAT_TTL и MERGE_ABANDONED_TTL.</li><li>Опционально advisory lock на (schema, exchange_name) для режима «ровно один репликатор на план».</li><li>Переписать test_restart_forgets_own_stale_writes: два живых трекера одного плана не вправе удалять чужие свежие строки.</li></ul><h4>Как проверить</h4><p>Оффлайн, без 1С: открыть track() в одном трекере, создать второй с тем же owner, вызвать boundary() из HandlerLoop между cleanup и выходом из track(). Ожидание: граница прижата к started_at; факт: now().</p>
+</div></details>
+<details class="finding crit" id="cdc-03" data-sev="crit" data-status="code">
+<summary><span class="fid">CDC-03</span><div><h3>Транслитерация неинъективна: разные объекты и поля 1С молча попадают в одну таблицу или колонку</h3><div class="meta-row"><span>Имена · схема БД</span><span>подтверждено по коду</span></div></div><span class="sev crit">Критическая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/name_mapper.py">name_mapper.py</a> <span>3–18, 47–61, 63–94</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>201–206 (dict(zip) оставляет последнее)</span> · <a href="src/onecdc/full_load_keys.py">full_load_keys.py</a> <span>43–49 (байтовое усечение есть только здесь)</span> · <a href="PLAN.md">PLAN.md</a> <span>118</span></p><h4>Механизм</h4><p>Таблица замен отображает е и э в e, ъ и ь в пустоту, кириллическое имя может совпасть с латинским (Ёлка → Yolka). Хэш добавляется только при превышении 63 символов или совпадении со служебным именем — уже после транслита, то есть от транслита, а не от оригинала, и всего 4 hex-символа (16 бит). Проверка «ambiguous» есть лишь в обратном разрешении имени (resolve_object_name) и не защищает обычный путь CDC: map_object_name к этому моменту уже записал оба объекта в одну таблицу.</p>
+<p>Отдельно: длина считается в символах (len(name)), а PostgreSQL ограничивает идентификатор 63 байтами. Буквы вне таблицы (украинские і ї є ґ, белорусская ў, любая латиница с диакритикой) остаются многобайтовыми: Catalog_ + 60×і — 63 символа и 113 байт. Соседний модуль full_load_keys режет по байтам — два правила в одном пакете.</p>
+<p>Третий канал: поле 1С, чей транслит точно совпал со служебным именем (merged_on, is_deleted_or_empty, exchange_message_no), проходит ветку «это наше поле» без хэша и конфликтует с колонкой, которой управляет dbmerge или парсер.</p><h4>Сценарий</h4><pre>from onecdc.name_mapper import NameMapper
+m = NameMapper()
+m.map_object_name(&#x27;Catalog_Сер&#x27;) == m.map_object_name(&#x27;Catalog_Сэр&#x27;)     # &#x27;Catalog_Ser&#x27;
+m.map_field_name(&#x27;Объект&#x27;) == m.map_field_name(&#x27;Обьект&#x27;)                  # &#x27;Obekt&#x27;
+len(m.map_object_name(&#x27;Catalog_&#x27; + &#x27;і&#x27;*60).encode())                    # 113 байт</pre>
+<p>Два объекта плана обмена с именами, различающимися только е/э или ъ/ь, после первого пакета лежат в одной таблице; scoped-mark и mark_missing одного объекта помечают строки другого. Два поля одной таблицы с одинаковым транслитом: dict(zip(out_keys, row)) оставляет значение последнего.</p><h4>Последствия</h4><p>Смешение данных двух объектов, ложные пометки удаления, падение CREATE TABLE/рефлексии на длинных не-русских именах. Обнаружить постфактум трудно: имена в БД выглядят правдоподобно.</p><h4>Что исправить</h4><ul><li>Вести множество занятых идентификаторов на схему; при коллизии добавлять хэш оригинального имени (8–10 hex), а не транслита.</li><li>Считать длину в байтах UTF-8 общей функцией с full_load_keys; расширить таблицу транслита на украинский/белорусский алфавиты.</li><li>Служебные имена: любое поле 1С, транслит которого совпал с ними, хэшировать всегда — «своё» служебное поле добавляет не парсер данных, а writer.</li><li>Тесты на пары выше: сейчас NameMapper не покрыт ни одним тестом.</li></ul><h4>Как проверить</h4><p>Оффлайн: сниппет выше. Против живой 1С: два справочника с именами «Сер»/«Сэр» в плане обмена.</p>
+</div></details></div>
+<div class="group" id="wave-snap"><header><span class="idx">02</span><div><h2>Снимок полной выгрузки</h2><p class="sum">Сверка должна выравнивать данные. Здесь она вносит ложные удаления, затирает свежее или объявляет успех на неполном чтении.</p></div></header>
+<details class="finding high" id="cdc-04" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-04</span><div><h3>Полная выгрузка не вставляет новые строки группы, если в той же странице обновилась существующая строка этой группы</h3><div class="meta-row"><span>Полная выгрузка · guard</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/db_writer.py">db_writer.py</a> <span>154–160, 239–248</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>885, 927–929</span> · <a href="dbmerge/dbmerge.py">dbmerge.py</a> <span>632–666 (UPDATE коммитится до INSERT), 1183–1224, 1292–1374</span> · <a href="tests/test_version_guard.py">test_version_guard.py</a> <span>23–26 (NEW_RUN = 2100 год скрывает дефект)</span></p><h4>Механизм</h4><p>Для регистров и табличных частей в режиме полной выгрузки DBWriter.save передаёт три условия: update_condition = merged_on &lt; page_started_at, delete_condition = scoped ∧ merged_on &lt; page_started_at и insert_condition = NOT EXISTS (строка той же группы с merged_on ≥ page_started_at). Отметка page_started_at берётся до чтения страницы.</p>
+<p>dbmerge.exec выполняет фазы последовательно: UPDATE (и коммит), затем INSERT. Фаза UPDATE штампует изменённым строкам merged_on = now(), то есть значение позже page_started_at. Фаза INSERT видит эти собственные строки как «группу, переписанную после отметки», и insert_condition отбрасывает все новые строки этой группы.</p>
+<p>Тесты guard&#x27;ов используют NEW_RUN = datetime(2100,1,1): любой now() меньше 2100 года, поэтому в тестах собственный UPDATE группу не «греет». В рабочем коде отметка — реальное время за секунды до merge.</p><h4>Сценарий</h4><ul><li>В БД табличная часть документа D: строки 1, 2 (обе с merged_on старше прогона).</li><li>В 1С у строки 1 поменяли количество и добавили строку 3; изменение в обмен не попало (для этого и нужна сверка).</li><li>Полная выгрузка читает D одной страницей: [1&#x27;, 2, 3].</li><li>UPDATE: строка 1 обновлена, merged_on = t₁ &gt; page_started_at.</li><li>INSERT: для строки 3 условие NOT EXISTS(g.Ref_Key = D ∧ g.merged_on ≥ page_started_at) ложно из-за строки 1. Строка 3 не вставлена.</li><li>Отчёт прогона: rows_modified = 1, finished_at проставлен, last_full_load_dt записан. Строка 3 появится только на следующей полной выгрузке (тогда строка 1 уже равна источнику, UPDATE не сработает, группа «холодная»).</li></ul>
+<p>То же для набора движений регистра: перепроведённый документ с изменённой суммой и добавленным движением.</p><h4>Последствия</h4><p>Полная выгрузка — заявленный способ «выровнять данные», но один прогон не сходится: результат сходится только за два прогона при неизменном источнике. Метрика last_full_load_rows_modified и самопроверка «должно быть 0» становятся неверными. В бухгалтерском регистре, где окно читается целиком, эффект тот же.</p><h4>Что исправить</h4><ul><li>Исключать из _group_not_touched_since строки, изменённые этим же merge: например, сравнивать не с page_started_at, а с отметкой, взятой после собственной фазы UPDATE, либо помечать группы, которые прогон сам обновил, и пропускать guard для них.</li><li>Проще: выполнять для группы один атомарный шаг «если группа холодная — заменить целиком (delete-mark + upsert)», а не три независимых условия.</li><li>Регрессия с реальной отметкой (db_now() за миг до сохранения), а не с 2100 годом: группа с изменённой и добавленной строкой в одной странице.</li></ul><h4>Как проверить</h4><p>Оффлайн против PostgreSQL: сохранить группу [1,2] обычным save; затем save([1&#x27;, 2, 3], full_load_started_at=writer.db_now()). Ожидание — три живые строки; факт — строка 3 отсутствует.</p>
+</div></details>
+<details class="finding high" id="cdc-05" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-05</span><div><h3>Пометка пропавших строк по $skip-страницам объявляет живые строки удалёнными: изменяемый источник и неуникальная сортировка</h3><div class="meta-row"><span>Полная выгрузка · пометка пропавших</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>804–836 (recheck только при окнах), 943–951, 1170–1212</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>339–378 ($orderby по Ref_Key → автоупорядочивание по представлению)</span> · <a href="src/onecdc/full_load_keys.py">full_load_keys.py</a> <span>111–164</span> · <a href="DESIGN.md">DESIGN.md</a> <span>474–486, 513–545</span> · <a href="tests/test_full_load.py">test_full_load.py</a> <span>956 (test_run_without_any_window_does_not_recheck закрепляет отсутствие перепроверки)</span></p><h4>Механизм</h4><p>Ключи страниц копятся в таблице прогона, и после последней страницы всё, чего там нет, помечается is_deleted_or_empty. Перепроверка кандидата запросом в 1С делается только если прогон шёл окнами (recheck = date_filter is not None or windowed). Сплошной прогон «в одну выборку» перепроверки не делает — а именно у него две независимые причины пропустить живую строку:</p>
+<ul><li>Изменяемый источник. $skip=N — смещение в заново построенной выборке. Удаление или переезд в сортировке любой строки из уже прочитанного префикса сдвигает следующую страницу на одну позицию: живая строка не прочитана ни в одну страницу.</li><li>Неуникальный ключ сортировки. Для справочников и документов $orderby=Ref_Key 1С разворачивает в автоупорядочивание по представлению (наименование/код). Одинаковые наименования — обычное дело (номенклатура в разных группах, контрагенты-тёзки). Порядок внутри такой ничьей СУБД 1С не гарантирует между запросами (особенно при параллельных планах), и страницы дают дубли и пропуски даже без единого изменения в источнике. Авторы измерили именно это на табличной части (87 строк: 4 дубля, 5 потерь) и починили добавлением LineNumber — но у справочника тай-брейкера нет.</li></ul><h4>Сценарий</h4><pre>источник: [A, B, C, D], страница 1 = [A, B]
+удалён A (или B переименован и уехал вниз)
+страница 2: $skip=2 над [B, C, D] → [D]
+C не попал в таблицу ключей; merged_on у C старый; recheck=False
+mark_missing → C помечен удалённым, ресурсы обнулены, merged_on поднят → витрина пересчитана «без C»</pre>
+<p>Для справочника в 10⁵ строк со сплошным чтением (даты нет, окон нет) вероятность события пропорциональна числу страниц и активности пользователей ночью — и она ненулевая при каждом ночном прогоне.</p><h4>Последствия</h4><p>Ложные удаления в КХД с поднятым merged_on: витрина «увидит» удаление и пересчитает агрегаты без живой строки. Возврат — только следующей полной выгрузкой, если строка не изменится в 1С. Ошибка необратима для внешних приёмников (отправка события об удалении).</p><h4>Что исправить</h4><ul><li>Перепроверять всех кандидатов запросом по ключу всегда, а не только при окнах — цена пропорциональна числу кандидатов, а их обычно мало.</li><li>Сохранять подтверждённые живые строки (перепроверка их читает) через save с guard, а не только дописывать ключи.</li><li>Документировать, что источник не даёт snapshot isolation, и что сплошной $skip по справочнику допустим только с перепроверкой.</li><li>Для сущностей добавлять в $orderby детерминированный тай-брейкер, если 1С его принимает (например, Code), и проверить поведение на живой базе.</li></ul><h4>Как проверить</h4><p>Оффлайн с фейковым сервером: две страницы, между запросами убрать первую строку из выдачи; проверить, что живая строка не помечена. Сейчас test_run_without_any_window_does_not_recheck утверждает противоположное поведение как желаемое.</p>
+</div></details>
+<details class="finding high" id="cdc-06" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-06</span><div><h3>Игнорирование «шума» лишает снимок защиты: no-op пакет не обновляет метку, и устаревший снимок затирает подтверждённое состояние</h3><div class="meta-row"><span>Полная выгрузка · guard</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/db_writer.py">db_writer.py</a> <span>116–125, 167–180, 219–237</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>863–919</span> · <a href="README_DB.md">README_DB.md</a> <span>171–175</span></p><h4>Механизм</h4><p>Guard полной выгрузки опирается только на merged_on, а merged_on по замыслу двигается лишь при изменении бизнес-значений (exchange_message_no и DataVersion в skip_compare_fields). Значит «строку никто не переписывал после отметки страницы» и «строку никто не подтверждал после отметки» — разные факты, а guard проверяет первый, хотя нужен второй.</p><h4>Сценарий</h4><pre>t0  БД: A                          источник: A
+t1  источник: B                     (изменение ещё в очереди)
+t2  full_load читает страницу: B    (page_started_at = t2⁻)
+t3  источник снова A
+t4  CDC получает пакет с A → значения равны → no-op → merged_on не тронут → пакет подтверждён
+t5  full_load сохраняет B: merged_on(t0) &lt; page_started_at → guard пропускает → БД: B</pre>
+<p>В очереди 1С последнего A уже нет. Контрпример не требует ни двух процессов, ни нарушения порядка пакетов. Симметрично: no-op CDC не защищает живой ключ от ошибочной пометки в mark_missing (та же _older_than_run).</p><h4>Последствия</h4><p>Полная выгрузка, призванная сверять данные, вносит устаревшее значение поверх актуального, и ни один сигнал об этом не приходит. Вероятность растёт с длительностью прогона (часы на больших регистрах) и активностью правок «туда-обратно» (проведение/отмена проведения).</p><h4>Что исправить</h4><ul><li>Разделить два времени: merged_on (изменение значений — для витрин) и отдельная отметка последнего подтверждённого наблюдения CDC (seen_on), обновляемая и при no-op. Guard&#x27;ы и _older_than_run должны сравниваться со второй.</li><li>Дешёвый вариант: в режиме изменений всегда писать exchange_message_no (он не в compare, но в update — dbmerge это умеет только если строка «изменилась»), то есть нужен отдельный UPDATE по ключам пакета для no-op строк.</li></ul><h4>Как проверить</h4><p>Оффлайн: последовательность save(A), save(A, emn=2) (no-op), save(B, full_load_started_at=t между ними). Ожидание — A; факт — B.</p>
+</div></details>
+<details class="finding high" id="cdc-10" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-10</span><div><h3>Бухгалтерский full_load скрывает отказ окна, а на однодневном окне зацикливается без backoff и без остановки</h3><div class="meta-row"><span>Полная выгрузка · регистр бухгалтерии</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>886–903, 1011–1021, 1044, 1052–1067, 1084–1089</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>401–438</span></p><h4>Механизм</h4><p>В ветке by_period непостоянный HTTPError превращается в exhausted=False — «сузьте окно». _load_by_windows учитывает этот флаг только в цикле шагающих окон; у верхнего открытого окна (read(anchor, None)) и у хвоста (read(None, cursor)) возвращаемое значение игнорируется. Окно, дошедшее до FULL_LOAD_WINDOW_MIN_DAYS = 1, при повторной ошибке снова получает window_days = max(1, 1 // 3) = 1 и перечитывается бесконечно: ни счётчика попыток, ни паузы, ни проверки StopSignal.</p><h4>Сценарий</h4><ul><li>Верхнее окно [anchor, +inf) ответило 500 (переполнение временных файлов) → окно молча пропущено → прогон «успешен», full_load_is_required снят, свежие проводки не загружены. С mark_missing=True перепроверка по регистратору не даст ложных пометок, но и значения/субконто не запишет.</li><li>Однодневное окно с 200 тысячами проводок (закрытие месяца) стабильно даёт 500 → поток выгрузки крутится вечно, каждый оборот — тяжёлый запрос к 1С; SIGTERM цикл не прерывает, контейнер добивается SIGKILL.</li></ul><h4>Последствия</h4><p>Неполная таблица регистра бухгалтерии, объявленная выгруженной; либо бесконечная нагрузка на сервер 1С без диагностики.</p><h4>Что исправить</h4><ul><li>Учитывать exhausted у верхнего и хвостового окон; на минимальном окне пробрасывать ошибку после N попыток с паузой.</li><li>Проверять StopSignal между окнами и страницами; не завершать прогон и не помечать пропавших, пока все окна не прочитаны.</li><li>Для окна, не влезающего в 1С даже за день, добавить дробление по Recorder_Type или по часам внутри суток.</li></ul><h4>Как проверить</h4><p>Оффлайн: read_accounting_register, отвечающий 500 на первый вызов; проверить, что full_load не возвращает успех. Для цикла — mock, всегда отвечающий 500, и таймер.</p>
+</div></details>
+<details class="finding high" id="cdc-11" data-sev="high" data-status="cond">
+<summary><span class="fid">CDC-11</span><div><h3>Окна по периоду режут набор регистратора бухгалтерии, а writer заменяет группу целиком: страницы помечают строки друг друга</h3><div class="meta-row"><span>Полная выгрузка · регистр бухгалтерии</span><span>при указанных условиях</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>790–802, 885–891</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>401–438</span> · <a href="src/onecdc/db_writer.py">db_writer.py</a> <span>139–162, 270–287</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>305–320 (object_key регистра = Recorder + Recorder_Type)</span></p><h4>Механизм</h4><p>Для регистров, подчинённых регистратору, окно строится лямбдой RecordSet/any(…) и отдаёт набор целиком — на этом держится scoped-пометка «строки группы, которых нет в странице, выпали из набора». Регистр бухгалтерии читается иначе: из виртуальной таблицы RecordsWithExtDimensions(Condition=&#x27;Period ge … and Period lt …&#x27;), которая возвращает плоские движения, отфильтрованные по периоду. Если у одного регистратора движения лежат в разных окнах (или пользователь задал период, отсекающий часть набора), страница несёт часть группы, а _scoped_delete_condition по (Recorder, Recorder_Type) помечает остальные движения регистратора как выпавшие.</p>
+<p>Guard merged_on &lt; page_started_at не спасает: свежее окно загружается первым, а старое — следующим, и строки свежего окна к тому моменту старше отметки новой страницы? Нет — они новее, поэтому защищены. Но обратная сторона верна: движения старого окна, уже лежащие в БД от прошлых прогонов, помечаются страницей свежего окна.</p><h4>Сценарий</h4><p>Документ «Операция» с проводками за 31.03 23:50 и 01.04 00:10 (один регистратор, два периода). Окна: [01.04, +inf) и [02.03, 01.04). Первое окно приносит только апрельскую проводку; scoped-mark помечает мартовскую (из БД) удалённой и гасит суммы. Второе окно приносит мартовскую и «воскрешает» её — но с новым merged_on, лишним сигналом и ложными событиями для внешних приёмников; при обрыве между окнами — ложная пометка остаётся.</p><h4>Последствия</h4><p>Ложные пометки и обнуления ресурсов бухгалтерских проводок; в промежутке между окнами витрина считает по искажённым данным. Условие достижимости — регистратор с движениями в разных периодах; платформа этого не запрещает, код не проверяет.</p><h4>Что исправить</h4><ul><li>Для плоских бухгалтерских окон использовать upsert без scoped-пометки, а исчезновение движений определять единым проходом mark_missing по всему окну прогона.</li><li>Либо дочитывать полный набор регистратора (read_by_key) для регистраторов, встретившихся у края окна.</li></ul><h4>Как проверить</h4><p>Оффлайн: подать в DBWriter.save два «окна» одного регистратора с full_load_started_at и проверить флаги между ними.</p>
+</div></details>
+<details class="finding high" id="cdc-12" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-12</span><div><h3>mark_missing не распространяет физическое удаление владельца на его табличные части</h3><div class="meta-row"><span>Полная выгрузка · пометка пропавших</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>1158–1168, 1170–1212</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>1138–1174</span> · <a href="DESIGN.md">DESIGN.md</a> <span>831–832</span></p><h4>Механизм</h4><p>Таблица ключей и финальная пометка ведутся только по самому объекту. Табличные части «помечаются вместе с владельцем» лишь когда владелец пришёл в странице с пустой коллекцией. Если документ физически удалён в 1С до прогона, его entry не приходит вовсе, вложенные ТЧ не обрабатываются, и их строки в БД сохраняют is_deleted_or_empty = false, старые суммы и старый merged_on.</p><h4>Сценарий</h4><ul><li>Документ D с 40 строками ТЧ загружен.</li><li>В 1С D помечен на удаление и удалён «Удалением помеченных объектов». Пометка доехала (ТЧ получили флаг от родителя), но затем удаление в обмен не пришло.</li><li>Если между пометкой и удалением документ ещё раз записали без пометки (типичное «сняли пометку — удалили другой обработкой»), строки ТЧ снова живые.</li><li>Ночной full_load помечает только строку документа; 40 строк ТЧ живут вечно, подписчики только на таблицу ТЧ сигнал не получают.</li></ul><h4>Последствия</h4><p>Неполнота пометки удалений в таблицах ТЧ — как раз тех, из которых обычно считаются суммы витрин.</p><h4>Что исправить</h4><ul><li>После пометки владельца помечать строки его ТЧ по Ref_Key с тем же guard по merged_on и сигналом подписчикам ТЧ.</li><li>End-to-end тест: удаление документа с ранее загруженными строками ТЧ.</li></ul><h4>Как проверить</h4><p>Оффлайн: фейковый сервер без документа D при наличии его ТЧ в БД; проверить флаг строк ТЧ после full_load.</p>
+</div></details>
+<details class="finding high" id="cdc-19" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-19</span><div><h3>Табличная часть, выгруженная напрямую через full_load, помечает строки собственных предыдущих страниц как выпавшие</h3><div class="meta-row"><span>Полная выгрузка · API</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>666–670, 843–952, 1461–1480</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>339–378</span> · <a href="src/onecdc/db_writer.py">db_writer.py</a> <span>139–162</span></p><h4>Механизм</h4><p>Публичный full_load принимает имя ТЧ (Document_X_Товары) и листает её плоскими строками по Ref_Key, LineNumber. DBWriter.save при этом делает scoped-пометку по владельцу на каждой странице, предполагая, что страница несёт группу целиком. Если строки одного владельца попали на две страницы, вторая помечает строки первой как выпавшие; page_started_at берётся заново, поэтому первая страница уже «старая» и guard её не защищает.</p><h4>Сценарий</h4><pre>ТЧ владельца D: строки 1..4, page_size=2
+страница 1 [1,2] → save; страница 2 [3,4] → save: scoped-mark по D помечает 1,2
+таблица ключей содержит все четыре — но пометку не отменяет</pre><h4>Последствия</h4><p>Ложные пометки и обнуление ресурсов в ТЧ. Комментарии в коде опасность признают, но API режим не запрещает, а list_objects/README_API описывают ТЧ как допустимый объект.</p><h4>Что исправить</h4><ul><li>Запретить прямую выгрузку ТЧ с понятной ошибкой и подсказкой имени владельца; либо в этом режиме отключать scoped-пометку и помечать через mark_missing по итогам прогона.</li></ul><h4>Как проверить</h4><p>Оффлайн: фейковый feed ТЧ с 4 строками одного владельца, batch_size=2.</p><h4>Замысел и его граница</h4><p>DESIGN.md/код: «Отдельная сущность у табличной части в OData всё же есть, и full_load, если его натравить прямо на неё, будет листать её… ради такого случая ничья и разрешается». То есть режим осознанно поддержан для пагинации, но его взаимодействие со scoped-пометкой не рассмотрено. Тезис о поддержке режима оспорен: пагинация корректна, запись — нет.</p>
+</div></details>
+<details class="finding med" id="cdc-21" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-21</span><div><h3>Перепроверка кандидатов строит guid-литерал для составных полей ключа (Recorder_Key, составные измерения): 1С отвечает 500 или пустотой</h3><div class="meta-row"><span>Полная выгрузка · пометка пропавших</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>1296–1305, 1247–1281</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>133–151, 755–756</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>257–260, 277–280 (составные поля принудительно Guid)</span> · <a href="DESIGN.md">DESIGN.md</a> <span>872–885 (таблица ответов на фильтр по Recorder)</span></p><h4>Механизм</h4><p>В метаданных любое поле с парным _Type и поле Recorder принудительно получают тип Guid. _still_in_1c для независимого регистра строит $filter через _odata_literal(value, &#x27;Guid&#x27;) → Измерение eq guid&#x27;…&#x27;. По таблице из DESIGN.md сравнение составного поля с guid-литералом даёт 500 «нельзя сравнивать поля неограниченной длины», а со строковым — 200 и ноль строк. Первое роняет прогон на последнем шаге (все страницы уже прочитаны), второе — помечает всех кандидатов удалёнными. Отдельно read_by_key сериализует Recorder_Key (на проводе Edm.Guid) строковым литералом — обратная ошибка того же рода.</p><h4>Сценарий</h4><p>Независимый регистр «Значения свойств объектов» с измерением «Объект» составного типа в ключе. Ночной FullLoadCron за неделю: 200 кандидатов на пометку → перепроверка → 500 → прогон падает после полного чтения; так каждую ночь. Отключить mark_missing у расписания нельзя.</p><h4>Последствия</h4><p>Невозможность завершить сверку для регистров с составными измерениями (или регистров с Recorder_Key), либо ложная массовая пометка — в зависимости от реакции конкретной платформы.</p><h4>Что исправить</h4><ul><li>Хранить «тип на проводе» отдельно от SQL-типа; для составных полей использовать синтаксис 1С cast(guid&#x27;…&#x27;, &#x27;StandardODATA.Тип&#x27;) либо перепроверять прямым адресом.</li><li>Для Recorder_Key — guid-литерал в адресе.</li></ul><h4>Как проверить</h4><p>Требует живой 1С: реакция на eq guid&#x27;…&#x27; по составному измерению. Статически подтверждена только генерация литерала.</p><h4>Замысел и его граница</h4><p>DESIGN.md подробно описывает, почему по Recorder нельзя фильтровать, и делает для регистраторных регистров исключение (прямой адрес). Для независимых регистров с составными измерениями тот же аргумент применим, но исключение не сделано — тезис документа распространён на случай, который он сам не рассмотрел.</p>
+</div></details>
+<details class="finding med" id="cdc-22" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-22</span><div><h3>Таймаут или обрыв на странице не уменьшает страницу, а фоновая выгрузка перезапускается с нуля каждый цикл без backoff</h3><div class="meta-row"><span>Полная выгрузка · устойчивость</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>895–919 (только HTTPError), 1599–1610, 1612–1625</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>25</span></p><h4>Механизм</h4><p>Адаптация размера страницы срабатывает только на requests.HTTPError. ReadTimeout, ConnectionError, обрыв по Content-Length — исключения других классов: они пробрасываются, прогон падает, а _full_load_page_size остаётся прежним. _run_full_load оставляет full_load_is_required, и следующий цикл (через interval, обычно 60 с) начинает объект заново с skip=0 и тем же размером страницы. Ни счётчика неудач, ни паузы, ни точки возобновления. _dispatch_full_loads при этом захватывает сразу все помеченные объекты, даже если воркеров два: остальные ждут в очереди с активным захватом, недоступные расписаниям других процессов.</p><h4>Сценарий</h4><p>Регистр с толстыми наборами: страница адаптировалась до 30 entry, но одна entry на 12 МБ формируется 1С дольше 15 минут → ReadTimeout → прогон упал на 40-й странице → через минуту всё с начала, те же 39 страниц, тот же таймаут. Сутки непрерывной нагрузки на 1С без единой полезной записи после 39-й страницы.</p><h4>Последствия</h4><p>Бесконечная тяжёлая нагрузка на сервер 1С, отсутствие прогресса и невидимость проблемы (в логе — одна строка ошибки в час).</p><h4>Что исправить</h4><ul><li>Ловить requests.RequestException (не только HTTPError) и делить страницу так же, как при 500.</li><li>Экспоненциальный backoff и предел попыток для фоновой выгрузки объекта; фиксировать прогресс (последнее успешно прочитанное окно) и возобновлять с него.</li><li>Захватывать объект в момент фактического старта воркера, а не при постановке в очередь.</li></ul><h4>Как проверить</h4><p>Оффлайн: mock read_object, бросающий ReadTimeout на N-й странице; проверить размер страницы и число повторов.</p><h4>Замысел и его граница</h4><p>DESIGN.md: «В run_forever упавшая фоновая выгрузка повторится на следующем цикле — и начнёт уже с подобранного размера». Тезис верен только для отказов с HTTP-кодом; для таймаутов подобранный размер не меняется. Оспорено.</p>
+</div></details></div>
+<div class="group" id="wave-deliv"><header><span class="idx">03</span><div><h2>Доставка изменений</h2><p class="sum">ACK, сигнал обработчику и повтор пакета — три разных факта. Код часто считает их одним.</p></div></header>
+<details class="finding high" id="cdc-07" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-07</span><div><h3>Сбой между commit merge и сигналом теряет уведомление обработчику; повтор пакета его не восстанавливает</h3><div class="meta-row"><span>Обработчики · доставка сигнала</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>594–614, 624–646, 924–937</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>571–588, 590–615</span> · <a href="src/onecdc/db_logs.py">db_logs.py</a> <span>80–104</span></p><h4>Механизм</h4><p>Merge, завершение строки журнала, снятие строки реестра и сигнал обработчику — четыре отдельные транзакции (а внутри merge — ещё три коммита dbmerge). Если процесс падает или БД отказывает после коммита данных, но до HandlerSignals.signal, пакет не подтверждён и придёт снова. Но повторный merge увидит уже записанные значения: rows_modified = 0, added_fields = {}, и _signal_handlers ничего не поставит. Затем пакет будет подтверждён.</p>
+<p>Тот же разрыв на каждой странице полной выгрузки и у request_full_rebuild: новая колонка добавлена, DDL закоммичен, а требование пересборки не записано — повтор колонку заново не «добавит».</p><h4>Сценарий</h4><ul><li>save(Document_X) закоммичен: строки обновлены, merged_on = t.</li><li>Обрыв соединения на write_result или signal; исключение; пакет не подтверждён.</li><li>Следующий цикл: тот же пакет, merge no-op, сигнала нет, подтверждение отправлено.</li><li>Обработчик не вызван. Он увидит строки с merged_on = t только при следующем сигнале по любой подписанной таблице — которого может не быть часами.</li></ul><h4>Последствия</h4><p>Витрина/внешний приёмник отстаёт на неопределённое время; при enabled=false/паузе обработчика сигнал теряется совсем. Нарушено обещание «репликатор знает, когда данные изменились, и сам вызывает ваш код».</p><h4>Что исправить</h4><ul><li>Сделать сигнал долговечной обязанностью: ставить update_requested_at в той же транзакции, что и последняя фаза merge (dbmerge допускает commit_all_steps=False, но коммитит сам; нужен хук или вынесение сигнала в outbox-таблицу, которую разбирает отдельный шаг «до подтверждения пакета»).</li><li>Минимум: сигналить подписчикам всех таблиц пакета до NotifyChangesReceived, независимо от rows_modified, если предыдущая попытка обработки пакета этого номера не завершилась (признак — незакрытая строка журнала с тем же message_no).</li></ul><h4>Как проверить</h4><p>Оффлайн: подменить HandlerSignals.signal исключением на первом вызове, прогнать run_once дважды; проверить update_requested_at подписчика.</p>
+</div></details>
+<details class="finding high" id="cdc-13" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-13</span><div><h3>Объект с нераспознанным первичным ключом подтверждается без сохранения; частично распознанный ключ склеивает разные записи</h3><div class="meta-row"><span>Цикл изменений · доставка</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>292–302</span> · <a href="src/onecdc/db_writer.py">db_writer.py</a> <span>100–107</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>575–591, 605–614</span></p><h4>Механизм</h4><p>_read_metadata_item_key берёт только те поля Key/PropertyRef, что попали в распознанные properties: поле ключа неподдержанного типа молча выпадает. DBWriter.save при пустом ключе пишет warning и возвращает None; оркестратор не отличает «нечего сохранять» от «сохранить невозможно», закрывает строку журнала и подтверждает пакет. Если распознана лишь часть составного ключа, две разные записи 1С получают одинаковый ключ в БД, и одна перезаписывает другую.</p><h4>Сценарий</h4><p>Независимый регистр сведений с измерением типа, которого нет в type_mapping (например, Edm.Time или неизвестный будущий тип платформы): в метаданных объект есть, ключ неполон. Пакет с его записями подтверждён, строки либо не сохранены (WARNING в логе), либо склеены.</p><h4>Последствия</h4><p>Нарушение контракта «ACK только после успешного сохранения»: данные теряются с одной строкой WARNING, которую никто не читает.</p><h4>Что исправить</h4><ul><li>При разборе $metadata ронять объект (и запуск), если любой компонент объявленного ключа не распознан; для регистров запрещать сохранение с усечённым ключом.</li><li>В save различать допустимый no-op (пусто) и фатальный skip (нет ключа) — второе должно быть исключением до NotifyChangesReceived.</li></ul><h4>Как проверить</h4><p>Оффлайн: $metadata с ключом из поля неизвестного типа; убедиться, что run_once не подтверждает пакет.</p><h4>Замысел и его граница</h4><p>DESIGN.md обосновывает мягкость к неизвестным типам полей («не ошибка метаданных») и к неподдерживаемым классам объектов. Ключ — другой случай: без него объект нельзя сохранить вовсе, и молчаливое подтверждение противоречит собственному инварианту документа «notify только после успешного save».</p>
+</div></details>
+<details class="finding high" id="cdc-15" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-15</span><div><h3>HTTP 404 и любой неожиданный XML трактуются как «данных нет»: перепроверка и полная выгрузка принимают отказ прокси за пустоту</h3><div class="meta-row"><span>Сеть · разбор ответов</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>392–393, 574–575, 759–766, 800–802</span> · <a href="src/onecdc/change_reader.py">change_reader.py</a> <span>39–40</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>1279–1280</span></p><h4>Механизм</h4><p>read_by_key считает любой 404 отсутствием объекта — включая 404 от IIS/nginx при снятой публикации, ошибке маршрутизации или (как авторы сами описывают) 404.15 «query string too long». Вызванный из перепроверки кандидатов, такой 404 разрешает пометить живые наборы удалёнными. read_object, _request_ext_dimensions и read_changes принимают любой корректный XML без ожидаемого feed/d:Result за пустой набор: HTML-страница шлюза с кодом 200 или XML-ошибка без m:error выглядят как «объект пуст».</p><h4>Сценарий</h4><ul><li>Перепроверка регистра идёт по одному запросу на регистратор; веб-сервер перезапускается и на 30 секунд отдаёт 404 на всё → все кандидаты «отсутствуют» → массовая пометка удалёнными с обнулением ресурсов.</li><li>Балансировщик отдаёт 200 с HTML «Service temporarily unavailable»; xmltodict разбирает как XML без feed; страница = 0 entry → прогон завершён, mark_missing помечает всё, что не увидел.</li></ul><h4>Последствия</h4><p>Массовые ложные удаления при кратковременных инфраструктурных сбоях — самый тяжёлый исход из возможных для сверки.</p><h4>Что исправить</h4><ul><li>404 считать отсутствием только при подтверждённом теле ответа 1С («Экземпляр сущности не найден» / m:error); иные 404 пробрасывать.</li><li>Требовать структуру OData (feed с Atom-пространством имён либо d:Result); всё прочее — ошибка формата, прогон прерывается без пометок.</li></ul><h4>Как проверить</h4><p>Оффлайн: фейковый сервер, отдающий 404 без тела и 200 с HTML; проверить, что full_load падает, а не помечает.</p><h4>Замысел и его граница</h4><p>DESIGN.md: «Отсутствие набора 1С сообщает честным 404 „Экземпляр сущности не найден“ — это ответ, а не ошибка». Тезис верен для 1С, но код не проверяет, что ответил именно 1С; в том же документе описан IIS, отдающий 404 по совсем другой причине. Тезис оспаривается на его же основаниях.</p>
+</div></details>
+<details class="finding high" id="cdc-16" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-16</span><div><h3>Кэш подписок на 30 секунд и выключение обработчика оставляют изменения без сигнала</h3><div class="meta-row"><span>Обработчики · сигнал</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/handlers.py">handlers.py</a> <span>149, 540–569, 699–725, 767–771</span> · <a href="tests/test_handlers.py">test_handlers.py</a> <span>392 (test_disabled_handler_does_not_accumulate_window)</span></p><h4>Механизм</h4><p>HandlerSignals кэширует список подписчиков (только enabled) на SUBSCRIPTIONS_TTL = 30 с. Новый HandlerLoop делает стартовый прогон, но изменения, закоммиченные после границы этого прогона и до обновления кэша репликатора, сигнала не получают. При enabled=false цикл сбрасывает грязные отметки, репликатор через TTL перестаёт сигналить, а обратное включение само отметку не ставит и last_run_at не двигает.</p><h4>Сценарий</h4><ul><li>t=0: обработчик стартует, обрабатывает окно до boundary₀, регистрируется в таблице.</li><li>t=5: репликатор сохраняет подписанную таблицу; его кэш (прочитан в t=−10) обработчика не содержит → сигнала нет.</li><li>Дальнейших изменений этой таблицы нет неделю → строки с merged_on ∈ (boundary₀, t=5] ждут неделю.</li></ul>
+<p>Про enabled: документация обещает «окно за время простоя не копят», но last_run_at не двигается, и первый сигнал после включения всё равно прочитает весь простой — только позже и по случайному поводу.</p><h4>Последствия</h4><p>Отставание витрины на неопределённое время без ошибок в логах; поведение при выключении/включении расходится с документацией.</p><h4>Что исправить</h4><ul><li>При регистрации/включении ставить себе update_requested_at = now() (catch-up) и инвалидировать кэш репликатора (версия подписок в таблице).</li><li>Сигналить и выключенным обработчикам (метка копится), а решение «не обрабатывать» принимать в цикле.</li></ul><h4>Как проверить</h4><p>Оффлайн: HandlerSignals с прогретым кэшем, регистрация нового HandlerLoop, signal() в пределах 30 с — метки нет.</p><h4>Замысел и его граница</h4><p>DESIGN.md обосновывает кэш экономией запросов «на каждую страницу полной выгрузки» — резонно, но окно потери сигнала при регистрации документ не обсуждает. Про enabled README_DB утверждает, что окно не копится; код показывает обратное. Оба тезиса оспорены.</p>
+</div></details>
+<details class="finding high" id="cdc-17" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-17</span><div><h3>Пакет только из неподдерживаемых объектов зацикливает очередь; смешанный пакет теряет их безвозвратно; дроссель переносит классы, которых Python не знает</h3><div class="meta-row"><span>Цикл изменений · поддержка классов</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>831–863</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>588–591</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>81–89</span> · <a href="onecdc-throttle-module.txt">onecdc-throttle-module.txt</a> <span>171–201 (константы и регистры расчёта переносятся в очередь отдачи)</span> · <a href="DESIGN.md">DESIGN.md</a> <span>372–382</span></p><h4>Механизм</h4><p>Парсер пропускает классы вне SUPPORTED_TYPES с одним WARNING на пакет. Подтверждение шлётся только при len(self.changes) &gt; 0. Отсюда два разных исхода одного явления: смешанный пакет подтверждается (регистрации неподдержанных объектов потеряны), пакет из одних неподдержанных — не подтверждается и повторяется каждый цикл с тем же MessageNo. Дроссель на стороне 1С при этом сознательно переносит в очередь отдачи константы и регистры расчёта; заполнив лимит ЛимитОчереди() такими регистрациями, он закупоривает очередь для поддерживаемых объектов, а Python-сторона их только повторяет.</p><h4>Сценарий</h4><ul><li>Регламентное задание переносит 500 регистраций регистра расчёта (закрытие месяца по зарплате).</li><li>onecdc читает пакет: все entry неподдержанные, changes пуст, notify нет.</li><li>Каждые 60 с — тот же SelectChanges на 500 объектов; очередь B полна, новые справочники в неё не переносятся; репликация всего плана стоит, в логе только WARNING.</li></ul><h4>Последствия</h4><p>Остановка репликации плана целиком либо потеря изменений неподдержанных классов — в зависимости от состава пакета; поведение не соответствует ни документации, ни ожиданиям оператора.</p><h4>Что исправить</h4><ul><li>Единая политика: считать число исходных entry отдельно от числа сохранённых объектов; для пакета с неподдержанными классами — либо явный «карантин» с подтверждением и записью в журнал, либо остановка с ERROR, но одинаково для обоих случаев.</li><li>Согласовать ОбъектыОбхода дросселя с SUPPORTED_TYPES; на старте сверять состав плана (через ExchangePlan_*/метаданные) и предупреждать о классах вне поддержки.</li></ul><h4>Как проверить</h4><p>Оффлайн: пакет только из CalculationRegister_*; проверить, что notify не шлётся и цикл повторяет номер.</p><h4>Замысел и его граница</h4><p>DESIGN.md сознательно выбирает «пакет всё равно подтверждается, решение принимает человек» — с этой политикой для смешанного пакета можно согласиться как с осознанным компромиссом. Но код не реализует её для пакета только из неподдержанных объектов (там подтверждения нет, и очередь зацикливается), а собственный 1С-модуль проекта создаёт именно такие пакеты. Находка сохранена как расхождение кода с заявленным замыслом.</p>
+</div></details>
+<details class="finding high" id="cdc-18" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-18</span><div><h3>Размер ответа 1С и рабочий набор памяти ничем не ограничены; дроссель считает объекты, а не байты</h3><div class="meta-row"><span>Устойчивость · память</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/change_reader.py">change_reader.py</a> <span>35–40</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>388–396, 570–575, 891 (окно бухгалтерии целиком)</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>63–64, 1194–1199</span> · <a href="src/onecdc/full_load_keys.py">full_load_keys.py</a> <span>137–138</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>25 (read timeout 900 с)</span></p><h4>Механизм</h4><p>requests загружает тело целиком, затем создаются Unicode-текст, дерево xmltodict, колоночные списки DataObject и список records для dbmerge — пять представлений одних данных одновременно. FULL_LOAD_TARGET_BYTES — целевой размер следующей страницы, а не потолок ответа; entry неделима; окно регистра бухгалтерии читается без Top. Кандидаты mark_missing материализуются списком. Read timeout ограничивает паузу между байтами, а не длительность передачи.</p><h4>Сценарий</h4><p>Массовое перепроведение 300 реализаций с ТЧ по 5 000 строк без дросселя: один SelectChanges — сотни мегабайт XML, RSS процесса — в разы больше, OOM-kill контейнера; пакет не подтверждён, следующий цикл повторяет тот же ответ. С дросселем в 500 объектов сценарий тот же, потому что лимит — в регистрациях.</p><h4>Последствия</h4><p>Циклический OOM без прогресса; параллельно — временные файлы на сервере приложений 1С.</p><h4>Что исправить</h4><ul><li>Потоковое чтение с потолком принятых байтов (stream=True, счётчик, обрыв без ACK и ERROR «включите/ужесточите дроссель»).</li><li>Общий deadline на запрос; для больших пакетов — потоковый разбор (iterparse) и посущностное сохранение.</li><li>В дросселе — лимит по числу строк ТЧ/движений, а не только по объектам.</li></ul><h4>Как проверить</h4><p>Оффлайн: фейковый сервер с ответом 1 ГБ; наблюдать RSS.</p><h4>Замысел и его граница</h4><p>DESIGN.md честно признаёт: «Размер пакета: со стороны клиента его ограничить нечем» и предлагает дроссель. Соглашаемся с невозможностью ограничить формирование пакета в 1С, но не с отсутствием защиты на приёме: клиент может отказаться от гигантского ответа до разбора и сообщить об этом, а не умирать по OOM. Находка сохранена.</p>
+</div></details>
+<details class="finding high" id="cdc-20" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-20</span><div><h3>Один несохраняемый объект блокирует весь план обмена навсегда: карантина и dead-letter нет</h3><div class="meta-row"><span>Цикл изменений · устойчивость</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>575–581 (RuntimeError), 594–614, 1536–1565</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>905–910 (ValueError), 1153–1163</span> · <a href="src/onecdc/change_reader.py">change_reader.py</a> <span>46–48 (fill_ext_dimensions внутри read_changes)</span></p><h4>Механизм</h4><p>Пакет сохраняется целиком или не подтверждается. Любое неустранимое исключение на одном объекте — ValueError(&#x27;Metadata not found&#x27;) для ТЧ, чей _RowType не опубликован, RuntimeError(&#x27;No metadata object&#x27;), конфликт типов колонки (создана как String по автодетекту неизвестного поля, позже метаданные дали другой тип), ошибка уникальности из <a class="xid" href="#cdc-14">CDC-14</a>, неустранимый отказ дочитки субконто регистра бухгалтерии — повторяется каждый цикл с растущим backoff до 30 минут. Без вмешательства человека очередь стоит бесконечно; журнал показывает лишь незакрытые строки.</p><h4>Сценарий</h4><p>В план обмена добавили документ, а его табличную часть в состав OData не включили. Первый же пакет с этим документом: ValueError при разборе строк ТЧ → цикл падает → через час пауза 30 минут → все остальные объекты плана тоже не реплицируются, пока администратор не прочитает лог.</p><h4>Последствия</h4><p>Полная остановка репликации плана из-за одного объекта; при этом сам механизм backoff маскирует проблему (ошибка в логе раз в 30 минут).</p><h4>Что исправить</h4><ul><li>Карантин объекта: после N неудач сохранять пакет без него, писать объект и причину в журнал/отдельную таблицу и подтверждать пакет, поднимая ERROR; либо явный режим «стоп» с метрикой.</li><li>Проверять на старте состав OData: для каждого объекта плана все его ТЧ должны быть в $metadata.</li></ul><h4>Как проверить</h4><p>Оффлайн: $metadata без _RowType табличной части при пакете с её строками.</p><h4>Замысел и его граница</h4><p>DESIGN.md обосновывает «упал merge — пакет придёт снова» как at-least-once и это верно для временных сбоев. Для детерминированных ошибок документ решения не предлагает; тезис «повтор безвреден» оспаривается: повтор бесконечен и блокирует остальные объекты.</p>
+</div></details></div>
+<div class="group" id="wave-keys"><header><span class="idx">04</span><div><h2>Ключи, типы и значения</h2><p class="sum">Пустые строки, составные измерения, float и надгробия: значение либо не доезжает, либо склеивается.</p></div></header>
+<details class="finding high" id="cdc-14" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-14</span><div><h3>Составное примитивное измерение выпадает из первичного ключа: значение уходит в X_Value, а в ключе остаётся нулевой GUID</h3><div class="meta-row"><span>Ключи и типы</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>271–287, 292–302</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>255–276, 948–953, 971–974</span></p><h4>Механизм</h4><p>Для поля X с парным X_Type метаданные принудительно назначают X = Guid и заводят синтетическую колонку X_Value = String, но в первичный ключ попадают только исходные X и X_Type. Парсер примитивного значения пишет X = None, X_Value = &#x27;…&#x27;; обязательный ключ X затем получает нулевой UUID из _default_key_value. Две записи с разными примитивными значениями измерения дают одинаковый PK (UUID(0), &#x27;String&#x27;).</p><h4>Сценарий</h4><pre>независимый регистр, измерение «Объект» составного типа (Справочник, Строка, Число)
+запись 1: Объект = &#x27;A&#x27; (Edm.String)  → PK (00000000-…, &#x27;String&#x27;), X_Value=&#x27;A&#x27;
+запись 2: Объект = &#x27;B&#x27; (Edm.String)  → PK (00000000-…, &#x27;String&#x27;), X_Value=&#x27;B&#x27;
+staging: дубликат PK → ошибка вставки, либо вторая перезаписывает первую</pre><h4>Последствия</h4><p>Потеря или склейка записей регистров с составными измерениями; при ошибке уникальности — весь пакет не сохраняется и цикл встаёт (см. <a class="xid" href="#cdc-23">CDC-23</a>).</p><h4>Что исправить</h4><ul><li>Хранить составной ключ без потерь: включать X_Value (или каноническое текстовое представление значения) в ключ таблицы для полей, входящих в PK.</li><li>Не использовать нулевой GUID как замену повреждённого/примитивного значения ключа — только для честной пустой ссылки.</li></ul><h4>Как проверить</h4><p>Оффлайн: $metadata с ключом из составного поля и два entry с разными строковыми значениями; проверить число строк после save.</p><h4>Замысел и его граница</h4><p>DESIGN.md («Составной тип — не обязательно ссылка») объясняет соседнюю колонку _Value для реквизитов, но рассматривает только неключевые поля. Про составное поле в первичном ключе документ молчит — тезиса, который можно было бы принять, нет.</p>
+</div></details>
+<details class="finding med" id="cdc-23" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-23</span><div><h3>У полностью опустевшего набора ресурсы не гасятся: сброс в NULL зависит от состава колонок текущей пачки</h3><div class="meta-row"><span>Данные · надгробия</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/db_writer.py">db_writer.py</a> <span>151, 182–200</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>1031–1054</span> · <a href="README_DB.md">README_DB.md</a> <span>196–203</span></p><h4>Механизм</h4><p>_resource_reset_values берёт ресурсы только из ключей records[0] — «dbmerge требует существующую колонку». Фиктивная запись пустого набора содержит лишь ключ и служебные поля, поэтому словарь пуст: старые строки помечаются, но их суммы остаются. Если в той же пачке есть другой, непустой набор того же регистра, колонки есть, и сброс внезапно работает. Документация обещает «вторую линию обороны для SUM без фильтра» безусловно.</p><h4>Сценарий</h4><p>Документ распроведён (набор движений пуст). Витрина SUM(&quot;Zakazano&quot;) без фильтра по флагу (или SUM(...) * (NOT flag)::int — здесь как раз защищено) продолжает считать распроведённые движения.</p><h4>Последствия</h4><p>Неверные агрегаты в запросах, доверившихся документации; результат зависит от случайного соседства в пакете.</p><h4>Что исправить</h4><ul><li>Определять список ресурсов по фактической схеме целевой таблицы (она уже отражена в dbmerge), а не по records[0]; для фиктивной записи заполнять ресурсы NULL явно.</li></ul><h4>Как проверить</h4><p>Оффлайн: test_noise_and_tombstones.py проверяет только сокращённый непустой набор; добавить случай пустого набора.</p><h4>Замысел и его граница</h4><p>README_DB объясняет обнуление как страховку; ограничение «только колонки текущей пачки» — реализационное, замыслом не обосновано.</p>
+</div></details>
+<details class="finding med" id="cdc-36" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-36</span><div><h3>Табличная часть, пришедшая как xsi:nil или пустой скаляр, не создаёт надгробие: старые строки остаются живыми</h3><div class="meta-row"><span>Данные · табличные части</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>1129–1136, 1153–1170</span> · <a href="PLAN.md">PLAN.md</a> <span>116–118</span> · <a href="tests/responses/trade_demo_8.5/msg005_zakaz_klienta_2.xml">msg005_zakaz_klienta_2.xml</a> <span>пустые ТЧ как &lt;d:X m:type=&quot;Collection(…)&quot;/&gt;</span></p><h4>Механизм</h4><p>Отбор ТЧ: isinstance(v, dict) and v.get(&#x27;@xsi:nil&#x27;) != &#x27;true&#x27;. Элемент с xsi:nil=&quot;true&quot; отбрасывается целиком; пустой элемент без атрибутов — не словарь; словарь с m:null=&quot;true&quot; без m:type проходит отбор, но пропускается в _get_entity_records (нет @m:type). Во всех трёх формах фиктивная запись не создаётся и ранее загруженные строки ТЧ остаются с is_deleted_or_empty=false. В записанных ответах платформы 8.5 опустевшая ТЧ приходит как &lt;d:X m:type=&quot;Collection(…)&quot;/&gt; — эта форма обрабатывается правильно. PLAN.md сам помечает формат nil как «уточнить».</p><h4>Сценарий</h4><p>Платформа/публикация, отдающая очищенную ТЧ через xsi:nil: после очистки ТЧ в 1С строки в БД живы, суммы не обнулены.</p><h4>Последствия</h4><p>Условный: зависит от формата ответа конкретной платформы. Полная выгрузка владельца с тем же nil-ответом не исправляет.</p><h4>Что исправить</h4><ul><li>Опознавать ТЧ по метаданным владельца (список ТЧ известен), а не по форме элемента; отсутствие строк в любой форме — надгробие.</li></ul><h4>Как проверить</h4><p>Оффлайн: entry с {&#x27;@xsi:nil&#x27;:&#x27;true&#x27;,&#x27;@m:type&#x27;:&#x27;Collection(…)&#x27;}.</p><h4>Замысел и его граница</h4><p>PLAN.md признаёт вопрос открытым — оспаривать нечего; находка условная, важность средняя.</p>
+</div></details>
+<details class="finding med" id="cdc-37" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-37</span><div><h3>Edm.Double разбирается через float до NUMERIC: значения с более чем 15–17 значащими цифрами теряют точность до записи</h3><div class="meta-row"><span>Ключи и типы</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>885–888, 147–148</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>45</span></p><h4>Механизм</h4><p>_convert_value делает float(value), целевая колонка — Numeric(). Для типичных сумм (до 15 значащих цифр) кратчайшее представление float восстанавливает исходную десятичную строку, поэтому 3333.33 доезжает точно. Потери начинаются с 16–17 значащих цифр: 9007199254740993 становится 9007199254740992, суммы вида 123456789012345.67 искажаются. Числа 1С допускают до 38 разрядов; для числового измерения в ключе разные значения могут слиться. _odata_literal для больших float отдаёт экспоненциальную форму, которую OData не примет.</p><h4>Сценарий</h4><p>Регистр бухгалтерии с количеством Число(15,6) и валютной суммой большого номинала: сверка rows_modified будет ненулевой из-за расхождения младших разрядов, а не из-за реальных изменений.</p><h4>Последствия</h4><p>Искажение точных величин выше границы float; для большинства конфигураций — латентно.</p><h4>Что исправить</h4><ul><li>Разбирать Double в Decimal из исходной строки; согласовать _odata_literal и JSON-экспорт.</li></ul><h4>Как проверить</h4><p>Оффлайн: _convert_value(&#x27;9007199254740993&#x27;, &#x27;Double&#x27;).</p><h4>Замысел и его граница</h4><p>Тип Numeric в type_mapping показывает, что точность считалась важной; промежуточный float этому замыслу противоречит.</p>
+</div></details></div>
+<div class="group" id="wave-proc"><header><span class="idx">05</span><div><h2>Процессы, владение, время</h2><p class="sum">Heartbeat, owner, параллельные обработчики, метаданные, остановка и гонки merge.</p></div></header>
+<details class="finding high" id="cdc-08" data-sev="high" data-status="cond">
+<summary><span class="fid">CDC-08</span><div><h3>Истечение heartbeat принимается за доказательство rollback: живая, но замедленная транзакция теряет защиту границы и захвата</h3><div class="meta-row"><span>Процессы · отметки живости</span><span>при указанных условиях</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/write_tracker.py">write_tracker.py</a> <span>26–40, 196–215</span> · <a href="src/onecdc/full_load_claim.py">full_load_claim.py</a> <span>44–53, 80–110</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>1612–1625</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>578–597</span> · <a href="README_DB.md">README_DB.md</a> <span>343–350, 377–381</span></p><h4>Механизм</h4><p>Граница окна и захват объекта исключают строки, у которых heartbeat_at старше 90 с. Документация формулирует это как «транзакции умершего процесса СУБД уже откатила». Но отсутствие отметки 90 секунд не отличает мёртвый процесс от живого, который: ждёт блокировку в PostgreSQL, стоит на GC/паузе контейнера, исчерпал пул соединений (сами авторы описывают этот случай), потерял одно соединение из-за сетевого сбоя при живых остальных. Fencing&#x27;а нет: потерявший lease процесс продолжает писать и после «перехвата».</p><h4>Сценарий</h4><ul><li>Граница. Merge A застрял на 3 минуты (блокировка на целевой таблице от чужого CREATE INDEX обработчика). Heartbeat-поток не получил соединения из пула (все у страниц выгрузки). boundary() исключает строку A, обработчик двигает last_run_at. A дописывает строки с merged_on левее — они потеряны для инкремента, хотя сигнал придёт.</li><li>Захват. Полная выгрузка объекта идёт 2 часа; heartbeat не продлился 90 с; расписание в другом контейнере захватывает объект и начинает вторую выгрузку. Первый процесс, не проверяя владение, дочитывает свои страницы и вызывает mark_full_loaded; оба пишут rows_modified и метрики поверх друг друга; 1С делает двойную работу.</li></ul><h4>Последствия</h4><p>Потеря строк витрины и двойная нагрузка на 1С в условиях, которые документация относит к «эксплуатационным» (нехватка пула), но которые не сигнализируются ничем, кроме постфактум расхождений.</p><h4>Что исправить</h4><ul><li>Для границы: держать реестр в той же транзакции, что merge, или брать её из pg_stat_activity/advisory lock живой сессии — истёкший heartbeat может отсекать строку только когда сессия-владелец точно отсутствует.</li><li>Для захвата: fencing token (номер эпохи в onecdc_metadata_objects), проверяемый перед каждой записью страницы и в mark_full_loaded; при потере lease — прервать прогон.</li><li>Отдельное соединение (или отдельный пул) для heartbeat-потоков, чтобы дефицит пула не превращался в ложную смерть.</li></ul><h4>Как проверить</h4><p>Оффлайн: держать track() открытым дольше 90 с с заблокированным heartbeat (mock) и проверить, что boundary() его перешагивает; затем закоммитить merge и убедиться, что строки левее last_run_at.</p>
+</div></details>
+<details class="finding high" id="cdc-09" data-sev="high" data-status="code">
+<summary><span class="fid">CDC-09</span><div><h3>Два процесса с одним именем обработчика исполняют витрину параллельно: CAS проверяется после записи и не откатывает результат</h3><div class="meta-row"><span>Обработчики · конкуренция</span><span>подтверждено по коду</span></div></div><span class="sev high">Высокая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/handlers.py">handlers.py</a> <span>699–725, 760–791, 807–876, 901–976, 1008–1050, 1052–1067</span> · <a href="README_API.md">README_API.md</a> <span>«NAME … два одноимённых поделят одну отметку»</span></p><h4>Механизм</h4><p>Ограничение «блок и инкремент в одном потоке» действует внутри одного HandlerLoop. Ничто не мешает поднять второй процесс с тем же NAME (rolling restart, дублирование контейнера, запуск обработчиков «отдельно» при живом runner с теми же классами). Оба читают состояние, оба вызывают handle. Условие last_run_at == expected в _save_success проверяется после того, как пользовательский SQL закоммитился: «CAS вернул False» означает только, что отметка не сдвинута, но витрина уже переписана. Пересборка пишет rebuild_cursor и last_full_rebuild_dt вообще без CAS.</p><h4>Сценарий</h4><ul><li>Процесс P1 выполняет блок пересборки за март (delete-merge месяца).</li><li>P2 (новая версия контейнера) видит cursor=&#x27;2026-02&#x27;, продолжает с марта же, затем инкремент двигает last_run_at.</li><li>P1 заканчивает свой мартовский блок позже и удаляет/переписывает группы, в которые P2 уже применил свежие изменения; last_run_at уже за ними — пересчитать их некому.</li></ul>
+<p>Для обработчика-отправщика во внешнюю систему это неконтролируемые двойные отправки.</p><h4>Последствия</h4><p>Молчаливое затирание свежих результатов витрины и двойные внешние эффекты при штатных операциях развёртывания.</p><h4>Что исправить</h4><ul><li>Межпроцессный захват имени обработчика (advisory lock или та же схема owner/heartbeat, что у полной выгрузки) до исполнения handle/rebuild; при потере lease — прерывать.</li><li>До реализации — явно документировать «ровно один активный экземпляр на NAME» как обязательное условие.</li></ul><h4>Как проверить</h4><p>Оффлайн: два HandlerLoop одного класса в двух потоках с handle, пишущим счётчик вызовов; убедиться, что оба выполняются за одно окно.</p>
+</div></details>
+<details class="finding med" id="cdc-24" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-24</span><div><h3>Шторм пересборок витрин при первичной выгрузке: каждая новая колонка, появившаяся на очередной странице, заказывает полную пересборку</h3><div class="meta-row"><span>Обработчики · пересборка</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>636–646, 932–937</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>590–615, 778–791, 1047–1048</span> · <a href="DESIGN.md">DESIGN.md</a> <span>1025–1029</span></p><h4>Механизм</h4><p>dbmerge заводит колонки по фактическим данным страницы; реквизит, пустой на первых страницах, добавляет колонку посреди прогона. На каждое added_fields репликатор ставит full_rebuild_is_required всем подписчикам таблицы. Обработчик стартует пересборку (окно с начала времён), снимает флаг на старте; следующая колонка ставит его снова — и пересборка повторяется после завершения текущей. За первичную выгрузку документа с 40 реквизитами, из которых половина редко заполнена, витрина будет пересобрана до 20 раз, каждый раз по неполным данным, конкурируя с самой выгрузкой за БД.</p><h4>Сценарий</h4><p>Первый запуск на базе с историей за 5 лет: полная выгрузка регистра идёт 6 часов; витрина по нему (пересборка 40 минут) стартует заново после каждой новой колонки и заканчивает лишь через несколько часов после выгрузки.</p><h4>Последствия</h4><p>Кратное удорожание первичной загрузки и длительная неконсистентность витрины; для отправщиков с ON_FULL_LOAD=True — повторные отправки «всего с начала времён».</p><h4>Что исправить</h4><ul><li>Создавать колонки из $metadata при первом создании таблицы, а не по данным — тогда посреди прогона колонки не появляются.</li><li>Откладывать заказ пересборки до конца полной выгрузки объекта (одна пересборка на прогон).</li></ul><h4>Как проверить</h4><p>Оффлайн: две страницы, вторая с новым полем; считать вызовы request_full_rebuild.</p><h4>Замысел и его граница</h4><p>DESIGN.md признаёт: «для витрины лишняя пересборка — просто дорого». Соглашаемся, что одна лишняя пересборка приемлема; оспариваем оценку «просто дорого» — при загрузке истории это десятки пересборок, и цена сопоставима со всей выгрузкой. Находка сохранена со средней важностью.</p>
+</div></details>
+<details class="finding med" id="cdc-25" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-25</span><div><h3>Наивные отметки now()::timestamp немонотонны при переводе часов: в повторяющийся час окна обработчиков и guard&#x27;ы ломаются</h3><div class="meta-row"><span>Время · часы БД</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/common_functions.py">common_functions.py</a> <span>12–22</span> · <a href="dbmerge/dbmerge.py">dbmerge.py</a> <span>994–1001</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>1029–1041</span> · <a href="src/onecdc/full_load_keys.py">full_load_keys.py</a> <span>116–122</span> · <a href="src/onecdc/write_tracker.py">write_tracker.py</a> <span>208–215</span> · <a href="docker-compose.yml">docker-compose.yml</a> <span>TZ</span></p><h4>Механизм</h4><p>Все служебные отметки (merged_on, last_run_at, started_at, heartbeat_at, отметки страниц) — timestamp without time zone, получаемые из now() через приведение по TimeZone сессии PostgreSQL. Если этот пояс имеет сезонный перевод (не «Europe/Moscow», а, например, «Europe/Berlin» или пояс хоста), то в ночь перехода на зимнее время локальное время возвращается на час: now()::timestamp идёт назад. Обработчик, зафиксировавший last_run_at = 02:59, следующим окном получит boundary = 02:05; условие boundary &lt;= window_start заставит его ждать час, а все строки, смёрженные в повторный час, получат merged_on &lt; last_run_at и никогда не попадут в merged_on &gt; last_run_at. Guard&#x27;ы полной выгрузки и TTL heartbeat в этот час тоже сравнивают несравнимое.</p><h4>Сценарий</h4><p>PostgreSQL с timezone = &#x27;Europe/Berlin&#x27; (пояс сервера, не переопределённый в postgresql.conf), контейнер с TZ=Europe/Moscow. Последнее воскресенье октября: ночные пакеты между 02:00 и 03:00 (второй раз) не попадают в витрину.</p><h4>Последствия</h4><p>Раз в год потеря окна инкремента без ошибок; кроме того, TZ процесса не влияет на пояс сессии PostgreSQL, что документация не оговаривает.</p><h4>Что исправить</h4><ul><li>Хранить служебные отметки в timestamptz либо принудительно SET TIME ZONE &#x27;UTC&#x27; для сессий engine (событие connect) и документировать требование.</li></ul><h4>Как проверить</h4><p>Оффлайн: SET TIME ZONE &#x27;Europe/Berlin&#x27; и SELECT now()::timestamp вокруг момента перевода (можно с pg_sleep в тестовом контейнере с подменой времени) — воспроизводится без 1С.</p><h4>Замысел и его граница</h4><p>DESIGN/README обосновывают наивные отметки «одним часовым поясом БД и совпадением с merged_on» — согласны, что внутри одной сессии значения согласованы. Оспаривается допущение, что локальное время монотонно: оно верно лишь для поясов без сезонного перевода.</p>
+</div></details>
+<details class="finding med" id="cdc-26" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-26</span><div><h3>Реестр объектов синхронизируется с удалением, а словарь метаданных мутируется под чужими потоками: стираются захват и состояние, возможен RuntimeError</h3><div class="meta-row"><span>Метаданные · реестр</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>322–337, 339–408, 460–519 (delete_mode=&#x27;delete&#x27;), 570–576</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>1456–1459, 578–581</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>654–668, 844–847, 932–935</span></p><h4>Механизм</h4><p>Три независимых слабости одного жизненного цикла:</p>
+<ul><li>_fetch_and_parse_metadata только добавляет ключи в self, никогда не удаляя; поэтому объект, пропавший из $metadata, остаётся в памяти до рестарта и в _sync_objects(list(self.keys())). Обещанное «пропавшие удаляются из реестра» до рестарта не выполняется.</li><li>Зато после рестарта _sync_objects с delete_mode=&#x27;delete&#x27; удаляет строку вместе с last_full_load_dt, full_load_is_required, full_load_owner и full_load_heartbeat_at. Синхронизация вызывается лениво из любого потока при незнакомом поле, то есть и во время чужой выгрузки: временное исчезновение объекта из публикации (перенастройка состава OData внешней обработкой проекта, обновление конфигурации) стирает живой захват — heartbeat/release обновляют 0 строк, следующая синхронизация вставляет строку с пустым владельцем, и второй процесс захватывает объект параллельно первому; mark_full_loaded обновляет 0 строк, история выгрузки теряется.</li><li>get_metadata перестраивает словарь под блокировкой, но читатели её не берут: _full_load_tables, _find_ext_dimension_chart, resolve_object_name итерируют self.metadata из потоков выгрузки. Одновременная вставка ключа из потока изменений даёт RuntimeError: dictionary changed size during iteration — страница или пакет падают и повторяются.</li></ul>
+<p>Дополнительно is_loaded = True ставится до _sync_objects: при её отказе следующий run_once считает метаданные загруженными и работает с objects_table = None; пустой $metadata оставляет objects_table = None, и list_full_load_required падает на None.c. Ответ с несколькими Schema превращает словарь в список — формат условный, на живой 1С не подтверждён.</p><h4>Сценарий</h4><p>Администратор выполняет в внешней обработке «Включить план и его объекты в OData»: состав переустанавливается целиком; в это время $metadata на секунды отдаёт неполный список; репликатор, встретив новое поле, перечитывает метаданные и удаляет из реестра половину объектов вместе с их захватами и отметками. Через минуту объекты возвращаются «новыми» и уходят в повторную полную выгрузку.</p><h4>Последствия</h4><p>Потеря состояния выгрузок (дорогие повторы), двойные выгрузки, спорадические падения страниц.</p><h4>Что исправить</h4><ul><li>Собирать новый словарь отдельно и публиковать атомарной заменой ссылки; is_loaded — только после успешной синхронизации.</li><li>Реестр: не удалять строки, а помечать «отсутствует в $metadata с …»; захват и отметки не трогать никогда автоматически.</li><li>Читателям брать снимок (list(self.metadata) под тем же lock) либо использовать неизменяемые словари.</li></ul><h4>Как проверить</h4><p>Оффлайн: test_metadata_objects.py зовёт _sync_objects напрямую; добавить повторный разбор двух разных $metadata и параллельную итерацию.</p><h4>Замысел и его граница</h4><p>DESIGN.md обосновывает ленивое перечитывание метаданных и синхронизацию через dbmerge (delete). Согласны с ленивостью; оспариваем удаление строк реестра, хранящих захват и историю: документ сам называет реестр единственным межпроцессным заслоном, а его строки уничтожаются побочным эффектом другой операции.</p>
+</div></details>
+<details class="finding med" id="cdc-27" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-27</span><div><h3>Сигнал остановки теряется до создания цикла, а после SIGTERM очередь полных выгрузок дорабатывается целиком; grace period контейнера этого не покрывает</h3><div class="meta-row"><span>Остановка процесса</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/stop_signal.py">stop_signal.py</a> <span>33–36, 48–67, 71–86</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>1517–1518, 1541–1566, 1599–1610</span> · <a href="src/onecdc/cron_runner.py">cron_runner.py</a> <span>121–131</span> · <a href="docker-compose.yml">docker-compose.yml</a> <span>stop_grace_period: 60s</span> · <a href="src/onecdc/metadata_reader.py">metadata_reader.py</a> <span>25</span></p><h4>Механизм</h4><p>Перехватчик сигналов лишь обходит уже созданные StopSignal; во время конструкторов, первого run_once или ручного full_load список пуст, и SIGTERM просто проглатывается — процесс продолжает работу, а повторный docker stop заканчивается SIGKILL. После старта цикла остановка ждёт конца итерации, а with ThreadPoolExecutor — завершения всех уже поставленных в очередь выгрузок (в очередь ставятся все помеченные объекты сразу); ни страницы, ни окна StopSignal не проверяют. Итерация может длиться 15 минут только на SelectChanges (read timeout), а очередь выгрузок — часы; stop_grace_period: 60s в примере гарантирует SIGKILL с незакрытыми merge и строками реестра до TTL. Конструкторы библиотеки к тому же заменяют обработчики сигналов приложения-хозяина без цепочки вызовов.</p><h4>Сценарий</h4><p>Rolling update при очереди из 12 объектов на первичную выгрузку: SIGTERM → «Replication loop stopping, waiting for full loads to finish» → через 60 с SIGKILL посреди merge → staging-таблица и строка реестра остаются, страницы перечитываются заново после рестарта.</p><h4>Последствия</h4><p>Непредсказуемое время остановки, «грязные» остатки в БД, невозможность корректно остановить процесс до первого цикла.</p><h4>Что исправить</h4><ul><li>Процессное событие остановки, наследуемое новыми циклами; отмена не начатых futures (cancel_futures=True) и проверка stop между страницами/окнами без объявления прерванной выгрузки успешной.</li><li>В примере compose — stop_grace_period, согласованный с реальной семантикой, и документация.</li><li>Не ставить обработчики сигналов в конструкторах библиотечных классов; предоставить явный install_signal_handlers() для точки входа.</li></ul><h4>Как проверить</h4><p>Оффлайн: отправить SIGTERM процессу до run_forever, затем запустить цикл — он не остановится.</p><h4>Замысел и его граница</h4><p>stop_signal.py подробно объясняет, почему перехват ставится в конструкторах (ThreadPoolExecutor и рабочие потоки). Аргумент принимается для контейнера; но он не объясняет ни потерю раннего сигнала, ни ожидание всей очереди. Тезис «останавливаемся после текущей итерации» оспорен: фактически — после всей очереди.</p>
+</div></details>
+<details class="finding med" id="cdc-33" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-33</span><div><h3>Публичный claim_full_load до загрузки метаданных «успешно» ничего не захватывает</h3><div class="meta-row"><span>Полная выгрузка · захват</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/full_load_claim.py">full_load_claim.py</a> <span>88–92</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>1568–1597</span></p><h4>Механизм</h4><p>При objects_table is None claim() возвращает True без строки в БД. Два процесса, вызвавшие claim_full_load на свежих экземплярах до первого get_metadata, оба входят в блок. Штатный FullLoadCron сначала разрешает имена (загружает метаданные), а фоновая диспетчеризация идёт после run_once — они не затронуты; затронут только прямой пользовательский вызов, который README_API описывает как «занять объект под выгрузку … в том числе ДРУГОЙ ПРОЦЕСС».</p><h4>Сценарий</h4><p>Своё расписание пользователя: with rep.claim_full_load(name): rep.full_load(name) в двух контейнерах одновременно на старте → двойная выгрузка.</p><h4>Последствия</h4><p>Двойная работа 1С в самом дорогом месте; данные не портятся (guard&#x27;ы).</p><h4>Что исправить</h4><ul><li>В claim_full_load сначала обеспечить метаданные и реестр, затем атомарный захват; не возвращать True «вхолостую».</li></ul><h4>Как проверить</h4><p>Оффлайн: два Replicator без get_metadata, оба claim — оба True.</p><h4>Замысел и его граница</h4><p>Комментарий кода: «прямой вызов full_load должен отрабатывать и на пустой базе» — согласны для full_load, который намеренно не охраняется; но claim_full_load обещает именно охрану, и её отсутствие противоречит контракту.</p>
+</div></details>
+<details class="finding med" id="cdc-35" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-35</span><div><h3>Некорректные параметры зацикливают выгрузку, дают горячий цикл или отключают обработчик без ошибки</h3><div class="meta-row"><span>Валидация параметров</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>314–325, 666, 943–949</span> · <a href="src/onecdc/__main__.py">__main__.py</a> <span>33–45</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>390</span> · <a href="src/onecdc/cron_runner.py">cron_runner.py</a> <span>226–231</span> · <a href="src/onecdc/common_functions.py">common_functions.py</a> <span>141–165</span></p><h4>Механизм</h4><ul><li>full_load(batch_size=0): $top=0 → page=0, условие page &lt; page_size ложно, skip не растёт — бесконечный цикл у объекта без оси даты.</li><li>request_timeout=(30,) — кортеж из одного элемента проходит проверку, но requests парой его не считает.</li><li>_number принимает NaN и inf: ONECDC_POLL_INTERVAL=nan делает wait пустым (горячий цикл), inf останавливает опрос после первого оборота.</li><li>Handler.ON = &quot;Catalog_X&quot; (строка) превращается в множество символов и не совпадает ни с чем: обработчик зарегистрирован и никогда не вызван.</li><li>_bound(timedelta(hours=12)) вычитает из date и теряет часы; date.max/окно у datetime.min — переполнение.</li><li>Границы с долями секунды: OData-литерал усекает микросекунды, а _marking_scope сравнивает исходный datetime — области чтения и пометки расходятся на краю; для aware-datetime смещение отбрасывается в OData и учитывается SQL-параметром.</li></ul><h4>Сценарий</h4><p>См. перечень; каждый пункт воспроизводится вызовом с указанным значением.</p><h4>Последствия</h4><p>Зависания, лишняя нагрузка, «мёртвые» обработчики без диагностики.</p><h4>Что исправить</h4><ul><li>Валидировать положительные конечные batch_size/interval/timeout и форму пары; ON — только коллекция строк; нормализовать границы (усечение до секунды в обоих местах, только naive) и проверять порядок.</li></ul><h4>Как проверить</h4><p>Оффлайн: вызовы с перечисленными значениями.</p><h4>Замысел и его граница</h4><p>Не обосновано; конструкторы проекта декларируют «ошибка конфигурации падает сразу и с внятным текстом» — перечисленные случаи из этого правила выпадают.</p>
+</div></details>
+<details class="finding low" id="cdc-39" data-sev="low" data-status="cond">
+<summary><span class="fid">CDC-39</span><div><h3>Одновременные merge одной таблицы (страница выгрузки и пакет изменений) могут столкнуться на уникальном ключе</h3><div class="meta-row"><span>Конкуренция · БД</span><span>при указанных условиях</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/db_writer.py">db_writer.py</a> <span>128–162</span> · <a href="dbmerge/dbmerge.py">dbmerge.py</a> <span>1183–1224 (INSERT … SELECT с anti-join, без ON CONFLICT)</span></p><h4>Механизм</h4><p>Ничто не сериализует merge одной целевой таблицы из разных потоков и процессов. Фаза INSERT dbmerge — INSERT … SELECT … LEFT JOIN … WHERE target.pk IS NULL; при READ COMMITTED две конкурентные вставки одного ключа обе проходят anti-join, вторая получает нарушение уникальности. Исключение роняет страницу (повтор со следующего цикла с нуля, см. <a class="xid" href="#cdc-22">CDC-22</a>) или пакет (повтор, идемпотентно).</p><h4>Сценарий</h4><p>Первичная выгрузка документа идёт параллельно с потоком изменений; в пакете — тот же документ, что и в текущей странице.</p><h4>Последствия</h4><p>Спорадические падения с самовосстановлением; в связке с <a class="xid" href="#cdc-22">CDC-22</a> — дорогие перезапуски выгрузки.</p><h4>Что исправить</h4><ul><li>ON CONFLICT DO NOTHING/DO UPDATE в dbmerge для PostgreSQL либо advisory lock на таблицу на время merge.</li></ul><h4>Как проверить</h4><p>Оффлайн: два потока save одного ключа в цикле.</p><h4>Замысел и его граница</h4><p>Гонка снимка и изменений рассмотрена в проекте на уровне значений (guard&#x27;ы), но не на уровне транзакций СУБД.</p>
+</div></details></div>
+<div class="group" id="wave-sec"><header><span class="idx">06</span><div><h2>Безопасность и запуск</h2><p class="sum">HTTP Basic, секреты в логах, SQL-помощник, URL, GUID узла, шаблон runner.</p></div></header>
+<details class="finding med" id="cdc-28" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-28</span><div><h3>Handler.execute/query: имя схемы не экранируется, а str.format ломает легитимный SQL с фигурными скобками</h3><div class="meta-row"><span>Безопасность · SQL</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/handlers.py">handlers.py</a> <span>324–344</span> · <a href="src/onecdc/replicator.py">replicator.py</a> <span>295–302</span> · <a href="config/handlers/zakazy_klientov_grouped.py">zakazy_klientov_grouped.py</a> <span>230–232</span></p><h4>Механизм</h4><p>schema_prefix строит f&#x27;&quot;{context.schema}&quot;&#x27; вручную; _check_db_schema только strip(). Имя схемы с двойной кавычкой даёт синтаксически иной SQL (при недоверенной конфигурации — инъекция). Основной writer и _check_create_schema используют SQLAlchemy и защищены. Отдельно sql.format(schema=…) интерпретирует любые фигурные скобки: JSON-литерал &#x27;{&quot;k&quot;:1}&#x27;::jsonb в DDL витрины даёт KeyError ещё до запроса. Параметры значений (**params) при этом передаются правильно.</p><h4>Сценарий</h4><pre>ONECDC_DB_SCHEMA=&#x27;onecdc&quot;; DROP TABLE public.t; --&#x27;
+Handler().execute(ctx, &#x27;select 1 from {schema}.&quot;T&quot;&#x27;)   # исполняемый посторонний SQL
+Handler().execute(ctx, &quot;select &#x27;{\&quot;k\&quot;:1}&#x27;::jsonb&quot;)   # KeyError: &#x27;&quot;k&quot;&#x27;</pre><h4>Последствия</h4><p>Ошибка доверенной конфигурации, а не удалённая уязвимость (схему задаёт оператор), но публичный помощник непригоден для SQL с JSON.</p><h4>Что исправить</h4><ul><li>Экранировать идентификатор через engine.dialect.identifier_preparer.quote_schema; валидировать имя схемы в конструкторе.</li><li>Подставлять только маркер {schema} (str.replace/string.Template), не форматировать весь текст.</li></ul><h4>Как проверить</h4><p>Оффлайн: оба сниппета.</p><h4>Замысел и его граница</h4><p>Документация относит SQL обработчиков к пользовательскому коду с доверенной конфигурацией — с этим согласны, поэтому важность средняя. Дефект с фигурными скобками замыслом не объясняется.</p>
+</div></details>
+<details class="finding med" id="cdc-29" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-29</span><div><h3>Пароли, URL с userinfo, значения полей и полные трейсбеки попадают в исключения, лог и таблицу onecdc_handlers</h3><div class="meta-row"><span>Безопасность · раскрытие данных</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>198–223</span> · <a href="src/onecdc/common_functions.py">common_functions.py</a> <span>165–171</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>900–902, 936–937</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>1086–1089</span></p><h4>Механизм</h4><p>_check_odata_auth кладёт repr всего значения (включая пароль) в ValueError; _check_odata_url печатает URL как есть — с user:pass@, если его туда вписали; raise_for_status логирует контекст запроса, а для read_object это полный $filter с бизнес-ключами и датами. Неконвертируемое значение поля логируется целиком; last_error хранит 4000 символов трейсбека, куда попадают SQL, параметры драйвера и DSN — читает любой, у кого есть SELECT на схему. Предупреждение о неизвестном поле пишется на каждую запись страницы (лог-флуд на десятки тысяч строк).</p><h4>Сценарий</h4><p>Опечатка в конфиге: odata_auth=(&#x27;odata&#x27;,&#x27;secret&#x27;,&#x27;x&#x27;) → в трейсбеке и логе контейнера — пароль. Обработчик падает на SQL с литералами ИНН/сумм → они в onecdc_handlers.last_error для всех читателей схемы.</p><h4>Последствия</h4><p>Утечка учётных данных и бизнес-значений в журналы с более слабым контролем доступа.</p><h4>Что исправить</h4><ul><li>Не выводить значения auth/URL; централизованное редактирование (hide_password, маскирование userinfo).</li><li>В last_error — тип и короткое сообщение; полный трейсбек только в лог. Предупреждение о неизвестном поле — один раз на объект.</li></ul><h4>Как проверить</h4><p>Оффлайн: сниппет с кортежем из трёх элементов.</p><h4>Замысел и его граница</h4><p>Документация подчёркивает «понятные ошибки вместо трейсов» и скрывает пароль в DSN — замысел правильный, но применён не везде.</p>
+</div></details>
+<details class="finding med" id="cdc-30" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-30</span><div><h3>Basic Auth к 1С по незашифрованному HTTP во всех штатных примерах; проверка «https при пароле» отсутствует</h3><div class="meta-row"><span>Безопасность · транспорт</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>198–211</span> · <a href="README.md">README.md</a> <span>303–315, 326–334</span> · <a href="docker-compose.yml">docker-compose.yml</a> <span>ONECDC_ODATA_URL / ONECDC_ODATA_PASSWORD</span> · <a href="config/runner.py">runner.py</a> <span>65–66</span></p><h4>Механизм</h4><p>Учётные данные передаются как HTTP Basic; библиотека принимает http:// с непустым паролем без предупреждения, и именно этот вариант дан во всех примерах. HTTPS при этом поддерживается, проверка сертификата не отключена, корпоративный CA задаётся стандартными переменными REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE — отдельный параметр verify не требуется.</p><h4>Сценарий</h4><p>Публикация 1С на HTTP во внутренней сети; пароль пользователя с правами на план обмена читается любым наблюдателем трафика.</p><h4>Последствия</h4><p>Компрометация учётной записи OData; риск условный (зависит от сети), не обход авторизации.</p><h4>Что исправить</h4><ul><li>Предупреждение (или ошибка без явного allow_insecure) при http:// с паролем; примеры — только https://; пароли в compose — через ${…}/secrets.</li></ul><h4>Как проверить</h4><p>tcpdump на порт 80: заголовок Authorization: Basic ….</p><h4>Замысел и его граница</h4><p>Замысел «работает с любой публикацией» понятен; тезис не оспаривается, но безопасный дефолт примеров — обязанность проекта.</p>
+</div></details>
+<details class="finding med" id="cdc-31" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-31</span><div><h3>Имя плана обмена и значения ключей интерполируются в OData-URL без экранирования</h3><div class="meta-row"><span>Конфигурация · OData URL</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>226–240</span> · <a href="src/onecdc/change_reader.py">change_reader.py</a> <span>33, 60, 72</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>755–756</span></p><h4>Механизм</h4><p>_check_exchange_name запрещает лишь / и пробел; кавычка, &amp;, # и пустое имя после снятия префикса проходят и ломают вложенный литерал DataExchangePoint=&#x27;…ExchangePlan_X(guid&#x27;…&#x27;)&#x27; (фрагмент # может отрезать MessageNo). read_by_key строит Поле=&#x27;значение&#x27; без удвоения кавычек внутри значения, хотя _odata_literal для $filter это делает.</p><h4>Сценарий</h4><p>exchange_name=&quot;A&#x27;B&quot; → 1С отвечает 400 → run_forever считает ошибку постоянной и уходит в 30-минутную паузу с невнятным сообщением.</p><h4>Последствия</h4><p>Ошибка доверенной конфигурации; удалённого вектора нет. Значения из 1С (Recorder_Type) кавычек не содержат.</p><h4>Что исправить</h4><ul><li>Белый список идентификатора плана (^[\w]+$ с кириллицей); собирать query структурно; в read_by_key удваивать кавычки.</li></ul><h4>Как проверить</h4><p>Оффлайн: сниппет.</p><h4>Замысел и его граница</h4><p>Не обосновано замыслом; проверка в конструкторе появилась именно ради «внятной ошибки на месте», но неполна.</p>
+</div></details>
+<details class="finding med" id="cdc-32" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-32</span><div><h3>Неверный или иначе записанный GUID узла не роняет запуск, а сбрасывает номер пакета к 1</h3><div class="meta-row"><span>Конфигурация · узел обмена</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>243–256</span> · <a href="src/onecdc/change_reader.py">change_reader.py</a> <span>109–128</span></p><h4>Механизм</h4><p>GUID проверяется регулярным выражением без канонизации (верхний регистр допустим), сравнивается с Ref_Key узла как строка; при несовпадении get_last_received_no пишет WARNING и возвращает 0, и цикл запрашивает MessageNo=1. ThisNode здесь тоже не запрещён.</p><h4>Сценарий</h4><p>GUID скопирован в верхнем регистре из формы 1С → WARNING → SelectChanges?MessageNo=1 → ответ 1С на «чужой» номер (ошибка или пакет с неверной нумерацией) → backoff. Ошибка конфигурации маскируется под сетевую.</p><h4>Последствия</h4><p>Неверная последовательность обмена; чтение чужого узла не доказано.</p><h4>Что исправить</h4><ul><li>Канонизировать через uuid.UUID и сравнивать как UUID; узел не найден или ThisNode — ValueError, как для пустого guid.</li></ul><h4>Как проверить</h4><p>Оффлайн: фейковый сервер, guid в верхнем регистре.</p><h4>Замысел и его граница</h4><p>DESIGN.md обосновывает, что «всё состояние очереди живёт в 1С» — согласны; fallback к нулю этому замыслу противоречит: при ненайденном узле состояние неизвестно, а не равно нулю.</p>
+</div></details>
+<details class="finding med" id="cdc-34" data-sev="med" data-status="cond">
+<summary><span class="fid">CDC-34</span><div><h3>Шаблон runner.py: ручной max_workers оставляет добавленные циклы в очереди навсегда; auth обязателен в отличие от env-режима</h3><div class="meta-row"><span>Шаблон запуска</span><span>при указанных условиях</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="config/runner.py">runner.py</a> <span>55, 66, 118–131</span> · <a href="docker-entrypoint.sh">docker-entrypoint.sh</a> <span>12–25</span></p><h4>Механизм</h4><p>Раскомментировав обработчики и расписания, но забыв max_workers и pool_size, пользователь получает единственный поток, навсегда занятый репликатором: задания обработчиков сидят в очереди ThreadPoolExecutor, витрины не обновляются, ошибок нет. Шаблон требует обе переменные auth (KeyError без пользователя), тогда как python -m onecdc в той же ситуации работает без авторизации: две раскладки одного образа ведут себя по-разному. Смонтированный runner игнорирует ONECDC_MODE, ONECDC_POLL_INTERVAL, ONECDC_LOG_LEVEL, ONECDC_FULL_LOAD_WORKERS, которые compose предлагает настраивать.</p><h4>Сценарий</h4><p>Смонтировать config/, раскомментировать два HandlerLoop и их submit, оставить max_workers=1: репликация идёт, onecdc_handlers.last_run_at остаётся NULL.</p><h4>Последствия</h4><p>Молчаливый отказ витрин при типовой правке шаблона.</p><h4>Что исправить</h4><ul><li>Собирать список циклов и считать max_workers/pool_size от его длины; общую сборку auth вынести в функцию, используемую и entrypoint&#x27;ом; читать в шаблоне те же переменные окружения.</li></ul><h4>Как проверить</h4><p>По шагам выше.</p><h4>Замысел и его граница</h4><p>Комментарии шаблона предупреждают об изменении пула — это осознанно; оспаривается лишь то, что шаблон полагается на внимательность там, где можно посчитать.</p>
+</div></details></div>
+<div class="group" id="wave-ops"><header><span class="idx">07</span><div><h2>Эксплуатация и контракт</h2><p class="sum">Документация, пул, lockfile, субконто, журнал, секреты в тестах, семантика ON_FULL_LOAD.</p></div></header>
+<details class="finding med" id="cdc-38" data-sev="med" data-status="code">
+<summary><span class="fid">CDC-38</span><div><h3>Документация обещает свойства, которых код не даёт, и противоречит сама себе</h3><div class="meta-row"><span>Документация · контракт</span><span>подтверждено по коду</span></div></div><span class="sev med">Средняя</span></summary>
+<div class="body">
+<p class="path"><a href="README_API.md">README_API.md</a> <span>56–72, 76–78, 115–122</span> · <a href="README_DB.md">README_DB.md</a> <span>287–292</span> · <a href="CHANGELOG.md">CHANGELOG.md</a> <span>104–112, 134–136</span> · <a href="DESIGN.md">DESIGN.md</a> <span>438–441</span> · <a href="README_ENV.md">README_ENV.md</a> <span>395–400</span> · <a href="src/onecdc/cron_runner.py">cron_runner.py</a> <span>169–190</span></p><h4>Механизм</h4><ul><li>mark_missing: README_API в одном абзаце — «по умолчанию включено» и «по умолчанию выключено»; CHANGELOG — «по умолчанию выключено; у расписания флаг тот же FullLoadCron(..., mark_missing=True)», хотя параметра у расписания нет (test_marking_is_not_configurable).</li><li>CHANGELOG в Added перечисляет «keyset-пагинацию», DESIGN.md объясняет, почему keyset убран.</li><li>DESIGN.md ссылается на Replicator._period_partitions — метода нет (переименован в _load_by_windows).</li><li>list_objects описан как «состав плана обмена», а возвращает весь опубликованный $metadata без ТЧ; массовая выгрузка по списку охватит лишние объекты.</li><li>README_DB: «full_load() и FullLoadCron реестр не трогают» — первый прогон расписания вызывает mark_full_loaded.</li><li>HandlerContext.sources документирует changes/full_load, из БД приходит только db_signal.</li><li>README_ENV: env-режим «плюс полные выгрузки объектов, которые встали в очередь» — в режиме once диспетчеризации нет, новые объекты никогда не получат первичную выгрузку.</li><li>Комментарий «карта видов субконто строится один раз на процесс» — фактически на экземпляр DataReader, то есть на каждый вызов full_load.</li></ul><h4>Сценарий</h4><p>Оператор, доверившись README_API, считает пометку выключенной и не ожидает ночных пометок; другой настраивает mark_missing у расписания и получает TypeError.</p><h4>Последствия</h4><p>Неверные эксплуатационные решения; часть документа описывает несуществующий код.</p><h4>Что исправить</h4><ul><li>Согласовать документы с контрактом; отдельно описать bootstrap/реестр и разницу env-entrypoint и пользовательского runner.</li></ul><h4>Как проверить</h4><p>Чтение перечисленных мест.</p><h4>Замысел и его граница</h4><p>Проект требует править README/DESIGN в том же коммите, что и поведение; перечисленное показывает, где правило не выдержано.</p>
+</div></details>
+<details class="finding low" id="cdc-40" data-sev="low" data-status="code">
+<summary><span class="fid">CDC-40</span><div><h3>Расчёт пула в документации не учитывает max_overflow, а engine создаётся без pool_pre_ping</h3><div class="meta-row"><span>Пул соединений</span><span>подтверждено по коду</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/__main__.py">__main__.py</a> <span>62</span> · <a href="config/runner.py">runner.py</a> <span>55</span> · <a href="README_DB.md">README_DB.md</a> <span>354–381</span></p><h4>Механизм</h4><p>create_engine(pool_size=N) оставляет max_overflow=10: фактически доступно до N+10 соединений, поэтому «отметка живости, не получившая соединения» наступает позже, чем описано, а суммарное число соединений нескольких контейнеров может превысить max_connections сервера. Без pool_pre_ping первая операция после простоя (ночь, failover) получает «server closed the connection unexpectedly»; цикл переживает это backoff&#x27;ом, но heartbeat захвата в этот момент может не продлиться (см. <a class="xid" href="#cdc-08">CDC-08</a>).</p><h4>Сценарий</h4><p>Три контейнера по 5+10 соединений против max_connections=40.</p><h4>Последствия</h4><p>Эксплуатационный; данных не портит.</p><h4>Что исправить</h4><ul><li>Явно задавать max_overflow, pool_pre_ping=True, pool_recycle; поправить формулу в README_DB.</li></ul><h4>Как проверить</h4><p>—</p><h4>Замысел и его граница</h4><p>README_DB подробно считает соединения — тем заметнее пропуск overflow.</p>
+</div></details>
+<details class="finding low" id="cdc-41" data-sev="low" data-status="code">
+<summary><span class="fid">CDC-41</span><div><h3>Нет lock-файла и закрепления зависимостей: CI, публикация и образ собираются из «последних» версий</h3><div class="meta-row"><span>Поставка · воспроизводимость</span><span>подтверждено по коду</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="pyproject.toml">pyproject.toml</a> <span>dependencies</span> · .github/workflows/ci.yml: uv sync / uv publish · <a href="Dockerfile">Dockerfile</a> <span>FROM python:3.13-slim, pip install</span> · AGENTS.md: «creates the locked development environment»</p><h4>Механизм</h4><p>В дереве нет uv.lock (в .gitignore он не исключён — просто отсутствует), поэтому uv sync в CI разрешает зависимости заново при каждом запуске, а тест-матрица не воспроизводима. Образ ставит onecdc[postgres]==X с открытыми диапазонами зависимостей и без дайджеста базового образа. onecdc опирается на нестандартные возможности dbmerge (insert_condition, delete_mark_values, added_fields) с нижней границей &gt;=1.0.22 без верхней.</p><h4>Сценарий</h4><p>Мажорное обновление dbmerge/SQLAlchemy меняет поведение merge; CI зелёный на вчерашних версиях, образ собран сегодня.</p><h4>Последствия</h4><p>Риск поставки, не дефект логики.</p><h4>Что исправить</h4><ul><li>Закоммитить uv.lock, верхние границы или точные версии в образе, дайджест базового образа.</li></ul><h4>Как проверить</h4><p>—</p><h4>Замысел и его граница</h4><p>Установка образа с PyPI обоснована в Dockerfile и CHANGELOG (версия образа = версия пакета) и принята; в дефекты попадает только незакреплённость версий.</p>
+</div></details>
+<details class="finding low" id="cdc-42" data-sev="low" data-status="cond">
+<summary><span class="fid">CDC-42</span><div><h3>Поиск плана видов субконто прерывает выгрузку любой ошибкой, кроме 404</h3><div class="meta-row"><span>Регистр бухгалтерии · субконто</span><span>при указанных условиях</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/data_reader.py">data_reader.py</a> <span>654–668</span></p><h4>Механизм</h4><p>_find_ext_dimension_chart опрашивает прямым адресом каждый ChartOfCharacteristicTypes конфигурации; 404 трактуется как «не здесь», любой другой код (403 на план без прав; 500 на неопубликованный) — raise_for_status и падение страницы или пакета. Ошибка повторяется на каждом прогоне, пока карта не построена (см. <a class="xid" href="#cdc-20">CDC-20</a> про блокировку очереди).</p><h4>Сценарий</h4><p>У пользователя OData нет чтения на «Виды субконто» другого учёта — каждое чтение регистра бухгалтерии падает с 403.</p><h4>Последствия</h4><p>Условный; блокирует регистр бухгалтерии целиком.</p><h4>Что исправить</h4><ul><li>Пропускать планы с 403/500 с предупреждением; искать вид субконто через план счетов, где он объявлен.</li></ul><h4>Как проверить</h4><p>Оффлайн: mock с 403 на первый план.</p><h4>Замысел и его граница</h4><p>Перебор планов обоснован отсутствием навигационной ссылки и принят; реакция на коды, отличные от 404, замыслом не покрыта.</p>
+</div></details>
+<details class="finding low" id="cdc-43" data-sev="low" data-status="code">
+<summary><span class="fid">CDC-43</span><div><h3>Журнал загрузок и лог растут без ограничений; предупреждения о неизвестном поле пишутся на каждую запись</h3><div class="meta-row"><span>Эксплуатация · служебные данные</span><span>подтверждено по коду</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/db_logs.py">db_logs.py</a> <span>71–78</span> · <a href="src/onecdc/data_reader.py">data_reader.py</a> <span>936–937</span> · <a href="src/onecdc/write_tracker.py">write_tracker.py</a> <span>40 (уборка только реестра merge)</span></p><h4>Механизм</h4><p>onecdc_replicator_log получает строку на объект на пакет (при опросе раз в минуту и десятке объектов — миллионы строк в год) без индекса и без политики хранения. Предупреждение «Metadata field … not found» выводится на каждую запись страницы после однократного перечитывания метаданных — десятки тысяч строк лога за одну выгрузку. Остатки staging-таблиц tmp_*/tmpkeys_* после падений именуются для ручной уборки, но автоматической уборки нет.</p><h4>Сценарий</h4><p>Год эксплуатации: таблица журнала в гигабайтах, мониторинговые запросы по finished_at IS NULL — полным сканом.</p><h4>Последствия</h4><p>Эксплуатационный.</p><h4>Что исправить</h4><ul><li>Индекс по started_at, ретенция; предупреждение — раз на объект; уборка staging по имени старше N часов.</li></ul><h4>Как проверить</h4><p>—</p><h4>Замысел и его граница</h4><p>README_DB предназначает журнал для мониторинга; его рост не обсуждается.</p>
+</div></details>
+<details class="finding low" id="cdc-44" data-sev="low" data-status="code">
+<summary><span class="fid">CDC-44</span><div><h3>Учётные данные и адреса лабораторного контура в репозитории; живой тест подтверждает пакеты в 1С</h3><div class="meta-row"><span>Гигиена репозитория</span><span>подтверждено по коду</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="tests/debug_trade.py">debug_trade.py</a> <span>18–22</span> · <a href="tests/debug_buh.py">debug_buh.py</a> <span>18–22</span> · <a href="tests/record_1c.py">record_1c.py</a> <span>25–29</span> · <a href="tests/test_run_forever_live.py">test_run_forever_live.py</a> <span>notify включён</span> · <a href="docker-compose.yml">docker-compose.yml</a> <span>литералы паролей</span></p><h4>Механизм</h4><p>Литералы паролей и внутренние адреса в трёх файлах; record_1c.py по умолчанию использует административную учётную запись. Для демо допустимо, для форка в корпоративный git — нет; .env.example, обещанный PLAN.md, отсутствует. Живой тест с включённым notify списывает очередь тестовой базы — при ошибочном указании боевого контура последствия необратимы.</p><h4>Сценарий</h4><p>Копирование debug_trade.py с боевыми параметрами в общий репозиторий.</p><h4>Последствия</h4><p>Низкий; действующих секретов не выявлено.</p><h4>Что исправить</h4><ul><li>Переменные окружения и .env.example; защита живых тестов явным флагом подтверждения.</li></ul><h4>Как проверить</h4><p>—</p><h4>Замысел и его граница</h4><p>AGENTS.md запрещает боевые DSN — правило есть, шаблоны его не поддерживают.</p>
+</div></details>
+<details class="finding low" id="cdc-45" data-sev="low" data-status="code">
+<summary><span class="fid">CDC-45</span><div><h3>ON_FULL_LOAD=False отключает и сигналы об удалениях, которые находит только полная выгрузка</h3><div class="meta-row"><span>Обработчики · семантика ON_FULL_LOAD</span><span>подтверждено по коду</span></div></div><span class="sev low">Низкая</span></summary>
+<div class="body">
+<p class="path"><a href="src/onecdc/replicator.py">replicator.py</a> <span>1204–1211</span> · <a href="src/onecdc/handlers.py">handlers.py</a> <span>540–556</span></p><h4>Механизм</h4><p>Пометка пропавших строк сигналит с источником full_load; подписчик с ON_FULL_LOAD=False её не получает. Физические удаления обнаруживаются исключительно полной выгрузкой, поэтому обработчик-отправщик, отказавшийся от бэкфилла, узнаёт об удалениях лишь тогда, когда случайный сигнал по другой таблице откроет окно, в которое эти строки попадут (их merged_on поднят).</p><h4>Сценарий</h4><p>Отправка изменений в очередь сообщений с ON_FULL_LOAD=False: удаления доходят с задержкой до следующего живого изменения любой подписанной таблицы.</p><h4>Последствия</h4><p>Задержка событий удаления для внешних приёмников; данные не портятся.</p><h4>Что исправить</h4><ul><li>Отдельный источник сигнала full_load_marking, не фильтруемый флагом бэкфилла.</li></ul><h4>Как проверить</h4><p>Оффлайн: _mark_missing_rows с подписчиком on_full_load=False.</p><h4>Замысел и его граница</h4><p>Единый фильтр по источнику обоснован тем, что обработчик не различает источники по метке; граница замысла — объединение бэкфилла и обнаруженного удаления в один источник.</p>
+</div></details></div>
+  </section>
+
+  <section class="block" id="plan">
+    <h2>Порядок исправлений</h2>
+    <p>Рекомендация «один процесс + HTTPS + ночной full_load» не закрывает no-op guard, потерю сигнала, OFFSET-пометку и разрезанные группы. До правок каждую из этих гарантий нужно считать ограниченной сценариями ниже.</p>
+    <div class="waves">
+      <div class="wave"><div class="w">W1</div><div><b>Границы commit и владения.</b><p><a class="xid" href="#cdc-01">CDC-01</a> пустые строки, <a class="xid" href="#cdc-02">CDC-02</a> уникальный owner, <a class="xid" href="#cdc-07">CDC-07</a> durable-сигнал, <a class="xid" href="#cdc-13">CDC-13</a> fail-closed без ключа, <a class="xid" href="#cdc-15">CDC-15</a> 404/XML fail-closed, <a class="xid" href="#cdc-06">CDC-06</a> часы наблюдения, <a class="xid" href="#cdc-09">CDC-09</a> один Handler на NAME, <a class="xid" href="#cdc-08">CDC-08</a> fencing lease.</p></div></div>
+      <div class="wave"><div class="w">W2</div><div><b>Полнота сверки.</b><p><a class="xid" href="#cdc-04">CDC-04</a> новые строки группы, <a class="xid" href="#cdc-05">CDC-05</a> перепроверка всегда, <a class="xid" href="#cdc-10">CDC-10</a> ошибки окон, <a class="xid" href="#cdc-11">CDC-11</a> целый набор регистратора, <a class="xid" href="#cdc-12">CDC-12</a> каскад ТЧ, <a class="xid" href="#cdc-19">CDC-19</a> запрет прямой выгрузки ТЧ.</p></div></div>
+      <div class="wave"><div class="w">W3</div><div><b>Ключи и значения.</b><p><a class="xid" href="#cdc-03">CDC-03</a> инъективный транслит, <a class="xid" href="#cdc-14">CDC-14</a> составной PK, <a class="xid" href="#cdc-23">CDC-23</a> ресурсы пустого набора, <a class="xid" href="#cdc-36">CDC-36</a> nil ТЧ, <a class="xid" href="#cdc-37">CDC-37</a> Decimal.</p></div></div>
+      <div class="wave"><div class="w">W4</div><div><b>Непрерывность.</b><p><a class="xid" href="#cdc-16">CDC-16</a> catch-up подписок, <a class="xid" href="#cdc-17">CDC-17</a> неподдержанные классы, <a class="xid" href="#cdc-18">CDC-18</a> потолок байт, <a class="xid" href="#cdc-20">CDC-20</a> карантин, <a class="xid" href="#cdc-22">CDC-22</a> backoff страницы, <a class="xid" href="#cdc-26">CDC-26</a> реестр, <a class="xid" href="#cdc-27">CDC-27</a> остановка, <a class="xid" href="#cdc-35">CDC-35</a> валидация.</p></div></div>
+      <div class="wave"><div class="w">W5</div><div><b>Безопасность и контракт.</b><p>TLS при пароле, редактирование ошибок, SQL-помощник, URL/узел, claim, документация и шаблон — <a class="xid" href="#cdc-28">CDC-28</a>…<a class="xid" href="#cdc-45">CDC-45</a>.</p></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="design">
+    <h2>Что принято как замысел</h2>
+    <p>Не всё из каталога — «баг против авторов». Ниже — решения, которые код и DESIGN.md объясняют, и которые этот отчёт не оспаривает целиком. У каждого есть граница: она вынесена в связанную находку.</p>
+    <ul><li><b>Страницы только через $skip, keyset-курсора нет</b> — На замерах показано, что ссылку нельзя сравнивать оператором «больше», а $orderby по ссылке — автоупорядочивание; keyset был бы неверен. Принято; цена глубины лечится окнами по периоду.</li><li><b>Окна только сужаются, размер страницы после отказа только опускается</b> — Обосновано «пилой» 500 → успех → 500 и стоимостью перечитывания. Принято.</li><li><b>Открытая верхняя граница при date_from=timedelta</b> — Документы с датой в будущем должны попадать в окно; менять умолчание нельзя без смены контракта. Принято; для точного периода задаются обе границы.</li><li><b>Удаления независимого регистра и физические удаления</b> — только через полную выгрузку — В OData-выборке обмена понятия «объект удалён» нет; сверка — единственное место. Принято как ограничение; следствие для env-режима без расписаний — в условиях эксплуатации.</li><li><b>Подтверждение смешанного пакета с неподдерживаемыми классами</b> — Осознанная политика «состав плана — ответственность человека». Принята для смешанного пакета; расхождение для пакета только из неподдерживаемых объектов — <a class="xid" href="#cdc-17">CDC-17</a>.</li><li><b>Метка сигнала вместо очереди событий</b> — Обработчик строит текущее состояние по окну; промежуточные состояния не нужны. Принято с оговоркой: для event log/RabbitMQ нужна иная модель.</li><li><b>Образ ставит пакет с PyPI, а не из дерева</b> — Версия образа равна версии пакета; собрать локальные правки нельзя — так задумано. Принято.</li><li><b>Отсутствие параметра verify/TLS</b> — Корпоративный CA задаётся REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE; проверка сертификата включена по умолчанию. Дефекта нет.</li><li><b>xmltodict без defusedxml</b> — xmltodict 1.0.x по умолчанию отключает внешние сущности; XXE/billion laughs не доказаны. Неограниченный объём обычного XML — <a class="xid" href="#cdc-18">CDC-18</a>.</li><li><b>Перехват сигналов в конструкторах</b> — Обоснование про ThreadPoolExecutor принято для контейнера; оставшиеся дефекты остановки — <a class="xid" href="#cdc-27">CDC-27</a>.</li><li><b>Изменяемый default records=[] в DataObject</b> — Список не мутируется; вопрос стиля, не дефект.</li><li><b>Отсутствие requests.Session и HTTP-ретраев</b> — Повторы есть на уровне циклов и страниц; слепые ретраи POST SelectChanges/Notify опасны неоднозначным результатом. Улучшение, не дефект.</li><li><b>Отсутствие lock у NameMapper.object_mappings</b> — Отображение детерминировано; порча не установлена.</li><li><b>Пометка вместо удаления; guard по merged_on на каждую страницу</b> — Обоснования (витрина видит только merged_on; самоблокировка группы между страницами) приняты; их пределы — <a class="xid" href="#cdc-04">CDC-04</a> и <a class="xid" href="#cdc-06">CDC-06</a>.</li></ul>
+    <div class="note"><b>Снятая гипотеза.</b> Одинаковые Number/Year документов разных месяцев не доказывают частичный агрегат в примере витрины: <code>source_condition</code> применяется к уже агрегированной view с <code>MAX(Period)</code>. Это не дефект реализации. Уникальность номера нужно согласовать с зерном витрины отдельно.</div>
+  </section>
+
+  <section class="block" id="ops">
+    <h2>Условия, без которых гарантии ещё уже</h2>
+    <p>До исправлений W1–W2 это не «советы», а фактические ограничения развёртывания.</p>
+    <ul><li><b>Один активный репликатор на план обмена и один активный HandlerLoop на NAME</b> — До исправления <a class="xid" href="#cdc-02">CDC-02</a> и <a class="xid" href="#cdc-09">CDC-09</a> это обязательное условие развёртывания.</li><li><b>Один часовой пояс сессий PostgreSQL без сезонного перевода</b> — См. <a class="xid" href="#cdc-25">CDC-25</a>. TZ контейнера на пояс сессии не влияет.</li><li><b>Env-режим без runner не сверяет удаления</b> — Без расписаний FullLoadCron физические удаления и удаления независимых регистров не доедут никогда; в режиме once первичная выгрузка не запускается вовсе.</li><li><b>Дроссель обязателен на базах с толстыми пакетами</b> — Ограничить SelectChanges с клиента нельзя; лимит дросселя — в объектах, а не в байтах (<a class="xid" href="#cdc-18">CDC-18</a>).</li><li><b>pool_size ≥ full_load_workers + 3 + обработчики + расписания</b> — Дефицит пула превращается в ложную «смерть» процесса (<a class="xid" href="#cdc-08">CDC-08</a>), а не в ожидание.</li><li><b>Все ТЧ объектов плана включены в состав OData</b> — Иначе первый же пакет с таким объектом блокирует план (<a class="xid" href="#cdc-20">CDC-20</a>).</li><li><b>Имена объектов плана попарно различимы после транслита</b> — Проверять до запуска (<a class="xid" href="#cdc-03">CDC-03</a>).</li><li><b>Полная выгрузка вызывается только для владельцев, не для ТЧ</b> — <a class="xid" href="#cdc-19">CDC-19</a>.</li><li><b>Аналитика по сырым таблицам всегда фильтрует is_deleted_or_empty</b> — Обнуление ресурсов — не гарантированная страховка (<a class="xid" href="#cdc-23">CDC-23</a>).</li></ul>
+  </section>
+
+  <section class="block" id="coverage">
+    <h2>Покрытие, метод, пределы</h2>
+    <p>Просмотрены все модули <code>src/onecdc</code>, env- и python-точки входа, оба примера витрин, Docker/entrypoint/CI/pyproject, текстовые модули формы и дросселя 1С, README*, DESIGN, PLAN, CHANGELOG и сценарии тестов. Записанный XML — контекст формата, не доказательство всех платформ. Бинарный <code>onecdc.epf</code> не декомпилировался. Живая 1С, роли, RLS, изоляция PostgreSQL, CVE и нагрузка не проверялись. Код проекта в этой работе не менялся. Отсутствие находки не означает доказанную безопасность.</p>
+    <p class="muted">Каталог — единый список CDC-01…45. Это не «аудит аудита»: нумерация этого отчёта, карточки с механизмом, сценарием и границей замысла. Сверка с черновиками в отчёт не входит.</p>
+    <table><thead><tr><th>Тест</th><th>Что покрывает</th><th>Чего нет</th></tr></thead><tbody><tr><td><code>test_version_guard.py</code></td><td>OLD_RUN/NEW_RUN, отдельные save с искусственными отметками</td><td>нет реальной отметки перед merge (скрывает <a class="xid" href="#cdc-04">CDC-04</a>), нет A→B→A/no-op (<a class="xid" href="#cdc-06">CDC-06</a>), нет параллельных handle и живой транзакции с истёкшим heartbeat</td></tr><tr><td><code>test_noise_and_tombstones.py</code></td><td>равные значения, сокращённый непустой набор, возврат строки</td><td>нет полностью пустого набора без колонок ресурсов (<a class="xid" href="#cdc-23">CDC-23</a>), нет очищенного во всех строках строкового поля (<a class="xid" href="#cdc-01">CDC-01</a>)</td></tr><tr><td><code>test_composite_values.py</code></td><td>примитив в дополнительном реквизите ТЧ</td><td>составное поле в первичном ключе (<a class="xid" href="#cdc-14">CDC-14</a>) не покрыто</td></tr><tr><td><code>test_metadata_objects.py</code></td><td>прямые вызовы _sync_objects</td><td>повторный разбор другого $metadata, параллельная итерация, удаление живого захвата (<a class="xid" href="#cdc-26">CDC-26</a>)</td></tr><tr><td><code>test_full_load.py</code></td><td>пагинация, сужение окон, URL, стабильные страницы</td><td>движущаяся выборка и неуникальная сортировка (<a class="xid" href="#cdc-05">CDC-05</a>); таймаут вместо HTTPError (<a class="xid" href="#cdc-22">CDC-22</a>); test_run_without_any_window_does_not_recheck закрепляет отсутствие перепроверки</td></tr><tr><td><code>test_mark_missing.py</code></td><td>пометка, guard по времени, перепроверка, бюджет запроса</td><td>удаление владельца с ТЧ (<a class="xid" href="#cdc-12">CDC-12</a>), 404 от прокси и HTML 200 (<a class="xid" href="#cdc-15">CDC-15</a>), составные измерения в ключе (<a class="xid" href="#cdc-21">CDC-21</a>)</td></tr><tr><td><code>test_handlers.py</code></td><td>коалесценция, сигнал во время прогона, CAS, пересборка</td><td>окно commit→signal (<a class="xid" href="#cdc-07">CDC-07</a>); test_restart_forgets_own_stale_writes закрепляет удаление чужих живых строк (<a class="xid" href="#cdc-02">CDC-02</a>); два экземпляра одного NAME (<a class="xid" href="#cdc-09">CDC-09</a>); кэш подписок (<a class="xid" href="#cdc-16">CDC-16</a>)</td></tr><tr><td><code>test_accounting_ext_dimensions.py</code></td><td>сборка субконто, лимит сегмента URL, окно без Top</td><td>отказ верхнего/хвостового окна и вечный повтор (<a class="xid" href="#cdc-10">CDC-10</a>), набор регистратора на границе окна (<a class="xid" href="#cdc-11">CDC-11</a>), не-404 при поиске плана (<a class="xid" href="#cdc-42">CDC-42</a>)</td></tr><tr><td><code>test_pipeline_replay.py + CI</code></td><td>полный цикл на записанных ответах, Python 3.10–3.14, PostgreSQL 16</td><td>Fake1C моделирует metadata/SelectChanges/ACK, но не пагинацию OData и конкуренцию источника; NameMapper не покрыт вовсе</td></tr></tbody></table>
+    <h3>Улучшения, которые не стали дефектами</h3>
+    <p>Session на ридер, <code>pool_pre_ping</code>, миграции служебных таблиц, наблюдение за отставанием, ретенция журнала, полные аннотации и линтер полезны. Их отсутствие само по себе не доказывает потерю данных. <code>records=[]</code> не мутируется; пустой <code>py.typed</code> корректен. Слепые ретраи POST SelectChanges/Notify опасны неоднозначным результатом POST — их нет сознательно.</p>
+  </section>
+
+  <footer class="foot">
+    <div>ONECDC 0.2.1 · static audit · 09.09.2026 · исходники только для чтения</div>
+    <div>45 узлов · матрица · не сверка сверок</div>
+  </footer>
+</div>
+
+<script>
+(function () {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const findings = $$(".finding");
+  const search = $("#q");
+  const shown = $("#shown");
+  const live = $("#live-node");
+
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function sevChecked() {
+    return new Set($$(".sev-filter:checked").map((x) => x.value));
+  }
+  function statusChecked() {
+    const boxes = $$(".st-filter");
+    if (!boxes.length) return null;
+    return new Set(boxes.filter((x) => x.checked).map((x) => x.value));
+  }
+
+  let stageIds = null;
+
+  function apply() {
+    const q = (search?.value || "").trim().toLowerCase();
+    const sevs = sevChecked();
+    const sts = statusChecked();
+    let n = 0;
+    findings.forEach((el) => {
+      const hay = el.textContent.toLowerCase();
+      const okSev = sevs.has(el.dataset.sev);
+      const okSt = !sts || sts.has(el.dataset.status);
+      const okQ = !q || hay.includes(q) || el.id.replace("-", "").includes(q.replace("-", ""));
+      const okStage = !stageIds || stageIds.has(el.id);
+      const on = okSev && okSt && okQ && okStage;
+      el.hidden = !on;
+      if (on) n += 1;
+    });
+    $$(".group").forEach((g) => {
+      const any = $$(".finding", g).some((f) => !f.hidden);
+      g.hidden = !any;
+    });
+    $$(".cell").forEach((c) => {
+      const id = c.dataset.target;
+      const f = id && document.getElementById(id);
+      c.classList.toggle("is-dim", !!(f && f.hidden));
+      c.classList.toggle("is-hit", !!(q && f && !f.hidden && q.length > 1));
+    });
+    if (shown) shown.textContent = n + " / " + findings.length;
+  }
+
+  search?.addEventListener("input", apply);
+  $$(".sev-filter, .st-filter").forEach((x) => x.addEventListener("change", apply));
+  $("#reset")?.addEventListener("click", () => {
+    if (search) search.value = "";
+    $$(".sev-filter, .st-filter").forEach((x) => (x.checked = true));
+    stageIds = null;
+    $$(".pipe").forEach((p) => p.classList.remove("is-on"));
+    apply();
+    search?.focus();
+  });
+
+  $$(".cell").forEach((c) => {
+    c.addEventListener("click", () => {
+      const el = document.getElementById(c.dataset.target);
+      if (!el) return;
+      el.hidden = false;
+      el.open = true;
+      history.replaceState(null, "", "#" + el.id);
+      el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+      el.classList.add("flash");
+      setTimeout(() => el.classList.remove("flash"), 1200);
+    });
+  });
+
+  $$(".pipe").forEach((p) => {
+    p.addEventListener("click", () => {
+      const ids = (p.dataset.ids || "").split(/\s+/).filter(Boolean);
+      const on = !p.classList.contains("is-on");
+      $$(".pipe").forEach((x) => x.classList.remove("is-on"));
+      if (on) {
+        p.classList.add("is-on");
+        stageIds = new Set(ids);
+      } else {
+        stageIds = null;
+      }
+      apply();
+      if (on) $("#catalog")?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+    });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    const tag = (e.target && e.target.tagName) || "";
+    if (e.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA") {
+      e.preventDefault();
+      search?.focus();
+      search?.select();
+    }
+    if (e.key === "Escape") {
+      if (document.activeElement === search) search.blur();
+      else if (search && search.value) {
+        search.value = "";
+        apply();
+      }
+    }
+    if ((e.key === "j" || e.key === "k") && tag !== "INPUT" && tag !== "TEXTAREA") {
+      const vis = findings.filter((f) => !f.hidden);
+      if (!vis.length) return;
+      const cur = vis.findIndex((f) => f.open) >= 0 ? vis.findIndex((f) => f.open) : vis.findIndex((f) => f === document.activeElement);
+      let i = cur < 0 ? 0 : cur + (e.key === "j" ? 1 : -1);
+      i = Math.max(0, Math.min(vis.length - 1, i));
+      vis.forEach((f, idx) => (f.open = idx === i));
+      vis[i].scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+    }
+  });
+
+  if ("IntersectionObserver" in window && live) {
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((en) => {
+          if (en.isIntersecting) {
+            const id = en.target.id.replace("cdc-", "CDC-").toUpperCase();
+            live.textContent = id.replace("CDC-", "CDC-");
+            const fid = en.target.querySelector(".fid");
+            live.textContent = fid ? fid.textContent : en.target.id;
+          }
+        });
+      },
+      { rootMargin: "-20% 0px -60% 0px", threshold: 0.1 }
+    );
+    findings.forEach((f) => io.observe(f));
+  }
+
+  apply();
+
+  function openHash() {
+    const id = (location.hash || "").replace(/^#/, "");
+    if (!id) return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.classList.contains("finding")) {
+      el.hidden = false;
+      el.open = true;
+    }
+    el.scrollIntoView({ behavior: "auto", block: "start" });
+  }
+  window.addEventListener("hashchange", openHash);
+  openHash();
+
+  if (reduce) return;
+
+  const canvas = document.getElementById("rain");
+  if (!canvas || !canvas.getContext) return;
+  const ctx = canvas.getContext("2d");
+  const glyphs = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ0123456789АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЭЮЯ$#<>/|_REFKEYMERGEDARTIKULCDC".split("");
+  const ids = findings.map((f) => f.querySelector(".fid")?.textContent || "");
+  let cols = [];
+  let w = 0;
+  let h = 0;
+  const size = 14;
+
+  function resize() {
+    w = canvas.width = window.innerWidth;
+    h = canvas.height = window.innerHeight;
+    const n = Math.max(18, Math.floor(w / 22));
+    cols = Array.from({ length: n }, (_, i) => ({
+      x: i * (w / n),
+      y: Math.random() * h,
+      speed: 0.6 + Math.random() * 1.8,
+      text: Math.random() < 0.12 && ids.length ? ids[(Math.random() * ids.length) | 0] : null,
+    }));
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  let last = 0;
+  function tick(t) {
+    if (document.hidden) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (t - last < 32) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    last = t;
+    ctx.fillStyle = "rgba(3, 8, 6, 0.18)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.font = "12px JetBrains Mono, monospace";
+    cols.forEach((c) => {
+      const g = c.text && Math.random() < 0.4 ? c.text : glyphs[(Math.random() * glyphs.length) | 0];
+      ctx.fillStyle = c.text ? "rgba(141,255,196,0.55)" : "rgba(94,234,212,0.22)";
+      ctx.fillText(g, c.x, c.y);
+      c.y += c.speed * size * 0.35;
+      if (c.y > h + 40) {
+        c.y = -20;
+        c.speed = 0.6 + Math.random() * 1.8;
+        c.text = Math.random() < 0.12 && ids.length ? ids[(Math.random() * ids.length) | 0] : null;
+      }
+    });
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+</script>
+</body>
+</html>
