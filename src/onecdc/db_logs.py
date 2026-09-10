@@ -13,8 +13,9 @@
 
 from dbmerge import mergeResult
 
-from sqlalchemy import (Column, DateTime, Engine, Integer, MetaData, String,
-                        Table, func, insert, update, schema, Numeric)
+from sqlalchemy import (Column, DateTime, Engine, Index, Integer, MetaData, String,
+                        Table, func, insert, inspect, update, schema, Numeric)
+from sqlalchemy.exc import DatabaseError
 
 from onecdc.logging_config import get_logger
 
@@ -27,16 +28,55 @@ LOAD_TYPE_CHANGES = 'changes'
 LOAD_TYPE_FULL = 'full'
 
 
+# «Проверить и создать» — не атомарная пара: между проверкой существования и CREATE успевает
+# вклиниться другой процесс или поток (несколько репликаторов на одну схему — штатный сценарий:
+# по репликатору на очередь-отдачу). Тогда CREATE падает на уникальном индексе системного каталога
+# — в PostgreSQL это UniqueViolation по pg_class_relname_nsp_index, в других СУБД «already exists».
+#
+# Гасить это блокировкой не нужно: проигравшему гонку нужен не сам CREATE, а его результат, и
+# результат уже есть. Поэтому ошибку проглатываем и ПЕРЕПРОВЕРЯЕМ — объект на месте, идём дальше;
+# нет (нет прав, нет схемы, битое соединение) — пробрасываем как есть. Случается это один раз на
+# схему, на старте, так что цена перепроверки никакая.
+def _create_if_absent(engine: Engine, create, exists, what: str) -> None:
+    try:
+        create()
+    except DatabaseError as error:
+        if not exists():
+            raise
+        logger.debug("%s already created concurrently, continuing (%s)", what, type(error).__name__)
+
+
 def _check_create_schema(engine: Engine, schema_name: str | None) -> str | None:
     # schema_name=None — работаем в схеме БД по умолчанию, создавать нечего: возвращаем None,
     # не дёргая has_schema/CreateSchema с None.
     if schema_name is None:
         return None
-    with engine.begin() as conn:
-        if not conn.dialect.has_schema(conn, schema_name):
-            logger.info(f"""Creating schema "{schema_name}".""")
-            conn.execute(schema.CreateSchema(schema_name))
+
+    def create() -> None:
+        with engine.begin() as conn:
+            if not conn.dialect.has_schema(conn, schema_name):
+                logger.info(f"""Creating schema "{schema_name}".""")
+                conn.execute(schema.CreateSchema(schema_name))
+
+    _create_if_absent(engine, create, lambda: inspect(engine).has_schema(schema_name),
+                      f'schema "{schema_name}"')
     return schema_name
+
+
+def create_table_if_absent(engine: Engine, table: Table) -> None:
+    """CREATE TABLE идемпотентно и без гонки на старте нескольких репликаторов (см. _create_if_absent)."""
+    _create_if_absent(engine, lambda: table.create(engine, checkfirst=True),
+                      lambda: inspect(engine).has_table(table.name, schema=table.schema),
+                      f'table "{table.name}"')
+
+
+def create_index_if_absent(engine: Engine, index: Index, table_name: str,
+                           schema_name: str | None = None) -> None:
+    """CREATE INDEX идемпотентно и без гонки: индекс на одну таблицу заводят все, кто в неё пишет."""
+    _create_if_absent(engine, lambda: index.create(engine, checkfirst=True),
+                      lambda: any(existing['name'] == index.name for existing
+                                  in inspect(engine).get_indexes(table_name, schema=schema_name)),
+                      f'index "{index.name}"')
 
 
 
@@ -66,7 +106,7 @@ class ReplicatorLog:
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema_name)
         self.table = _onecdc_replicator_log_table(MetaData(), self.schema_name)
-        self.table.create(engine, checkfirst=True)
+        create_table_if_absent(engine, self.table)
 
     def start(self, exchange: str, obj: str, message_no: int | None, load_type: str) -> int:
         # Счётчики стартуют с нуля — их наращивает write_result (col = col + n) по мере сохранений.

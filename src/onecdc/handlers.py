@@ -102,7 +102,7 @@ from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, E
                         func, insert, inspect, MetaData, or_, select, String, Table, text, update)
 
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from onecdc.db_logs import _check_create_schema
+from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
 from onecdc.name_mapper import NameMapper
 from onecdc.stop_signal import StopSignal, install_signal_handlers
@@ -531,7 +531,7 @@ class HandlerSignals:
         self.table = _handlers_table(MetaData(), self.schema_name)
         # Таблицу заводит и репликатор тоже: обработчиков в этом процессе может не быть вовсе, а
         # поднимать флаг всё равно надо — иначе первый же сигнал упал бы на отсутствующей таблице.
-        self.table.create(engine, checkfirst=True)
+        create_table_if_absent(engine, self.table)
         _add_missing_columns(engine, self.table)
         self._lock = threading.Lock()
         self._subscriptions: dict[str, list[tuple[str, bool]]] = {}
@@ -662,7 +662,7 @@ class HandlerLoop:
         self._writes = write_tracker
 
         self.table = _handlers_table(MetaData(), self.schema_name)
-        self.table.create(engine, checkfirst=True)
+        create_table_if_absent(engine, self.table)
         _add_missing_columns(engine, self.table)
         self._register_handler()
 

@@ -18,7 +18,7 @@ from sqlalchemy import (Column, DateTime, Engine, MetaData, String, Table, delet
                         or_, select, update)
 
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
-from onecdc.db_logs import _check_create_schema
+from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -99,7 +99,7 @@ class WriteTracker:
         self.schema_name = _check_create_schema(engine, schema)
         self.owner = owner
         self.table = _writes_table(MetaData(), self.schema_name)
-        self.table.create(engine, checkfirst=True)
+        create_table_if_absent(engine, self.table)
         self._counter = itertools.count()
         self._lock = threading.Lock()
         # Сколько своих merge сейчас в реестре и поток, который обновляет им отметку живости.
