@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 
@@ -90,6 +91,39 @@ def _exception_descriptions(payload: dict) -> list[str]:
     return meaningful or kept
 
 
+# Текст ошибки 1С кодирует в base64, когда сам не может положить его в XML, — а не может он
+# ровно тогда, когда в тексте есть недопустимый символ. То есть base64 здесь надёжная примета
+# самого неприятного случая, и разворачивать его надо обязательно: иначе в лог попадает
+# нечитаемая простыня, а причина остаётся неизвестной.
+_BASE64_ONLY = re.compile(r'^[A-Za-z0-9+/\s]{40,}={0,2}$')
+# Управляющие символы: в логе они невидимы, а искать надо именно их.
+_CONTROL_CHARS = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]')
+
+
+def _decode_base64(text: str) -> str:
+    """base64 -> текст, если это действительно base64 с валидным UTF-8 внутри. Иначе как было."""
+    if not _BASE64_ONLY.match(text):
+        return text
+    try:
+        decoded = base64.b64decode(text, validate=False).decode('utf-8')
+    except (ValueError, UnicodeDecodeError):
+        return text
+    # Пустая или почти пустая расшифровка — скорее случайное совпадение с шаблоном, чем base64.
+    return decoded if decoded.strip() else text
+
+
+def _show_control_chars(text: str) -> str:
+    """Управляющие символы -> <XX>. Без этого сообщение «недопустимый символ в позиции 24» ведёт
+    к строке, в которой глазами ничего не видно: символ не печатается."""
+    return _CONTROL_CHARS.sub(lambda m: f'<{ord(m.group()):02X}>', text)
+
+
+def _readable(text: str) -> str:
+    """Отделка описания перед выводом: развернуть base64, показать управляющие символы, сжать
+    в одну строку. Порядок важен — base64 разворачиваем ДО подсветки, иначе подсвечивать нечего."""
+    return _one_line(_show_control_chars(_decode_base64(text.strip())))
+
+
 def extract_error_text(body: str) -> str:
     """
     Человекочитаемое описание ошибки из ответа 1С. Отвечает она тремя разными способами:
@@ -107,7 +141,7 @@ def extract_error_text(body: str) -> str:
 
     match = re.search(r'<m:message[^>]*>(.*?)</m:message>', text, re.S)
     if match:
-        return _one_line(match.group(1))
+        return _readable(match.group(1))
 
     if text.startswith('{'):
         try:
@@ -117,13 +151,13 @@ def extract_error_text(body: str) -> str:
         if isinstance(payload, dict):
             descriptions = _exception_descriptions(payload)
             if descriptions:
-                return ' | '.join(descriptions)
+                return ' | '.join(_readable(d) for d in descriptions)
 
     match = re.search(r'by reason:\s*</b>\s*<br>(.*?)</body>', text, re.S | re.I)
     if match:
-        return _one_line(re.sub(r'<[^>]+>', ' ', match.group(1)))
+        return _readable(re.sub(r'<[^>]+>', ' ', match.group(1)))
 
-    return _one_line(text)
+    return _readable(text)
 
 
 def odata_datetime_value(value: "date | datetime") -> str:
