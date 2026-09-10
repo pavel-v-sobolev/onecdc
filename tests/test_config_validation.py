@@ -34,6 +34,7 @@ def _make(db, **overrides):
     ({"engine": "postgresql://localhost/db"}, "create_engine"),
     ({"db_schema": 5}, "db_schema"),
     ({"full_load_workers": 0}, "full_load_workers"),
+    ({"automatic_full_load": "false"}, "automatic_full_load"),
     ({"request_timeout": 0}, "request_timeout"),
     ({"request_timeout": (60, None)}, "request_timeout"),
 ])

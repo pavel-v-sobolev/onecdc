@@ -311,6 +311,16 @@ def _check_full_load_workers(full_load_workers) -> int:
     return full_load_workers
 
 
+def _check_automatic_full_load(automatic_full_load) -> bool:
+    """Автоматическая постановка на полную выгрузку: только True/False. Строку не принимаем
+    намеренно — "False" из окружения истинна, и такая опечатка молча включила бы то, что просили
+    выключить."""
+    if not isinstance(automatic_full_load, bool):
+        raise ValueError("automatic_full_load must be True or False "
+                         f"(got {automatic_full_load!r})")
+    return automatic_full_load
+
+
 def _check_request_timeout(request_timeout):
     """Таймаут requests: число секунд либо (connect, read). None — значение по умолчанию
     (DEFAULT_REQUEST_TIMEOUT). Явный 0/None внутри кортежа — вечное ожидание, это не таймаут."""
@@ -465,7 +475,8 @@ class Replicator:
                  engine: Engine, db_schema: str | None = None,
                  db_temp_schema: str | None = None,
                  request_timeout: float | None = None,
-                 full_load_workers: int = 2):
+                 full_load_workers: int = 2,
+                 automatic_full_load: bool = True):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
         # Перехват SIGTERM/SIGINT ставим здесь, а не при запуске цикла: run_forever типовая точка
@@ -500,6 +511,12 @@ class Replicator:
 
         # Фоновая полная выгрузка: пул потоков.
         self._full_load_workers = _check_full_load_workers(full_load_workers)
+        # Ставить ли новые объекты на полную выгрузку самому (см. _require_full_load_for_new_objects).
+        # False — репликатор только читает изменения: выгрузку тогда назначают руками (флаг
+        # full_load_is_required в onecdc_metadata_objects), расписанием FullLoadCron или регистрацией
+        # на стороне 1С. Исполнителем выгрузки репликатор остаётся в любом случае — помеченный
+        # объект фоновые воркеры возьмут и с False.
+        self._automatic_full_load = _check_automatic_full_load(automatic_full_load)
         # Размер страницы, который 1С реально осилила по этому объекту (см. FULL_LOAD_MIN_BATCH).
         # Пишет только поток самой выгрузки, а он на объект один (захват не пускает второго).
         self._full_load_page_size: dict[str, int] = {}
@@ -567,11 +584,27 @@ class Replicator:
         logger.info("Changes package %s processed in %s: %s rows",
                     self.changes.message_no, format_duration(time.monotonic() - started),
                     self.changes.rows_read())
-        # Объект пришёл в пакете → он в плане обмена. Если ни разу не выгружался целиком,
-        # помечаем на полную выгрузку (выполнит фоновый воркер в run_forever). 
-        # Табличные части пропускаем: они догружаются вместе с владельцем при его full_load,
-        # приезжая вложенными в его entry. Отдельная сущность в OData у них есть, но грузить их
-        # ею незачем и дороже — страница владельца приносит его табличные части целиком.
+        # Новые объекты пакета — в очередь на полную выгрузку. Отключается параметром
+        # automatic_full_load: тогда репликатор только читает изменения, а выгрузку ставят руками
+        # (флаг full_load_is_required) или расписанием.
+        if self._automatic_full_load:
+            self._require_full_load_for_new_objects()
+        
+        if notify_changes and len(self.changes) > 0:
+            self.changes.notify_changes_received()
+        else:
+            logger.debug("No changes — skipping confirmation")
+
+
+    def _require_full_load_for_new_objects(self) -> None:
+        """
+        Объект пришёл в пакете → он в плане обмена. Если ни разу не выгружался целиком, помечаем
+        на полную выгрузку (выполнит фоновый воркер в run_forever).
+
+        Табличные части пропускаем: они догружаются вместе с владельцем при его full_load,
+        приезжая вложенными в его entry. Отдельная сущность в OData у них есть, но грузить их
+        ею незачем и дороже — страница владельца приносит его табличные части целиком.
+        """
         for object_full_name in self.changes:
             metadata_obj = self.metadata.get(object_full_name)
             if metadata_obj is None:
@@ -584,11 +617,6 @@ class Replicator:
                 continue
 
             self.metadata.require_full_load_if_new(object_full_name)
-        
-        if notify_changes and len(self.changes) > 0:
-            self.changes.notify_changes_received()
-        else:
-            logger.debug("No changes — skipping confirmation")
 
 
     def _save_changes(self) -> None:

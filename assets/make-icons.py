@@ -32,6 +32,10 @@ def badge(d, cx, cy, r, color, glyph, ring=True):
         a = r * 0.54
         d.polygon([(cx, cy - a * 1.1), (cx - a, cy + a * 0.1), (cx + a, cy + a * 0.1)], fill=WHITE)
         d.rectangle([cx - a * 0.36, cy, cx + a * 0.36, cy + a * 0.85], fill=WHITE)
+    elif glyph == "down":
+        # Треугольник вниз — тот же знак, которым платформа помечает выпадающий список.
+        a = r * 0.60
+        d.polygon([(cx - a, cy - a * 0.5), (cx + a, cy - a * 0.5), (cx, cy + a * 0.72)], fill=WHITE)
     else:
         a, w = r * 0.48, max(2, int(r * 0.30))
         d.line([(cx - a, cy - a), (cx + a, cy + a)], fill=WHITE, width=w)
@@ -92,6 +96,31 @@ def many_docs(small, color, glyph):
         badge(d, 186, 190, 60, color, glyph)
     return im
 
+def _rot(cx, cy, x, y, a):
+    ca, sa = math.cos(a), math.sin(a)
+    return (cx + x * ca - y * sa, cy + x * sa + y * ca)
+
+
+def service(small):
+    """Шестерёнка — группа служебных действий. Зубьев на 16 px меньше и они толще: на таком
+    размере восемь тонких сливаются в размытое кольцо."""
+    im, d = canvas()
+    c = S / 2
+    r = 80 if small else 76
+    teeth = 6 if small else 8
+    tw = r * (0.42 if small else 0.34)
+    for i in range(teeth):
+        a = 2 * math.pi * i / teeth
+        d.polygon([_rot(c, c, x, y, a) for x, y in
+                   [(r * 0.70, -tw), (r * 1.52, -tw * 0.74), (r * 1.52, tw * 0.74), (r * 0.70, tw)]],
+                  fill=BLUE)
+    d.ellipse([c - r, c - r, c + r, c + r], fill=BLUE)
+    # Дырка в ступице: пишем прозрачные пиксели поверх — ImageDraw кладёт цвет как есть.
+    hole = r * (0.46 if small else 0.40)
+    d.ellipse([c - hole, c - hole, c + hole, c + hole], fill=(0, 0, 0, 0))
+    return im
+
+
 ICONS = {
     "refresh":       refresh,
     "odata":         odata,
@@ -100,6 +129,10 @@ ICONS = {
     "upload-all":    lambda s: many_docs(s, GREEN, "up"),
     "clear-object":  lambda s: one_doc(s, RED, "x"),
     "clear-all":     lambda s: many_docs(s, RED, "x"),
+    # Картинки группы-подменю, куда убраны выгрузка и очистка. Два варианта на выбор:
+    # "menu" держится грамматики набора (листы + бейдж), "service" отличается силуэтом.
+    "menu":          lambda s: many_docs(s, BLUE, "down"),
+    "service":       service,
 }
 
 # 16 не выпускаем: в обработке используются 32 px. Добавьте 16 в SIZES, если понадобится —

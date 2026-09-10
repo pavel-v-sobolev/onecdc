@@ -6,7 +6,8 @@ Entrypoint для запуска из окружения без единой с�
 Обязательные: ONECDC_ODATA_URL, ONECDC_EXCHANGE_NAME, ONECDC_QUEUE_GUID, ONECDC_DB_URL.
 ONECDC_QUEUE_GUID не знаете — запустите без него: в лог выведется список узлов плана обмена.
 Необязательные: ONECDC_ODATA_USER, ONECDC_ODATA_PASSWORD (без пользователя — без авторизации),
-ONECDC_DB_SCHEMA, ONECDC_DB_TEMP_SCHEMA, ONECDC_FULL_LOAD_WORKERS, ONECDC_POLL_INTERVAL, ONECDC_LOG_LEVEL, ONECDC_MODE.
+ONECDC_DB_SCHEMA, ONECDC_DB_TEMP_SCHEMA, ONECDC_FULL_LOAD_WORKERS, ONECDC_AUTOMATIC_FULL_LOAD,
+ONECDC_POLL_INTERVAL, ONECDC_LOG_LEVEL, ONECDC_MODE.
 
 Обработчиков здесь нет: они объявляются кодом, а тут кода пользователя нет. Нужны обработчики —
 берите за основу config/runner.py: там ровно та же сборка, плюс по HandlerLoop на каждого
@@ -43,10 +44,28 @@ def _number(name: str, default: str, cast=float):
     return number
 
 
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off")
+
+
+def _flag(name: str, default: bool) -> bool:
+    """Булева переменная окружения. Строку в bool() не отдаём: "false" в питоне истинна, и
+    выключатель, набранный словом, молча остался бы включённым."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise SystemExit(f"{name}={value!r} is not a flag (expected true/false)")
+
+
 def main() -> None:
     odata_user = os.environ.get("ONECDC_ODATA_USER")
     odata_url = _required("ONECDC_ODATA_URL")
     full_load_workers = _number("ONECDC_FULL_LOAD_WORKERS", "2", int)
+    automatic_full_load = _flag("ONECDC_AUTOMATIC_FULL_LOAD", True)
 
     mode = os.environ.get("ONECDC_MODE", "loop")
     if mode not in ("loop", "once"):
@@ -78,6 +97,9 @@ def main() -> None:
             # Схема промежуточных таблиц dbmerge; не задана — та же, что у данных.
             db_temp_schema=os.environ.get("ONECDC_DB_TEMP_SCHEMA"),
             full_load_workers=full_load_workers,
+            # Новый объект в пакете сам встаёт на полную выгрузку. Выключают тем, кто инициирует
+            # первую загрузку на стороне 1С или назначает её расписанием.
+            automatic_full_load=automatic_full_load,
         )
     except ConnectionError as exc:
         raise SystemExit(str(exc))

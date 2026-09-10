@@ -47,7 +47,7 @@ def _patch_replicator(monkeypatch, replicator):
 def test_main_maps_environment_to_arguments(monkeypatch):
     _set_env(monkeypatch, ONECDC_MODE="once", ONECDC_ODATA_USER="odata",
              ONECDC_ODATA_PASSWORD="secret", ONECDC_DB_SCHEMA="onecdc",
-             ONECDC_FULL_LOAD_WORKERS="4")
+             ONECDC_FULL_LOAD_WORKERS="4", ONECDC_AUTOMATIC_FULL_LOAD="false")
     captured = _patch_replicator(monkeypatch, _FakeReplicator())
 
     entry.main()
@@ -58,6 +58,7 @@ def test_main_maps_environment_to_arguments(monkeypatch):
     assert captured["queue_guid"] == "Q"
     assert captured["db_schema"] == "onecdc"
     assert captured["full_load_workers"] == 4
+    assert captured["automatic_full_load"] is False
     assert captured["engine"].url.database == make_url(TEST_DB_URL).database
 
 
@@ -71,6 +72,7 @@ def test_main_without_user_means_no_auth(monkeypatch):
     assert captured["odata_auth"] is None
     assert captured["db_schema"] is None
     assert captured["full_load_workers"] == 2, 'значение по умолчанию'
+    assert captured["automatic_full_load"] is True, 'значение по умолчанию'
 
 
 def test_main_loop_mode(monkeypatch):
@@ -102,6 +104,15 @@ def test_main_once_mode(monkeypatch):
 
 def test_main_unknown_mode(monkeypatch):
     _set_env(monkeypatch, ONECDC_MODE="bogus")
+    _patch_replicator(monkeypatch, _FakeReplicator())
+
+    with pytest.raises(SystemExit):
+        entry.main()
+
+
+def test_main_unknown_flag_value(monkeypatch):
+    # "da" в bool() истинно — выключатель, набранный не тем словом, молча остался бы включённым.
+    _set_env(monkeypatch, ONECDC_AUTOMATIC_FULL_LOAD="da")
     _patch_replicator(monkeypatch, _FakeReplicator())
 
     with pytest.raises(SystemExit):

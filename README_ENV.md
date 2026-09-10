@@ -51,6 +51,7 @@ python -m onecdc     # то же самое
 | `ONECDC_DB_SCHEMA` | схема БД по умолчанию (`public` у Postgres) | схема, в которой создаются таблицы данных |
 | `ONECDC_DB_TEMP_SCHEMA` | схема данных | схема промежуточных таблиц merge |
 | `ONECDC_FULL_LOAD_WORKERS` | `2` | число фоновых потоков полной выгрузки |
+| `ONECDC_AUTOMATIC_FULL_LOAD` | `true` | ставить ли новый объект пакета на полную выгрузку самому; `false` — репликатор только читает изменения |
 | `ONECDC_POLL_INTERVAL` | `60` | период опроса изменений, секунд (только в режиме `loop`) |
 | `ONECDC_MODE` | `loop` | `loop` — вечный цикл; `once` — один цикл read → save → notify и выход |
 | `ONECDC_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
@@ -64,6 +65,11 @@ python -m onecdc     # то же самое
 `pool_size = ONECDC_FULL_LOAD_WORKERS + 3` — соединение одновременно держат цикл изменений, два
 потока отметки живости (незавершённых merge и захвата полной выгрузки) и страницы полной выгрузки
 (подробнее — [README_DB.md](README_DB.md), раздел «Сколько нужно соединений к БД»).
+
+`ONECDC_AUTOMATIC_FULL_LOAD=false` отключает только ЗАКАЗ выгрузки — привычку помечать новый
+объект пакета как требующий полной. Объект, помеченный руками в `onecdc_metadata_objects`,
+контейнер выгрузит по-прежнему. Ставят его тем, кто инициирует первую загрузку на стороне 1С
+(см. [README.md](README.md), «Полная (первоначальная) выгрузка»).
 
 ### Не `ONECDC_*`, но важна
 
@@ -83,6 +89,7 @@ python -m onecdc     # то же самое
 ONECDC_ODATA_URL is not set (required: ONECDC_ODATA_URL, ONECDC_EXCHANGE_NAME, ONECDC_DB_URL)
 ONECDC_POLL_INTERVAL='xx' is not a number
 ONECDC_FULL_LOAD_WORKERS='-1' must be positive
+ONECDC_AUTOMATIC_FULL_LOAD='da' is not a flag (expected true/false)
 Unknown ONECDC_MODE='step' (expected 'loop' or 'once')
 Unknown ONECDC_LOG_LEVEL='TRACE' (expected DEBUG/INFO/WARNING/ERROR/CRITICAL)
 ```
