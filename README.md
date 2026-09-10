@@ -19,7 +19,7 @@ It engages standard ODATA mechanism and standard 1C exchange plan mechanism to e
 
 # Общий принцип действия
 <p align="center">
-  <img alt="Схема работы OneCDC" src="https://raw.githubusercontent.com/pavel-v-sobolev/onecdc/main/assets/scheme.png" width="800">
+  <img alt="Схема работы OneCDC" src="https://raw.githubusercontent.com/pavel-v-sobolev/onecdc/main/assets/scheme.png" width="600">
 </p>
 
 1) Основной объект библиотеки это оркестратор `Replicator`, который циклично читает изменения из 1С (через OData + план обмена) и
