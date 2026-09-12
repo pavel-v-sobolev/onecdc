@@ -252,6 +252,41 @@ class DataObject(UserDict):
             
 
 
+def _scalar_property_value(value: Any) -> tuple[bool, str | None]:
+    """
+    Разбирает значение свойства из m:properties: (это скаляр?, сырое значение).
+
+    xmltodict отдаёт одно и то же свойство четырьмя разными способами, и по типу python-значения
+    скаляр от табличной части не отличить:
+      <d:Артикул>A-100</d:Артикул>                -> 'A-100'                  скаляр
+      <d:Артикул/>                                -> None                     ПУСТОЙ скаляр
+      <d:Цена m:type="Edm.Double">1.5</d:Цена>    -> {'@m:type':…,'#text':…}   скаляр с явным типом
+      <d:Представления m:type="Collection(…)"/>   -> {'@m:type':'Collection('} табличная часть
+
+    Раньше бралось только `isinstance(v, str)`, и пустой элемент пропадал вместе со свойством:
+    очистка реквизита в 1С не доезжала до БД — колонки не было ни в данных, ни в UPDATE, и старое
+    значение оставалось навсегда. Пустых элементов в ответах 1С не единицы: в одном пакете
+    номенклатуры их 90 (Артикул, Описание, PredefinedDataName, КодТРУ…).
+
+    Пустой скаляр отдаём как None: в 1С у реквизита нет отдельного «не заполнено», пусто — это
+    пусто, а NULL в колонке уже и так пишется, когда поле пустое лишь у части записей пачки.
+
+    Неоднозначные формы (m:null / xsi:nil без m:type) остаются табличными частями, как и было:
+    по одному лишь значению пустая ТЧ от пустого скаляра не отличается, и трогать это здесь
+    значило бы менять поведение там, где оно не сломано.
+    """
+    if isinstance(value, str):
+        return True, value
+    if value is None:
+        return True, None
+    if isinstance(value, dict):
+        if str(value.get('@m:type', '')).startswith('Collection('):
+            return False, None
+        if '#text' in value:
+            return True, value['#text']
+    return False, None
+
+
 def _composite_primitive_fields(raw: dict, metadata_obj) -> dict:
     """
     Находит составные поля, в которых у ЭТОЙ записи лежит не ссылка, и отдаёт {поле: сырое значение}.
@@ -915,11 +950,17 @@ class DataReader(UserDict):
         # из парного <поле>_Type, а решать надо ДО приведения к Guid — иначе число уже потеряно.
         raw = {}
         for k, v in properties.items():
-            if k.startswith('d:') and isinstance(v, str):
-                field_name = k.removeprefix('d:')
-                # У поля _Type в значении полное имя типа ("StandardODATA.Catalog_Контрагенты");
-                # префикс убираем, остаётся имя объекта 1С либо примитив вида Edm.Double.
-                raw[field_name] = v.removeprefix(ODATA_PREFIX) if field_name.endswith('_Type') else v
+            if not k.startswith('d:'):
+                continue
+            is_scalar, value = _scalar_property_value(v)
+            if not is_scalar:
+                continue
+            field_name = k.removeprefix('d:')
+            # У поля _Type в значении полное имя типа ("StandardODATA.Catalog_Контрагенты");
+            # префикс убираем, остаётся имя объекта 1С либо примитив вида Edm.Double.
+            if field_name.endswith('_Type') and value is not None:
+                value = value.removeprefix(ODATA_PREFIX)
+            raw[field_name] = value
 
         primitives = _composite_primitive_fields(raw, metadata_obj)
 
@@ -939,7 +980,7 @@ class DataReader(UserDict):
 
             type_name = metadata_obj.get(field_name) or 'String'
 
-            if field_name.endswith('_Type'):
+            if field_name.endswith('_Type') and value is not None:
                 # В колонке _Type храним имя типа без префикса поставщика: у ссылок это уже сделано
                 # выше (StandardODATA.), у примитивов убираем Edm. — в БД полезно 'Double', а не
                 # 'Edm.Double'. Распознавание примитива идёт по сырому значению (см. primitives).
@@ -1128,11 +1169,21 @@ class DataReader(UserDict):
 
     def _get_record_table_parts(self, properties):
         """
-        Ищем табличные части в свойствах объекта.
-        Если тип данных dict и если префикс в названии 'd:', то будем считать что это табличная часть
+        Ищем табличные части в свойствах объекта: всё, что не разобрал _scalar_property_value.
+
+        Раньше условие было «любой dict, кроме xsi:nil». Классификатор общий с _get_record_fields —
+        чтобы одно и то же свойство не попало разом и в колонку, и в табличную часть: скаляр с
+        явным типом (<d:Цена m:type="Edm.Double">1.5</d:Цена>) в xmltodict тоже dict.
         """
-        table_parts = {k.removeprefix('d:'): v for k, v in properties.items()
-                       if k.startswith('d:') and isinstance(v, dict) and v.get('@xsi:nil') != 'true'}
+        table_parts = {}
+        for k, v in properties.items():
+            if not k.startswith('d:') or not isinstance(v, dict):
+                continue
+            if v.get('@xsi:nil') == 'true':
+                continue
+            is_scalar, _ = _scalar_property_value(v)
+            if not is_scalar:
+                table_parts[k.removeprefix('d:')] = v
         return table_parts
 
     def _get_entity_records(self, object_name: str, properties: dict):

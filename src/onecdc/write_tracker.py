@@ -8,16 +8,16 @@
 ответ на вопрос «до какого момента данные точно устоялись».
 """
 
-import itertools
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Iterable
 
 from sqlalchemy import (Column, DateTime, Engine, MetaData, String, Table, delete, func, insert,
-                        or_, select, update)
+                        select, update)
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, instance_owner
 from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import get_logger
 
@@ -85,6 +85,14 @@ class WriteTracker:
     процесса нет, его транзакции откатились, и держать по ним границу незачем. Поэтому падение
     репликатора обработчиков не морозит — максимум на MERGE_HEARTBEAT_TTL.
 
+    Владелец строки — ЭКЗЕМПЛЯР процесса, а не план обмена (см. common_functions.instance_owner).
+    Это не косметика: владельцем отбираются строки, которые процесс вправе удалить при старте и
+    которым продлевает отметку живости. Пока владельцем было имя обмена, второй процесс того же
+    обмена — а это штатная раскладка «репликатор и расписание в разных контейнерах» — при старте
+    удалял ЖИВЫЕ строки первого (граница переставала их ждать, обработчик молча перешагивал ещё не
+    закоммиченные merge), продлевал чужие брошенные строки вечно и мог столкнуться с ним на
+    первичном ключе. Тот же урок раньше был усвоен в full_load_claim.
+
     Отметку живости обновляет сам реестр, своим потоком. Именно реестр, а не цикл репликации:
     строки появляются в любом сценарии, включая одиночный run_once и вызванный руками full_load,
     а цикла в этих сценариях нет. Без этого одна страница выгрузки, считающаяся дольше
@@ -97,10 +105,12 @@ class WriteTracker:
     def __init__(self, engine: Engine, schema: str | None, owner: str):
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema)
-        self.owner = owner
+        # Уникализируем ВНУТРИ, а не доверяем вызывающему: владелец здесь — не «чей это обмен», а
+        # «какой процесс держит строку», и цена ошибки — молча удалённая чужая живая строка.
+        # Переданное имя остаётся префиксом, чтобы в таблице было видно, кто это.
+        self.owner = instance_owner(owner)
         self.table = _writes_table(MetaData(), self.schema_name)
         create_table_if_absent(engine, self.table)
-        self._counter = itertools.count()
         self._lock = threading.Lock()
         # Сколько своих merge сейчас в реестре и поток, который обновляет им отметку живости.
         # Поток поднимается с первым merge и гаснет, когда продлевать становится нечего: реестры
@@ -148,23 +158,26 @@ class WriteTracker:
 
     def _cleanup(self) -> None:
         """
-        Уборка при старте — двух видов строк.
+        Уборка при старте: брошенные строки старше MERGE_ABANDONED_TTL.
 
-        Свои, от прошлого запуска: транзакции того процесса давно откатились, и ждать по ним
-        MERGE_HEARTBEAT_TTL после каждого рестарта незачем.
+        При расчёте границы они игнорируются уже через MERGE_HEARTBEAT_TTL, но удалить их некому —
+        процесс может не вернуться никогда (репликатор переименовали или выключили). Без этой
+        уборки они копились бы в таблице вечно.
 
-        Чужие брошенные, старше MERGE_ABANDONED_TTL: при расчёте границы они и так игнорируются, но
-        удалить их некому — процесс может не вернуться никогда (репликатор переименовали или
-        выключили). Без этой уборки они копились бы в таблице вечно.
+        Своих строк «от прошлого запуска» здесь больше нет и быть не может: владелец уникален на
+        экземпляр (см. __init__). Раньше уборка шла ещё и по owner == self.owner, и это было не
+        ускорением рестарта, а удалением ЖИВЫХ строк соседнего процесса того же обмена: его merge
+        переставал держать границу, обработчик брал её как «сейчас» и молча перешагивал строки,
+        которые сосед вот-вот закоммитит. Цена отказа — после рестарта граница подождёт свои
+        строки до MERGE_HEARTBEAT_TTL. Это задержка, а не потеря.
         """
         t = self.table
         with self.engine.begin() as conn:
             now = conn.scalar(select(func.now()))
-            result = conn.execute(t.delete().where(or_(
-                t.c.owner == self.owner,
-                t.c.heartbeat_at < now - timedelta(seconds=MERGE_ABANDONED_TTL))))
+            result = conn.execute(t.delete().where(
+                t.c.heartbeat_at < now - timedelta(seconds=MERGE_ABANDONED_TTL)))
         if result.rowcount:
-            logger.info("Removed %s stale rows from %s", result.rowcount, WRITES_TABLE)
+            logger.info("Removed %s abandoned rows from %s", result.rowcount, WRITES_TABLE)
 
     def track(self, object_name: str) -> "_TrackedWrite":
         """
@@ -174,7 +187,10 @@ class WriteTracker:
         «записался» помещается расчёт границы, который этого merge ещё не видит, а время берёт уже
         более позднее — и строки merge оказались бы левее границы, но невидимыми.
         """
-        row_id = f'{self.owner}:{next(self._counter)}'
+        # Идентификатор строки не выводим из owner: в колонке 64 символа, а уникальный owner —
+        # это имя обмена плюс хост, pid и суффикс, и в контейнерной раскладке он туда не влезет.
+        # uuid4 и короче, и уникален сам по себе, без счётчика.
+        row_id = uuid.uuid4().hex
         with self._lock:
             self._active += 1
         self._ensure_heartbeat()

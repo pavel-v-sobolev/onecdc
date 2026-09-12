@@ -1,6 +1,9 @@
 import base64
 import json
+import os
 import re
+import socket
+import uuid
 
 from datetime import date, datetime
 
@@ -10,6 +13,24 @@ from sqlalchemy import DateTime, func
 from onecdc.logging_config import get_logger
 
 ODATA_PREFIX = 'StandardODATA.'
+
+
+def instance_owner(name: str) -> str:
+    """
+    Имя владельца, уникальное на ЭКЗЕМПЛЯР процесса: <name>:<хост>:<pid>:<случайный суффикс>.
+
+    Владельцем помечаются межпроцессные отметки в БД — захват объекта под полную выгрузку
+    (full_load_claim) и реестр незавершённых merge (write_tracker). Имя плана обмена или
+    обработчика для этого НЕ годится: репликатор, расписание и обработчики штатно поднимаются
+    в разных процессах и контейнерах одного обмена (так описано в README), и тогда они считались
+    бы одним владельцем — снимали бы захваты и чистили строки друг друга.
+
+    Случайный суффикс нужен и при совпадении хоста с pid: в контейнерах pid=1 у всех, а хост —
+    это идентификатор пода, который после пересоздания повторяется.
+
+    Хост и pid оставлены, чтобы по строке в БД было видно, кто именно держит объект.
+    """
+    return f'{name}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}'
 
 # Часы БД без часового пояса. Просто now() не годится: PostgreSQL отдаёт timestamptz, драйвер —
 # offset-aware datetime, а merged_on, started_at и onecdc_handlers.last_run_at лежат в колонках без

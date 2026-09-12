@@ -693,25 +693,81 @@ def test_abandoned_rows_of_a_gone_replicator_are_removed(db):
         assert conn.execute(select(gone.table)).all() == []
 
 
-def test_restart_forgets_own_stale_writes(db):
-    # Свои строки от прошлого запуска чистим сразу: ждать по ним TTL после каждого рестарта незачем.
+def test_second_process_of_the_same_exchange_does_not_delete_live_writes(db):
+    # Штатная раскладка из README: репликатор и расписание — разные процессы ОДНОГО плана обмена.
+    # Владельцем строки было имя обмена, и старт второго процесса удалял живые строки первого:
+    # граница переставала их ждать, обработчик брал её как «сейчас» и молча перешагивал строки,
+    # которые первый вот-вот закоммитит. Сырая таблица при этом выглядит здоровой, витрина — нет.
     from onecdc.handlers import WriteTracker
 
-    def own_rows(tracker):
+    def all_rows():
         with db.engine.connect() as conn:
-            return conn.execute(select(tracker.table)
-                                .where(tracker.table.c.owner == tracker.owner)).all()
+            return conn.execute(select(tracker.table)).all()
 
     tracker = WriteTracker(db.engine, db.schema, 'План1')
+    second = None
     try:
-        tracker.track("Catalog_Nomenklatura")
-        assert own_rows(tracker)
+        tracked = tracker.track("Catalog_Nomenklatura")
 
-        restarted = WriteTracker(db.engine, db.schema, 'План1')
-        assert own_rows(restarted) == []
-        assert restarted.boundary(["Catalog_Nomenklatura"]) is not None
+        second = WriteTracker(db.engine, db.schema, 'План1')
+
+        assert len(all_rows()) == 1, 'второй процесс удалил живой merge первого'
+        # И главное — граница у второго прижата к чужому незавершённому merge, а не к «сейчас».
+        assert second.boundary(["Catalog_Nomenklatura"]) == tracked.started_at
     finally:
         tracker.close()
+        if second is not None:
+            second.close()
+
+
+def test_two_processes_of_the_same_exchange_get_different_owners(db):
+    # Владелец уникален на экземпляр — на этом держится и уборка, и отметка живости, и первичный
+    # ключ строки (раньше id был f'{owner}:{счётчик}', а счётчик в обоих процессах шёл с нуля).
+    from onecdc.handlers import WriteTracker
+
+    first = WriteTracker(db.engine, db.schema, 'План1')
+    second = WriteTracker(db.engine, db.schema, 'План1')
+    try:
+        assert first.owner != second.owner
+        assert first.owner.startswith('План1:'), 'по строке в БД должно быть видно, чей это обмен'
+
+        first.track("Catalog_Nomenklatura")
+        second.track("Catalog_Nomenklatura")
+        with db.engine.connect() as conn:
+            rows = conn.execute(select(first.table)).all()
+        assert len({r.id for r in rows}) == 2, 'строки столкнулись на первичном ключе'
+    finally:
+        first.close()
+        second.close()
+
+
+def test_heartbeat_does_not_revive_writes_of_a_dead_twin(db):
+    # Отметку живости процесс продлевает только СВОИМ строкам. Пока владельцем было имя обмена,
+    # живой процесс вечно продлевал брошенную строку умершего тёзки — и граница окна оставалась
+    # прижатой к ней навсегда: витрина переставала догонять источник совсем.
+    from onecdc.handlers import MERGE_HEARTBEAT_TTL, WriteTracker
+
+    # Порядок важен: оба процесса поднялись, и только потом один умер. Если поднимать выжившего
+    # последним, дефект спрячется за уборкой при старте — она удалит строку тёзки, и тест пройдёт
+    # по неверной причине.
+    alive = WriteTracker(db.engine, db.schema, 'План1')
+    dead = WriteTracker(db.engine, db.schema, 'План1')
+    try:
+        dead_write = dead.track("Catalog_Nomenklatura")
+        dead.close()
+        # Процесс умер: отметку живости его строке больше никто не обновляет.
+        with db.engine.begin() as conn:
+            conn.execute(dead.table.update().values(
+                heartbeat_at=func.now() - timedelta(seconds=MERGE_HEARTBEAT_TTL + 60)))
+
+        alive.heartbeat()
+
+        # Строка тёзки осталась протухшей, граница её не ждёт. Иначе витрина не догонит источник
+        # уже никогда: граница прижата к чужому merge, которого нет, а снять её некому.
+        assert alive.boundary(["Catalog_Nomenklatura"]) > dead_write.started_at
+    finally:
+        alive.close()
+        dead.close()
 
 
 def test_merge_heartbeat_works_without_a_replication_loop(db, monkeypatch):
@@ -770,8 +826,10 @@ def test_heartbeat_thread_is_started_once(db, monkeypatch):
         thread.start()
     started.wait()
     time.sleep(0.1)
+    # Имя потока — heartbeat:<owner>, а owner уникален на экземпляр (см. instance_owner),
+    # поэтому сверяем по префиксу, а не по имени обмена целиком.
     new_heartbeats = [t for t in set(threading.enumerate()) - before
-                      if t.name == 'heartbeat:План1']
+                      if t.name == f'heartbeat:{tracker.owner}']
     for thread in threads:
         thread.join()
 
@@ -802,7 +860,7 @@ def test_the_heartbeat_thread_goes_away_when_nothing_is_in_flight(db, monkeypatc
         # И поднимается заново со следующим merge — гашение не одноразовое.
         with tracker.track("Catalog_Nomenklatura"):
             assert tracker._heartbeat_thread is not None
-            assert any(t.name == 'heartbeat:План1' for t in threading.enumerate())
+            assert any(t.name == f'heartbeat:{tracker.owner}' for t in threading.enumerate())
     finally:
         tracker.close()
 

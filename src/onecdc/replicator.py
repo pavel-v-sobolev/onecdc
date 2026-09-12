@@ -1,8 +1,5 @@
 import functools
-import os
 import re
-import socket
-import uuid
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +13,7 @@ from sqlalchemy import Engine, Integer, Numeric, and_
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
 from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, type_mapping
-from onecdc.common_functions import format_duration, odata_datetime_value
+from onecdc.common_functions import format_duration, instance_owner, odata_datetime_value
 from onecdc.data_reader import (DataReader, IS_DELETED_OR_EMPTY_FIELD, ODATA_PREFIX,
                                 RECORDER_FIELDS, _odata_literal)
 from onecdc.change_reader import ChangeReader
@@ -534,7 +531,7 @@ class Replicator:
         # заслон только один и только в БД — множество в памяти их бы не развело.
         self._full_load_claim = FullLoadClaim(
             engine, lambda: self.metadata.objects_table,
-            owner=f'{exchange_name}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}')
+            owner=instance_owner(exchange_name))
         self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
                                     self.metadata, odata_auth=self._odata_auth,
                                     request_timeout=self._request_timeout)
