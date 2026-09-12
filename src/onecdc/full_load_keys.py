@@ -26,7 +26,7 @@ from sqlalchemy import (Column, Index, MetaData, Table, and_, exists, func, inse
                         select, update)
 from sqlalchemy.engine import Engine
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, truncate_to_bytes
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -38,15 +38,6 @@ KEYS_TABLE_TIMESTAMP_FORMAT = '%y%m%d%H%M%S'
 # Столько же, сколько у dbmerge: 63 байта лимита Postgres минус запас на суффикс индекса.
 MAX_KEYS_TABLE_NAME_LEN = 58
 UNIQUE_ID_LENGTH = 8
-
-
-def _truncate_to_bytes(name: str, max_bytes: int) -> str:
-    """Усечение по БАЙТАМ (Postgres считает идентификатор в них) с отбрасыванием оборванной
-    многобайтовой последовательности — имя таблицы может быть и кириллическим."""
-    encoded = name.encode('utf-8')
-    if len(encoded) <= max_bytes:
-        return name
-    return encoded[:max_bytes].decode('utf-8', errors='ignore')
 
 
 class FullLoadKeys:
@@ -86,7 +77,7 @@ class FullLoadKeys:
         prefix = f'{KEYS_TABLE_PREFIX}{now.strftime(KEYS_TABLE_TIMESTAMP_FORMAT)}_'
         suffix = f'_{uuid.uuid4().hex[:UNIQUE_ID_LENGTH]}'
         budget = MAX_KEYS_TABLE_NAME_LEN - len(prefix) - len(suffix)
-        return prefix + _truncate_to_bytes(target_table_name, budget) + suffix
+        return prefix + truncate_to_bytes(target_table_name, budget) + suffix
 
     def __enter__(self) -> "FullLoadKeys":
         # Индекс объявлен на таблице, поэтому создаётся вместе с ней одним create().

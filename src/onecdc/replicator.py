@@ -500,11 +500,15 @@ class Replicator:
         # Компоненты строятся сразу, но в сеть не ходят: MetadataReader создаётся пустым,
         # метаданные подгрузятся лениво при первом run_once. MetadataReader получает engine —
         # он же ведёт реестр объектов onecdc_metadata_objects (состояние полной выгрузки).
+        # Маппер имён создаётся ПЕРВЫМ и дальше передаётся как есть: он ведёт реестр заявок
+        # onecdc_name_claims, и второй экземпляр рядом только зря читал бы ту же таблицу
+        # (см. name_mapper — почему имя закрепляется в БД, а не вычисляется).
+        self.name_mapper = NameMapper(self.engine, self.db_schema)
         self.metadata = MetadataReader(self._odata_url, odata_auth=self._odata_auth,
                                        request_timeout=self._request_timeout,
                                        engine=self.engine, schema=self.db_schema,
-                                       temp_schema=self.db_temp_schema)
-        self.name_mapper = NameMapper()
+                                       temp_schema=self.db_temp_schema,
+                                       name_mapper=self.name_mapper)
 
         # Фоновая полная выгрузка: пул потоков.
         self._full_load_workers = _check_full_load_workers(full_load_workers)

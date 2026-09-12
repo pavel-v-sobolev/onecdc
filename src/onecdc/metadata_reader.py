@@ -9,7 +9,7 @@ from sqlalchemy import (String, Uuid, BigInteger, Integer, SmallInteger, Numeric
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge
 
-from onecdc.name_mapper import NameMapper
+from onecdc.name_mapper import SCOPE_FIELD, SCOPE_OBJECT, NameMapper
 from onecdc.common_functions import format_bytes, parse_object_full_name, raise_for_status
 from onecdc.logging_config import get_logger, load_mode, LOAD_MODE_METADATA
 
@@ -215,7 +215,7 @@ class MetadataReader(UserDict):
     def __init__(self, odata_url:str, odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None,
                  engine: Engine | None = None, schema: str | None = None,
-                 temp_schema: str | None = None):
+                 temp_schema: str | None = None, name_mapper: "NameMapper | None" = None):
         super().__init__()
         self.odata_url=odata_url
         self.odata_auth=odata_auth
@@ -226,6 +226,12 @@ class MetadataReader(UserDict):
         # get_metadata может вызываться лениво из фоновых потоков full_load (новый объект/поле)
         # параллельно с основным циклом — сериализуем перестроение словаря.
         self._lock = threading.Lock()
+
+        # Маппер имён — ОДИН на процесс, а не по месту вызова: он ведёт реестр заявок
+        # onecdc_name_claims (см. name_mapper), и отдельные экземпляры зря перечитывали бы его
+        # и грели каждый свой кэш. Репликатор передаёт сюда свой; без engine получается
+        # offline-маппер, который считает транслит и в реестр не ходит.
+        self.name_mapper = name_mapper if name_mapper is not None else NameMapper(engine, schema)
 
         # Реестр объектов и состояния полной выгрузки (onecdc_metadata_objects). Ведётся, только если
         # передан engine (в библиотечном/тестовом сценарии без БД метаданные читаются как раньше).
@@ -426,7 +432,7 @@ class MetadataReader(UserDict):
         """
         if name in self:
             return name
-        mapper = NameMapper()
+        mapper = self.name_mapper
         matches = [candidate for candidate in self if mapper.map_object_name(candidate) == name]
         if len(matches) == 1:
             return matches[0]
@@ -446,7 +452,7 @@ class MetadataReader(UserDict):
         fields = self.get(object_name) or {}
         if field in fields:
             return field
-        mapper = NameMapper()
+        mapper = self.name_mapper
         matches = [candidate for candidate in fields if mapper.map_field_name(candidate) == field]
         if len(matches) == 1:
             return matches[0]
@@ -470,7 +476,14 @@ class MetadataReader(UserDict):
         # object_full_name_en — транслитерированное имя (= имя таблицы в БД); fields/fields_en — JSON-списки
         # полей объекта: оригинальные имена 1С и их транслит (= имена колонок в БД). Для удобного
         # просмотра состава объекта. Все три синхронизируются с $metadata.
-        mapper = NameMapper()
+        mapper = self.name_mapper
+        # Закрепляем имена всей конфигурации одной пачкой — иначе первый запуск на крупной базе
+        # 1С тратит по транзакции на каждое из десятков тысяч имён (см. NameMapper.prefetch).
+        # Заявляются ВСЕ объекты $metadata, а не только те, что в плане обмена: так распределение
+        # имён не зависит от того, какой объект случился первым.
+        mapper.prefetch(SCOPE_OBJECT, object_names)
+        mapper.prefetch(SCOPE_FIELD, [field for object_full_name in object_names
+                                      for field in (self.get(object_full_name) or {})])
         # На json-колонке dbmerge сравнивает значения через IS DISTINCT FROM; у Postgres-типа json
         # нет оператора равенства — берём jsonb.
         json_type = JSONB() if self.engine.dialect.name == 'postgresql' else JSON()

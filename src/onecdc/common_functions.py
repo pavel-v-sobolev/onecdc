@@ -15,6 +15,21 @@ from onecdc.logging_config import get_logger
 ODATA_PREFIX = 'StandardODATA.'
 
 
+def truncate_to_bytes(name: str, max_bytes: int) -> str:
+    """
+    Усечение по БАЙТАМ с отбрасыванием оборванной многобайтовой последовательности.
+
+    Именно по байтам, а не по символам: Postgres считает длину идентификатора в байтах и лишнее
+    обрезает МОЛЧА, без ошибки. Кириллица (и всё, что не попало в таблицу транслита — украинские
+    і ї є, белорусская ў) занимает по два байта, поэтому 63 символа легко оказываются 113 байтами,
+    и два разных имени схлопываются в одну таблицу незаметно.
+    """
+    encoded = name.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return name
+    return encoded[:max_bytes].decode('utf-8', errors='ignore')
+
+
 def instance_owner(name: str) -> str:
     """
     Имя владельца, уникальное на ЭКЗЕМПЛЯР процесса: <name>:<хост>:<pid>:<случайный суффикс>.

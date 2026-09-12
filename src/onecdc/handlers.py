@@ -104,7 +104,6 @@ from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, E
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
 from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
-from onecdc.name_mapper import NameMapper
 from onecdc.stop_signal import StopSignal, install_signal_handlers
 # Реестр незавершённых merge переехал в свой модуль (им пользуется и репликатор). Имена
 # реэкспортируются: HandlerLoop прижимает к нему границу окна, а внешний код и тесты импортируют
@@ -392,13 +391,15 @@ def as_handler(obj) -> _ResolvedHandler:
         raise AttributeError(f"Handler {_handler_name(obj)} has empty ON: it would never be called")
     # Подписка идёт по именам ТАБЛИЦ (транслит), а не по именам объектов 1С. Имя 1С в ON выглядит
     # правдоподобно, но не совпадёт ни с чем и обработчик просто никогда не вызовут — молча.
-    # Ловим по не-ASCII символам и сразу подсказываем, как это имя выглядит в БД.
+    # Ловим по не-ASCII символам и отправляем за точным именем в реестр: назвать его здесь нельзя,
+    # имя таблицы закреплено в БД и при коллизии транслита отличается от него (см. name_mapper),
+    # а базы в этой точке — регистрация обработчика — ещё нет.
     for name in sorted(on):
         if not name.isascii():
             raise ValueError(
                 f"Handler {_handler_name(obj)}: ON must list TABLE names as they appear in the "
-                f"database, not 1C object names. Replace {name!r} with "
-                f"{NameMapper().map_object_name(name)!r}")
+                f"database, not 1C object names. Look up {name!r} in "
+                f"onecdc_metadata_objects.object_full_name_en")
 
     setup = getattr(obj, 'setup', None)
     rebuild = getattr(obj, 'rebuild', None)

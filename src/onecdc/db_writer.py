@@ -10,7 +10,7 @@ from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD,
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
 from onecdc.db_logs import create_index_if_absent
-from onecdc.name_mapper import NameMapper
+from onecdc.name_mapper import NameMapper, fit_identifier_length
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -264,7 +264,7 @@ class DBWriter:
             return
         tbl = Table(table_name, MetaData(), schema=self.schema, autoload_with=self.engine)
         if MERGED_ON_FIELD in tbl.c:
-            ix_name = NameMapper._fit_length(f'ix_{table_name}_merged_on')
+            ix_name = fit_identifier_length(f"ix_{table_name}_merged_on")
             create_index_if_absent(self.engine, Index(ix_name, tbl.c[MERGED_ON_FIELD]),
                                    table_name, self.schema)
         self._indexed_tables.add(table_name)

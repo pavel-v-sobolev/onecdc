@@ -143,7 +143,8 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 (`merged_on`, `inserted_on`, `is_deleted_or_empty`, `exchange_message_no`). Схемы, таблицы и новые
 колонки библиотека создаёт сама. Рядом появляются служебные таблицы, по которым видно состояние
 загрузки: журнал `onecdc_replicator_log`, реестр объектов `onecdc_metadata_objects`, состояние обработчиков
-`onecdc_handlers` и реестр незавершённых записей `onecdc_writes_in_process`.
+`onecdc_handlers`, реестр незавершённых записей `onecdc_writes_in_process` и закреплённые имена
+таблиц и колонок `onecdc_name_claims`.
 
 Подробно — [README_DB.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_DB.md): состав полей, что означает `is_deleted_or_empty`, зачем
 отдельная схема промежуточных таблиц и что лежит в каждой служебной таблице.

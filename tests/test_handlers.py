@@ -120,8 +120,10 @@ def test_as_handler_rejects_broken_declarations(db):
     with pytest.raises(AttributeError, match="handle"):
         as_handler(object())
 
-    # Имя объекта 1С вместо имени таблицы: подписка бы просто не сработала, и молча.
-    with pytest.raises(ValueError, match="AccumulationRegister_ZakazyKlientov"):
+    # Имя объекта 1С вместо имени таблицы: подписка бы просто не сработала, и молча. Точное имя
+    # таблицы ошибка не называет намеренно — оно закреплено в БД, а базы в этой точке нет
+    # (см. name_mapper): вместо этого отправляет в реестр.
+    with pytest.raises(ValueError, match="object_full_name_en"):
         as_handler(Spy(on=["AccumulationRegister_ЗаказыКлиентов"]))
 
 
