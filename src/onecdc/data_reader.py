@@ -216,9 +216,11 @@ class DataObject(UserDict):
         для вложенных табличных частей: опустевшая ТЧ приходит фиктивной записью и должна дать
         пустой список, а не группу с записью-пустышкой.
         """
-        col_map = name_mapper.get_column_mapping(list(self.data.keys())) if name_mapper else None
-        key = name_mapper.map_field_name(key_field) if name_mapper else key_field
-        del_key = (name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD)
+        object_name = self.metadata_obj.name if self.metadata_obj else ''
+        col_map = (name_mapper.get_column_mapping(list(self.data.keys()), object_name)
+                   if name_mapper else None)
+        key = name_mapper.map_field_name(key_field, object_name) if name_mapper else key_field
+        del_key = (name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD, object_name)
                    if name_mapper else IS_DELETED_OR_EMPTY_FIELD)
         grouped: dict[Any, list[dict]] = {}
         for row in self.to_records_mapped(col_map, json_safe=json_safe):
@@ -239,12 +241,16 @@ class DataObject(UserDict):
         name_mapper=None → имена полей/частей как в 1С; передан — транслитерируем (как в БД).
         json_safe=True → значения JSON-сериализуемы (UUID->str, datetime->ISO), готово к json.dumps.
         """
-        col_map = name_mapper.get_column_mapping(list(self.data.keys())) if name_mapper else None
-        key = name_mapper.map_field_name('Ref_Key') if name_mapper else 'Ref_Key'
+        object_name = self.metadata_obj.name if self.metadata_obj else ''
+        col_map = (name_mapper.get_column_mapping(list(self.data.keys()), object_name)
+                   if name_mapper else None)
+        key = name_mapper.map_field_name('Ref_Key', object_name) if name_mapper else 'Ref_Key'
         records = self.to_records_mapped(col_map, json_safe=json_safe)
 
         for part_name, part_obj in self.table_parts.items():
-            part_key = name_mapper.map_field_name(part_name) if name_mapper else part_name
+            # Ключ вложенной ТЧ — колонка в JSON владельца, поэтому область та же, что у него.
+            part_key = (name_mapper.map_field_name(part_name, object_name)
+                        if name_mapper else part_name)
             grouped = part_obj.group_by('Ref_Key', name_mapper, json_safe, skip_deleted=True)
             for rec in records:
                 rec[part_key] = grouped.get(rec.get(key), [])

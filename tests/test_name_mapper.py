@@ -15,8 +15,11 @@ import threading
 import pytest
 from sqlalchemy import select
 
-from onecdc.name_mapper import (CLAIMS_TABLE, POSTGRES_MAX_IDENTIFIER, SCOPE_FIELD, SCOPE_OBJECT,
-                                NameMapper, fit_identifier_length)
+from onecdc.name_mapper import (CLAIMS_TABLE, POSTGRES_MAX_IDENTIFIER, SCOPE_OBJECT,
+                                NameMapper, field_scope, fit_identifier_length)
+
+
+OBJ = 'Catalog_Тест'
 
 
 def _mapper(db) -> NameMapper:
@@ -39,7 +42,7 @@ def test_offline_mapper_reproduces_the_plain_translit():
     # Ровно то, что выдавали прошлые версии: при переходе на реестр заявок первый кандидат
     # совпадает с уже существующим именем таблицы, и переименований не происходит.
     m = NameMapper.offline()
-    assert m.map_field_name('Наименование') == 'Naimenovanie'
+    assert m.map_field_name('Наименование', OBJ) == 'Naimenovanie'
     assert m.map_object_name('Catalog_Номенклатура') == 'Catalog_Nomenklatura'
 
 
@@ -86,10 +89,20 @@ def test_colliding_object_names_get_different_tables(db, first, second):
     assert len(two.encode('utf-8')) <= POSTGRES_MAX_IDENTIFIER
 
 
-def test_colliding_field_names_get_different_columns(db):
+def test_colliding_field_names_of_one_object_get_different_columns(db):
     m = _mapper(db)
 
-    assert m.map_field_name('Объект') != m.map_field_name('Обьект')
+    assert m.map_field_name('Объект', OBJ) != m.map_field_name('Обьект', OBJ)
+
+
+def test_same_translit_in_different_objects_keeps_the_clean_name(db):
+    # Колонки разных таблиц не конфликтуют, и разводить их незачем. В типовых конфигурациях это
+    # `Period` у регистров против `Период` в реквизитах справочника: общая на схему область
+    # завела бы одному из них колонку с хэшем — на действующей установке рядом со старой.
+    m = _mapper(db)
+
+    assert m.map_field_name('Period', 'AccumulationRegister_X') == 'Period'
+    assert m.map_field_name('Период', 'Catalog_Y_ИсторияКПП') == 'Period'
 
 
 def test_a_1c_field_cannot_take_a_service_column(db):
@@ -98,10 +111,11 @@ def test_a_1c_field_cannot_take_a_service_column(db):
     m = _mapper(db)
 
     # 'м' здесь кириллическая: транслит даёт ровно 'merged_on'.
-    mapped = m.map_field_name('мerged_on')
+    mapped = m.map_field_name('мerged_on', OBJ)
 
     assert mapped != 'merged_on'
-    assert m.map_field_name('merged_on') == 'merged_on', 'своё служебное поле переименовывать нельзя'
+    assert m.map_field_name('merged_on', OBJ) == 'merged_on', \
+        'своё служебное поле переименовывать нельзя'
 
 
 # --- Закрепление: имя выдаётся один раз и навсегда ---
@@ -126,11 +140,11 @@ def test_a_freed_name_is_never_reused(db):
 def test_claims_are_recorded_for_both_namespaces(db):
     m = _mapper(db)
     m.map_object_name('Catalog_Номенклатура')
-    m.map_field_name('Наименование')
+    m.map_field_name('Наименование', 'Catalog_Номенклатура')
 
     claims = _claims(m)
     assert (SCOPE_OBJECT, 'Catalog_Номенклатура', 'Catalog_Nomenklatura') in claims
-    assert (SCOPE_FIELD, 'Наименование', 'Naimenovanie') in claims
+    assert (field_scope('Catalog_Номенклатура'), 'Наименование', 'Naimenovanie') in claims
     # Имя таблицы и имя колонки живут в разных пространствах и друг с другом не конфликтуют.
     assert CLAIMS_TABLE in str(m.table)
 
@@ -155,7 +169,7 @@ def test_concurrent_mappers_agree_on_one_object(db):
         t.join()
 
     assert len(set(results.values())) == 1, f'процессы разошлись в имени таблицы: {results}'
-    assert len(_claims(mappers[0])) == 1 + 4    # объект плюс четыре служебные колонки
+    assert len(_claims(mappers[0])) == 1
 
 
 def test_concurrent_mappers_split_two_colliding_objects(db):

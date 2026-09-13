@@ -9,7 +9,7 @@ from sqlalchemy import (String, Uuid, BigInteger, Integer, SmallInteger, Numeric
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge
 
-from onecdc.name_mapper import SCOPE_FIELD, SCOPE_OBJECT, NameMapper
+from onecdc.name_mapper import SCOPE_OBJECT, NameMapper, field_scope
 from onecdc.common_functions import format_bytes, parse_object_full_name, raise_for_status
 from onecdc.logging_config import get_logger, load_mode, LOAD_MODE_METADATA
 
@@ -453,7 +453,8 @@ class MetadataReader(UserDict):
         if field in fields:
             return field
         mapper = self.name_mapper
-        matches = [candidate for candidate in fields if mapper.map_field_name(candidate) == field]
+        matches = [candidate for candidate in fields
+                   if mapper.map_field_name(candidate, object_name) == field]
         if len(matches) == 1:
             return matches[0]
         if matches:
@@ -482,8 +483,9 @@ class MetadataReader(UserDict):
         # Заявляются ВСЕ объекты $metadata, а не только те, что в плане обмена: так распределение
         # имён не зависит от того, какой объект случился первым.
         mapper.prefetch(SCOPE_OBJECT, object_names)
-        mapper.prefetch(SCOPE_FIELD, [field for object_full_name in object_names
-                                      for field in (self.get(object_full_name) or {})])
+        for object_full_name in object_names:
+            # Область уникальности колонок — объект, поэтому и пачка на объект (см. field_scope).
+            mapper.prefetch(field_scope(object_full_name), self.get(object_full_name) or {})
         # На json-колонке dbmerge сравнивает значения через IS DISTINCT FROM; у Postgres-типа json
         # нет оператора равенства — берём jsonb.
         json_type = JSONB() if self.engine.dialect.name == 'postgresql' else JSON()
@@ -498,7 +500,7 @@ class MetadataReader(UserDict):
                 'object_name': object_name,
                 'object_type': object_type,
                 'fields': field_names,
-                'fields_en': [mapper.map_field_name(f) for f in field_names],
+                'fields_en': [mapper.map_field_name(f, object_full_name) for f in field_names],
                 # эти значения устанавливаются только при insert, из update они исключены
                 'full_load_is_required': False, 'last_full_load_dt': None,
                 'last_full_load_rows_modified': None, 'last_full_load_minutes': None,

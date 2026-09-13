@@ -63,15 +63,24 @@ _SUFFIX_LENGTH = HASH_LENGTH + 1
 # бросок по 16 битам, так что предел здесь только затем, чтобы в коде не было цикла без границы.
 MAX_CLAIM_ATTEMPTS = 100
 
-# Служебные имена колонок (добавляются при загрузке/сохранении). Заявляются в реестре за самих
-# себя, поэтому поле 1С, которое транслитерируется в служебное имя, обнаружит идентификатор
-# занятым и получит хэш общим порядком — без отдельной ветки.
+# Служебные имена колонок: их добавляют парсер и dbmerge. Поле 1С, транслит которого в них попал,
+# уводится хэшем в первом же кандидате (см. _candidates).
 RESERVED_FIELD_NAMES = ('merged_on', 'inserted_on', 'exchange_message_no', 'is_deleted_or_empty')
 
 CLAIMS_TABLE = "onecdc_name_claims"
-# Пространства имён: имя таблицы и имя колонки друг с другом не конфликтуют.
+# Пространство уникальности. Имена таблиц уникальны в СХЕМЕ — у них область одна на всех.
 SCOPE_OBJECT = 'object'
-SCOPE_FIELD = 'field'
+# Имена колонок уникальны в ТАБЛИЦЕ, поэтому у каждого объекта своя область. Не одна общая на
+# схему: у разных объектов 1С встречаются разные имена с одинаковым транслитом (в типовых
+# конфигурациях это `Period` у регистров и `Период` в реквизитах справочников), и общая область
+# разводила бы их хэшем без всякой надобности — а на действующей установке это завело бы новую
+# колонку рядом со старой, с теми же данными в старой.
+SCOPE_FIELD_PREFIX = 'field:'
+
+
+def field_scope(object_name: str) -> str:
+    """Область уникальности колонок одного объекта 1С."""
+    return SCOPE_FIELD_PREFIX + object_name
 
 
 def _short_hash(name: str) -> str:
@@ -107,7 +116,13 @@ def _candidates(source_name: str, mapped: str):
     Ширины хэша в 16 бит хватает именно потому, что она ни за что не отвечает: промах стоит
     одной лишней попытки, а не смешения данных.
     """
-    yield fit_identifier_length(mapped)
+    base = fit_identifier_length(mapped)
+    if base in RESERVED_FIELD_NAMES and source_name != base:
+        # Поле 1С, транслит которого совпал со служебной колонкой (её ведёт dbmerge или парсер).
+        # Разводим сразу, не занимая служебное имя заявкой: иначе в каждой области пришлось бы
+        # держать по четыре строки под имена, которые заняты и так, по определению.
+        base = _hashed(mapped, _short_hash(mapped))
+    yield base
     yield _hashed(mapped, _short_hash(source_name))
     for _ in range(MAX_CLAIM_ATTEMPTS):
         # Соль, а не счётчик: суффикс остаётся той же длины, и основа усекается одинаково.
@@ -127,8 +142,8 @@ def _mapped(scope: str, name: str) -> str:
 def _claims_table(metadata: MetaData, schema_name: str | None) -> Table:
     return Table(
         CLAIMS_TABLE, metadata,
-        # Пространство имён: SCOPE_OBJECT (таблицы) или SCOPE_FIELD (колонки).
-        Column("scope", String(16), primary_key=True),
+        # Пространство уникальности: SCOPE_OBJECT для таблиц, field:<объект 1С> для его колонок.
+        Column("scope", String(255), primary_key=True),
         # Имя в 1С. В паре со scope — ключ: у одного имени 1С ровно один идентификатор.
         Column("source_name", String(255), primary_key=True),
         Column("identifier", String(POSTGRES_MAX_IDENTIFIER), nullable=False),
@@ -181,13 +196,18 @@ class NameMapper:
         self.object_mappings[name] = result
         return result
 
-    def map_field_name(self, name: str) -> str:
-        result = self._resolve(SCOPE_FIELD, name, _mapped(SCOPE_FIELD, name))
+    def map_field_name(self, name: str, object_name: str) -> str:
+        """
+        Имя колонки в таблице объекта. object_name — имя объекта 1С, оно же область уникальности:
+        колонки РАЗНЫХ таблиц друг с другом не конфликтуют, и разводить их незачем.
+        """
+        scope = field_scope(object_name)
+        result = self._resolve(scope, name, _mapped(scope, name))
         self.field_mappings[name] = result
         return result
 
-    def get_column_mapping(self, columns: list[str]) -> dict[str, str]:
-        return {col: self.map_field_name(col) for col in columns}
+    def get_column_mapping(self, columns: list[str], object_name: str) -> dict[str, str]:
+        return {col: self.map_field_name(col, object_name) for col in columns}
 
     def prefetch(self, scope: str, source_names) -> None:
         """
@@ -301,14 +321,6 @@ class NameMapper:
                 rows = conn.execute(select(t.c.scope, t.c.source_name, t.c.identifier)).all()
             self._claims.update({(row.scope, row.source_name): row.identifier for row in rows})
             self._loaded = True
-
-        # Служебные колонки закрепляем за собой, иначе их мог бы занять реквизит 1С с таким же
-        # транслитом — и та бы колонка, которой управляет dbmerge или парсер, оказалась чужой.
-        for name in RESERVED_FIELD_NAMES:
-            if (SCOPE_FIELD, name) not in self._claims:
-                claimed = self._claim(SCOPE_FIELD, name, name)
-                with self._lock:
-                    self._claims[(SCOPE_FIELD, name)] = claimed or name
 
     def _log_collision(self, scope: str, source_name: str, mapped: str, claimed: str) -> None:
         t = self.table

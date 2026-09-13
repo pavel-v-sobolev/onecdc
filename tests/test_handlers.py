@@ -77,6 +77,16 @@ def _last_run_at(runner, name):
     return _state(runner, name).last_run_at
 
 
+def _replicator_signal(rep, table_name, result, source=SOURCE_CHANGES):
+    """
+    Сигнал так, как его подаёт репликатор: выходом из блока реестра идущих merge, одной
+    транзакцией со снятием строки (см. WriteTracker._finish). Отдельного «просто просигналить»
+    у репликатора нет намеренно — именно связка строка+сигнал переживает обрыв.
+    """
+    with rep.writes.track(table_name, source) as tracked:
+        tracked.result = result
+
+
 def _state(runner, name):
     """Строка состояния обработчика из handlers."""
     with runner.engine.connect() as conn:
@@ -139,7 +149,7 @@ def test_handlers_are_signalled_by_table_name(db, monkeypatch):
     spy.calls.clear()
 
     assert rep._handler_key("Catalog_Номенклатура") == "Catalog_Nomenklatura"
-    rep._signal_handlers(rep._handler_key("Catalog_Номенклатура"), _result(updated=1),
+    _replicator_signal(rep, rep._handler_key("Catalog_Номенклатура"), _result(updated=1),
                          SOURCE_CHANGES)
     runner.run_if_pending()
     assert len(spy.calls) == 1
@@ -501,21 +511,24 @@ def test_replicator_signals_only_on_real_changes(db, monkeypatch):
     runner.run_if_pending()
     spy.calls.clear()
 
-    rep._signal_handlers("Catalog_X", _result(), SOURCE_CHANGES)
+    _replicator_signal(rep, "Catalog_X", _result(), SOURCE_CHANGES)
     runner.run_if_pending()
     assert spy.calls == [], 'нулевой прогон merge обработчику ничего не даёт'
 
-    rep._signal_handlers("Catalog_X", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep, "Catalog_X", _result(updated=1), SOURCE_CHANGES)
     runner.run_if_pending()
     assert len(spy.calls) == 1
 
-    # Новая колонка значений не меняет и merged_on не двигает — инкремент её не увидит никогда,
-    # поэтому подписчики объекта отправляются пересчитывать всё.
+    # Новая колонка пересборку витрины больше НЕ заказывает: витрину строит код обработчика, и
+    # про колонку, которой вчера не было, он ничего не знает. Обычный сигнал при этом проходит —
+    # строки-то изменились.
     spy.calls.clear()
-    rep._signal_handlers("Catalog_X", _result(inserted=1, added_fields={'Новый': 'String'}),
-                         SOURCE_CHANGES)
+    _replicator_signal(rep, "Catalog_X", _result(inserted=1, added_fields={'Новый': 'String'}),
+                       SOURCE_CHANGES)
     runner.run_if_pending()
-    assert spy.calls[0].last_run_at == EPOCH
+    assert len(spy.calls) == 1
+    assert spy.calls[0].last_run_at != EPOCH, 'полная пересборка заказана без просьбы человека'
+    assert not _state(runner, spy.name).full_rebuild_is_required
 
 
 # --- несколько планов обмена: общий HandlerLoop --------------------------------------------
@@ -532,8 +545,8 @@ def test_signals_from_several_replicators_reach_one_handler(db):
     runner.run_if_pending()          # стартовый прогон
     spy.calls.clear()
 
-    rep1._signal_handlers("Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
-    rep2._signal_handlers("Document_ZakazKlienta", _result(inserted=1), SOURCE_CHANGES)
+    _replicator_signal(rep1, "Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep2, "Document_ZakazKlienta", _result(inserted=1), SOURCE_CHANGES)
     assert _state(runner, spy.name).update_requested_at is not None
 
     runner.run_if_pending()
@@ -555,13 +568,13 @@ def test_boundary_covers_writes_of_another_process(db):
     runner.run_if_pending()
     spy.calls.clear()
 
-    rep2._signal_handlers("Document_ZakazKlienta", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep2, "Document_ZakazKlienta", _result(updated=1), SOURCE_CHANGES)
     with rep1.writes.track("Catalog_Nomenklatura") as merge:
         runner.run_if_pending()
     assert spy.calls[0].boundary == merge.started_at
 
     # Merge завершился — граница снова доходит до «сейчас».
-    rep2._signal_handlers("Document_ZakazKlienta", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep2, "Document_ZakazKlienta", _result(updated=1), SOURCE_CHANGES)
     runner.run_if_pending()
     assert spy.calls[1].boundary > merge.started_at
 
@@ -641,7 +654,7 @@ def test_replicator_signals_without_knowing_the_handler(db):
 
     rep = _replicator(db)
 
-    rep._signal_handlers("Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep, "Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
     runner.run_if_pending()
 
     assert len(spy.calls) == 1
@@ -655,7 +668,7 @@ def test_update_flag_survives_a_failed_run(db):
     runner = _runner_for(db, spy)
     rep = _replicator(db)
 
-    rep._signal_handlers("Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
+    _replicator_signal(rep, "Catalog_Nomenklatura", _result(updated=1), SOURCE_CHANGES)
     runner.run_if_pending()
 
     assert _state(runner, spy.name).update_requested_at is not None, 'упавший прогон метку не снимает'
@@ -678,21 +691,30 @@ def test_dead_replicator_does_not_freeze_the_boundary(db):
     assert tracker.boundary(["Catalog_Nomenklatura"]) > tracked.started_at
 
 
-def test_abandoned_rows_of_a_gone_replicator_are_removed(db):
-    # Брошенные строки при расчёте границы игнорируются, но удалить их некому: процесс может не
-    # вернуться никогда — репликатор переименовали или выключили. Иначе они копились бы вечно.
-    from onecdc.handlers import MERGE_ABANDONED_TTL, WriteTracker
+def test_abandoned_row_is_signalled_and_removed(db):
+    # Брошенная строка — единственный след того, что запись шла, а сигнал не дошёл. Раньше такие
+    # строки просто удалялись по таймауту, молча унося этот след. Теперь их разбирают: сигналят
+    # таблице и удаляют.
+    from onecdc.handlers import MERGE_HEARTBEAT_TTL, WriteTracker
 
-    gone = WriteTracker(db.engine, db.schema, 'renamed-away')
-    tracked = gone.track("Catalog_Nomenklatura")
+    delivered = []
+    tracker = WriteTracker(
+        db.engine, db.schema, 'План1',
+        deliver_signal=lambda conn, obj, source, result, forced: delivered.append(
+            (obj, source, forced)))
+    tracker.close()
+    tracker.track("Catalog_Nomenklatura", 'changes')     # merge начался и оборвался
     with db.engine.begin() as conn:
-        conn.execute(gone.table.update().values(
-            heartbeat_at=tracked.started_at - timedelta(seconds=MERGE_ABANDONED_TTL + 60)))
+        conn.execute(tracker.table.update().values(
+            heartbeat_at=func.now() - timedelta(seconds=MERGE_HEARTBEAT_TTL + 60)))
 
-    # Уборка идёт при старте любого другого трекера — своего процесса у брошенного уже нет.
-    WriteTracker(db.engine, db.schema, 'План1')
+    assert tracker.deliver_abandoned() == 1
+
+    assert delivered == [("Catalog_Nomenklatura", 'changes', True)], \
+        'сигнал должен уйти безусловно: что сделал прерванный merge, неизвестно'
     with db.engine.connect() as conn:
-        assert conn.execute(select(gone.table)).all() == []
+        assert conn.execute(select(tracker.table)).all() == []
+    assert tracker.deliver_abandoned() == 0, 'разобранная строка не должна сигналить повторно'
 
 
 def test_second_process_of_the_same_exchange_does_not_delete_live_writes(db):
@@ -1056,10 +1078,9 @@ def test_full_rebuild_from_a_full_load_page_skips_opted_out_handlers(db):
     """
     Заказ пересборки уважает on_full_load так же, как обычный сигнал.
 
-    Колонку dbmerge заводит по фактическим данным страницы, а поля со значением null 1С не
-    присылает вовсе — поэтому реквизит, пустой на первой странице и заполненный на второй,
-    добавляет колонку прямо посреди полной выгрузки. Для отправщика во внешнюю систему пересборка
-    — это повторная отправка всего с начала времён, ровно то, чего ON_FULL_LOAD=False и избегает.
+    Пересборку теперь заказывает только человек (автоматического повода больше нет), но заказать
+    её может и тот, кто разгребает бэкфилл. Для отправщика во внешнюю систему пересборка — это
+    повторная отправка всего с начала времён, ровно то, чего ON_FULL_LOAD=False и избегает.
     """
     quiet = Spy(name='quiet', on=["Catalog_X"], on_full_load=False)
     loud = Spy(name='loud', on=["Catalog_X"])
@@ -1078,16 +1099,15 @@ def test_full_rebuild_from_a_full_load_page_skips_opted_out_handlers(db):
     assert _state(runner, 'quiet').full_rebuild_is_required
 
 
-def test_replicator_passes_the_source_to_the_rebuild_request(db):
-    """Тот же гейт на боевом пути: источник доезжает от _signal_handlers до handlers."""
+def test_replicator_passes_the_source_to_the_signal(db):
+    """Тот же гейт на боевом пути: источник доезжает от репликатора до handlers."""
     quiet = Spy(name='quiet', on=["Catalog_X"], on_full_load=False)
     runner = _runner_for(db, quiet)
     rep = _replicator(db)
 
-    rep._signal_handlers("Catalog_X", _result(inserted=1, added_fields={'Новый': 'String'}),
-                         SOURCE_FULL_LOAD)
-    assert not _state(runner, 'quiet').full_rebuild_is_required
+    _replicator_signal(rep, "Catalog_X", _result(updated=1), SOURCE_FULL_LOAD)
+    assert _state(runner, 'quiet').update_requested_at is None, \
+        'бэкфилл не должен будить того, кто от бэкфилла отписался'
 
-    rep._signal_handlers("Catalog_X", _result(inserted=1, added_fields={'Новый': 'String'}),
-                         SOURCE_CHANGES)
-    assert _state(runner, 'quiet').full_rebuild_is_required
+    _replicator_signal(rep, "Catalog_X", _result(updated=1), SOURCE_CHANGES)
+    assert _state(runner, 'quiet').update_requested_at is not None

@@ -32,28 +32,42 @@ logger = get_logger(__name__)
 WRITES_TABLE = "onecdc_writes_in_process"
 MERGE_HEARTBEAT_PERIOD = 20.0
 MERGE_HEARTBEAT_TTL = 90.0
-# Через сколько строка брошенного процесса не просто игнорируется при расчёте границы, а удаляется.
-# Нужно потому, что процесс может не вернуться никогда: репликатор переименовали (сменился
-# exchange_name) или выключили совсем — его строки иначе остались бы в таблице навсегда. С запасом
-# больше MERGE_HEARTBEAT_TTL: удалять то, что ещё держит границу, нельзя ни при каких
-# обстоятельствах.
-MERGE_ABANDONED_TTL = 3600.0
+# Отдельного срока «пора удалять» больше нет: строку, чья отметка старше MERGE_HEARTBEAT_TTL,
+# разбирает deliver_abandoned — сигналит её таблице и удаляет. Раньше такие строки просто
+# копились до часа и удалялись молча, унося с собой единственный след недоставленного сигнала.
 
 
 class _TrackedWrite:
-    """Один merge в реестре: снимается по выходу из блока, т.е. после коммита. Ключ — имя объекта
-    строки в onecdc_writes_in_process."""
+    """
+    Один merge в реестре. Строка живёт от начала merge до ДОСТАВЛЕННОГО сигнала обработчику, а не
+    до коммита данных: пока она есть, обязанность сообщить об изменении не исполнена.
 
-    def __init__(self, tracker, key: str, started_at: datetime):
+    Штатный выход: строка удаляется ОДНОЙ транзакцией вместе с сигналом (см. WriteTracker._finish).
+    Выход с исключением: строка остаётся уликой — её merge мог закоммититься, а сигнал не уйти,
+    и повтор пакета этого уже не восстановит (merge второй раз ничего не изменит, сигнала не
+    будет, а пакет подтвердится). Продлевать её больше некому, поэтому она протухнет и достанется
+    разбору (WriteTracker.deliver_abandoned).
+
+    result — то, что вернул merge; по нему решают, нужен ли сигнал вообще. Проставляет вызывающий.
+    """
+
+    def __init__(self, tracker, key: str, started_at: datetime,
+                 object_name: str, source: str | None):
         self._tracker = tracker
         self._key = key
         self.started_at = started_at
+        self.object_name = object_name
+        self.source = source
+        self.result = None
 
     def __enter__(self) -> "_TrackedWrite":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._tracker._remove(self._key)
+        if exc_type is not None:
+            self._tracker._abandon(self._key)
+        else:
+            self._tracker._finish(self._key, self.object_name, self.source, self.result)
 
 
 def _writes_table(metadata: MetaData, schema_name: str | None) -> Table:
@@ -64,8 +78,12 @@ def _writes_table(metadata: MetaData, schema_name: str | None) -> Table:
         Column("object_name", String(255), nullable=False),
         # Момент старта merge по часам БД — то, к чему прижимается граница окна обработчика.
         Column("started_at", DateTime, nullable=False),
-        # Отметка живости: обновляется, пока процесс жив (см. MERGE_HEARTBEAT_TTL).
+        # Отметка живости: обновляется, пока merge действительно идёт (см. MERGE_HEARTBEAT_TTL).
         Column("heartbeat_at", DateTime, nullable=False),
+        # Источник изменения (changes / full_load). Нужен разбору брошенных строк: сигнал проходит
+        # через фильтр on_full_load, и без источника отложенный сигнал разбудил бы обработчика,
+        # который от бэкфилла отписался.
+        Column("signal_source", String(16), nullable=True),
         schema=schema_name,
     )
 
@@ -102,7 +120,8 @@ class WriteTracker:
     между merge поздно.
     """
 
-    def __init__(self, engine: Engine, schema: str | None, owner: str):
+    def __init__(self, engine: Engine, schema: str | None, owner: str,
+                 deliver_signal=None):
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema)
         # Уникализируем ВНУТРИ, а не доверяем вызывающему: владелец здесь — не «чей это обмен», а
@@ -112,13 +131,18 @@ class WriteTracker:
         self.table = _writes_table(MetaData(), self.schema_name)
         create_table_if_absent(engine, self.table)
         self._lock = threading.Lock()
-        # Сколько своих merge сейчас в реестре и поток, который обновляет им отметку живости.
-        # Поток поднимается с первым merge и гаснет, когда продлевать становится нечего: реестры
-        # живут долго, и оставлять при каждом по спящему потоку незачем.
-        self._active = 0
+        # Доставка сигнала обработчикам: вызывается с открытым соединением, чтобы удаление строки
+        # и сигнал легли в ОДНУ транзакцию. Сам реестр про обработчиков не знает ничего —
+        # подставляет функцию тот, кто его завёл (см. Replicator).
+        self._deliver_signal = deliver_signal
+        # Строки СВОИХ merge, которые сейчас реально идут, и поток, который продлевает им отметку
+        # живости. Именно множество идущих, а не «все строки этого владельца»: строку брошенного
+        # merge живой процесс иначе освежал бы вечно, она никогда бы не протухла, и граница окна
+        # замёрзла бы навсегда. Поток поднимается с первым merge и гаснет, когда продлевать
+        # становится нечего: реестры живут долго, и оставлять при каждом по спящему потоку незачем.
+        self._in_flight: set[str] = set()
         self._heartbeat_thread: threading.Thread | None = None
         self._closed = threading.Event()
-        self._cleanup()
 
     def close(self) -> None:
         """Останавливает поток отметки живости. Для процесса не обязательна (поток daemon), нужна
@@ -141,9 +165,9 @@ class WriteTracker:
         Продлевает свои строки, пока они есть, и гаснет, когда их не осталось.
 
         Решение «гаснуть» принимается под тем же локом, под которым track() поднимает поток, и
-        ПОСЛЕ инкремента _active. Поэтому промежутка, в котором merge уже стартовал, а поток уже
-        решил выйти, не существует: либо выходящий поток видит _active > 0 и остаётся, либо он
-        успел обнулить _heartbeat_thread, и track() заводит новый.
+        ПОСЛЕ добавления merge в _in_flight. Поэтому промежутка, в котором merge уже стартовал, а
+        поток уже решил выйти, не существует: либо выходящий поток видит непустое множество и
+        остаётся, либо он успел обнулить _heartbeat_thread, и track() заводит новый.
         """
         while not self._closed.is_set():
             try:
@@ -152,34 +176,51 @@ class WriteTracker:
                 logger.exception("Merge heartbeat failed")
             self._closed.wait(MERGE_HEARTBEAT_PERIOD)
             with self._lock:
-                if self._active == 0:
+                if not self._in_flight:
                     self._heartbeat_thread = None
                     return
 
-    def _cleanup(self) -> None:
+    def deliver_abandoned(self) -> int:
         """
-        Уборка при старте: брошенные строки старше MERGE_ABANDONED_TTL.
+        Разбирает брошенные строки: сигналит их таблицам и удаляет. Возвращает число разобранных.
 
-        При расчёте границы они игнорируются уже через MERGE_HEARTBEAT_TTL, но удалить их некому —
-        процесс может не вернуться никогда (репликатор переименовали или выключили). Без этой
-        уборки они копились бы в таблице вечно.
+        Брошенная строка — улика: в таблицу шла запись, которая не дошла до сигнала. Данные при
+        этом могли закоммититься, а повтор пакета сигнала уже не вернёт — второй merge ничего не
+        изменит, `rows_modified` будет ноль, и пакет молча подтвердится. Поэтому сигналим, не
+        глядя на то, что вернул merge.
 
-        Своих строк «от прошлого запуска» здесь больше нет и быть не может: владелец уникален на
-        экземпляр (см. __init__). Раньше уборка шла ещё и по owner == self.owner, и это было не
-        ускорением рестарта, а удалением ЖИВЫХ строк соседнего процесса того же обмена: его merge
-        переставал держать границу, обработчик брал её как «сейчас» и молча перешагивал строки,
-        которые сосед вот-вот закоммитит. Цена отказа — после рестарта граница подождёт свои
-        строки до MERGE_HEARTBEAT_TTL. Это задержка, а не потеря.
+        Откатился merge или закоммитился, по строке не видно, и знать это не нужно: сигнал
+        идемпотентен. Лишний сигнал — это один холостой проход обработчика, чей запрос по окну
+        вернёт ноль строк.
+
+        Каждая строка разбирается СВОЕЙ транзакцией вместе со своим сигналом: если сигнал не
+        пройдёт, строка останется и достанется следующему разбору.
+
+        Это и заменило прежнюю уборку по MERGE_ABANDONED_TTL — она удаляла улики молча. Строки
+        своего прошлого запуска здесь тоже разбираются: владелец уникален на экземпляр (см.
+        __init__), и для нового процесса они такие же чужие, как любые другие.
         """
         t = self.table
-        with self.engine.begin() as conn:
-            now = conn.scalar(select(func.now()))
-            result = conn.execute(t.delete().where(
-                t.c.heartbeat_at < now - timedelta(seconds=MERGE_ABANDONED_TTL)))
-        if result.rowcount:
-            logger.info("Removed %s abandoned rows from %s", result.rowcount, WRITES_TABLE)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(t.c.id, t.c.object_name, t.c.signal_source)
+                .where(t.c.heartbeat_at < DB_NOW_WITHOUT_TIMEZONE
+                       - timedelta(seconds=MERGE_HEARTBEAT_TTL))).all()
+        delivered = 0
+        for row in rows:
+            with self.engine.begin() as conn:
+                if not conn.execute(t.delete().where(t.c.id == row.id)).rowcount:
+                    continue        # разобрал кто-то другой
+                if self._deliver_signal is not None:
+                    self._deliver_signal(conn, row.object_name, row.signal_source, None, True)
+            delivered += 1
+        if delivered:
+            logger.warning("Recovered %s interrupted write(s) from %s: signalled %s",
+                           delivered, WRITES_TABLE,
+                           ', '.join(sorted({row.object_name for row in rows})))
+        return delivered
 
-    def track(self, object_name: str) -> "_TrackedWrite":
+    def track(self, object_name: str, source: str | None = None) -> "_TrackedWrite":
         """
         Регистрирует начало merge и держит его до выхода из блока (то есть до коммита).
 
@@ -192,22 +233,40 @@ class WriteTracker:
         # uuid4 и короче, и уникален сам по себе, без счётчика.
         row_id = uuid.uuid4().hex
         with self._lock:
-            self._active += 1
+            self._in_flight.add(row_id)
         self._ensure_heartbeat()
         with self.engine.begin() as conn:
             started_at = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
             conn.execute(insert(self.table).values(
                 id=row_id, owner=self.owner, object_name=object_name,
-                started_at=started_at, heartbeat_at=started_at))
-        return _TrackedWrite(self, row_id, started_at)
+                started_at=started_at, heartbeat_at=started_at, signal_source=source))
+        return _TrackedWrite(self, row_id, started_at, object_name, source)
 
-    def _remove(self, row_id: str) -> None:
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(self.table.delete().where(self.table.c.id == row_id))
-        finally:
-            with self._lock:
-                self._active -= 1
+    def _finish(self, row_id: str, object_name: str, source: str | None, result) -> None:
+        """
+        Штатное завершение: удаление строки и сигнал обработчикам — ОДНОЙ транзакцией.
+
+        Именно одной. Порознь между ними помещается сбой, и получается ровно то, от чего строка
+        и заведена: данные закоммичены, сигнала нет, а повтор пакета его не восстановит. А если
+        сигнал поставить, не убрав строку, то обработчик, проснувшийся в этот промежуток, прижмёт
+        границу окна к НАШЕМУ merge, свежих строк не увидит и израсходует отметку впустую.
+        """
+        with self._lock:
+            self._in_flight.discard(row_id)
+        with self.engine.begin() as conn:
+            conn.execute(self.table.delete().where(self.table.c.id == row_id))
+            if self._deliver_signal is not None:
+                self._deliver_signal(conn, object_name, source, result, False)
+
+    def _abandon(self, row_id: str) -> None:
+        """
+        Выход с исключением: строку ОСТАВЛЯЕМ, из множества идущих убираем.
+
+        Дальше она не продлевается — её merge больше не идёт, — поэтому протухнет сама и станет
+        уликой для разбора. Никаких дополнительных пометок для этого не нужно.
+        """
+        with self._lock:
+            self._in_flight.discard(row_id)
 
     def boundary(self, object_names: Iterable[str]) -> datetime:
         """
@@ -231,9 +290,19 @@ class WriteTracker:
         return min(now, earliest) if earliest is not None else now
 
     def heartbeat(self) -> None:
-        """Продлевает жизнь своим строкам. Вызывается своим же потоком (см. _heartbeat_loop), пока в
-        реестре есть незавершённые merge этого процесса."""
+        """
+        Продлевает строки merge, которые СЕЙЧАС идут. Вызывается своим же потоком
+        (см. _heartbeat_loop).
+
+        По списку идущих, а не по владельцу: строка брошенного merge принадлежит тому же
+        владельцу, и продление по владельцу освежало бы её, пока процесс жив, — она не протухла
+        бы никогда, а граница окна обработчика замёрзла бы вместе с ней.
+        """
+        with self._lock:
+            in_flight = list(self._in_flight)
+        if not in_flight:
+            return
         with self.engine.begin() as conn:
             conn.execute(update(self.table)
-                         .where(self.table.c.owner == self.owner)
+                         .where(self.table.c.id.in_(in_flight))
                          .values(heartbeat_at=func.now()))

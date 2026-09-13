@@ -108,7 +108,7 @@ from onecdc.stop_signal import StopSignal, install_signal_handlers
 # Реестр незавершённых merge переехал в свой модуль (им пользуется и репликатор). Имена
 # реэкспортируются: HandlerLoop прижимает к нему границу окна, а внешний код и тесты импортируют
 # WriteTracker отсюда с первых версий.
-from onecdc.write_tracker import (MERGE_ABANDONED_TTL, MERGE_HEARTBEAT_PERIOD, MERGE_HEARTBEAT_TTL, WRITES_TABLE,
+from onecdc.write_tracker import (MERGE_HEARTBEAT_PERIOD, MERGE_HEARTBEAT_TTL, WRITES_TABLE,
                                   WriteTracker, _writes_table)
 
 logger = get_logger(__name__)
@@ -569,7 +569,7 @@ class HandlerSignals:
                 subscriptions.setdefault(table, []).append((name, bool(on_full_load)))
         return subscriptions
 
-    def signal(self, table_name: str, source: str) -> None:
+    def signal(self, table_name: str, source: str, conn=None) -> None:
         """
         Ставит подписчикам таблицы метку сигнала. Подписчиков нет — ничего не делаем.
 
@@ -577,14 +577,23 @@ class HandlerSignals:
         снимает её, только если она не правее границы его окна, а значит хранить надо последний
         сигнал. С самым ранним сигнал, пришедший в середине прогона, не сдвинул бы значение — и
         был бы снят вместе с обработанными.
+
+        conn — открытое соединение вызывающего: репликатор ставит сигнал ОДНОЙ транзакцией со
+        снятием строки реестра идущих merge (см. WriteTracker._finish). Порознь между ними
+        помещается сбой, после которого данные закоммичены, а сигнала нет, — и повтор пакета его
+        уже не восстановит.
         """
         names = self.subscribers(table_name, source)
         if not names:
             return
-        with self.engine.begin() as conn:
-            conn.execute(update(self.table)
-                         .where(self.table.c.name.in_(names))
-                         .values(update_requested_at=DB_NOW_WITHOUT_TIMEZONE))
+        statement = (update(self.table)
+                     .where(self.table.c.name.in_(names))
+                     .values(update_requested_at=DB_NOW_WITHOUT_TIMEZONE))
+        if conn is not None:
+            conn.execute(statement)
+        else:
+            with self.engine.begin() as own:
+                own.execute(statement)
         logger.info("Changed %s (%s) → update requested for %s",
                     table_name, source, ', '.join(sorted(names)))
 

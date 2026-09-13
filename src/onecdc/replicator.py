@@ -545,12 +545,15 @@ class Replicator:
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
         self.onecdc_replicator_log = ReplicatorLog(self.engine, self.db_schema)
 
-        # Реестр идущих merge — в БД, а не в памяти: обработчик может считать витрину в другом
-        # процессе, и границу своего окна он обязан прижимать к НАШИМ незавершённым merge.
-        self.writes = WriteTracker(self.engine, self.db_schema, self._exchange_name)
         # Сигналы обработчикам идут через handlers, а не через объекты: репликатору не нужны
         # ни их код, ни общий с ними процесс (см. HandlerSignals).
         self.handler_signals = HandlerSignals(self.engine, self.db_schema)
+        # Реестр идущих merge — в БД, а не в памяти: обработчик может считать витрину в другом
+        # процессе, и границу своего окна он обязан прижимать к НАШИМ незавершённым merge.
+        # Он же отвечает за доставку сигнала: строка снимается одной транзакцией с сигналом,
+        # а брошенная строка — единственный след того, что сигнал не дошёл (см. _deliver_signal).
+        self.writes = WriteTracker(self.engine, self.db_schema, self._exchange_name,
+                                   deliver_signal=self._deliver_signal)
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи,
         # когда он крутится не в главном потоке и своего перехвата сигналов не имеет.
         self._stop_signal: "StopSignal | None" = None
@@ -577,6 +580,10 @@ class Replicator:
         # при появлении нового объекта/поля (get_metadata держит is_loaded=True).
         if not self.metadata.is_loaded:
             self.metadata.get_metadata()
+        # Оборванные записи прошлых попыток: их данные могли закоммититься, а сигнал не уйти.
+        # Разбираем ДО чтения нового пакета — повтор пакета сигнала не вернёт (второй merge
+        # ничего не изменит), а здесь след ещё есть.
+        self.writes.deliver_abandoned()
         # Время пакета считаем от чтения из 1С и до конца всех merge — это то, что реально
         # занимает цикл. Загрузка метаданных сюда не входит: она разовая и к пакету не относится.
         started = time.monotonic()
@@ -636,11 +643,13 @@ class Replicator:
             log_id = self.onecdc_replicator_log.start(
                 self.changes.exchange_name, object_name, self.changes.message_no, LOAD_TYPE_CHANGES)
             table_name = self._handler_key(object_name)
-            with self.writes.track(table_name):
-                result = self.writer.save(object_name, data_object)
-            # Одно сохранение на строку лога: счётчики и завершение — одним запросом.
-            self.onecdc_replicator_log.write_result(log_id, result, finish=True)
-            self._signal_handlers(table_name, result, SOURCE_CHANGES)
+            # Сигнал снимает строку реестра — он внутри блока, а не после него: пока строка есть,
+            # обязанность сообщить об изменении не исполнена, и оборванная запись видна.
+            with self.writes.track(table_name, SOURCE_CHANGES) as tracked:
+                tracked.result = self.writer.save(object_name, data_object)
+                # Одно сохранение на строку лога: счётчики и завершение — одним запросом.
+                self.onecdc_replicator_log.write_result(log_id, tracked.result, finish=True)
+                self._warn_about_new_columns(table_name, tracked.result)
 
     def _handler_key(self, object_name: str) -> str:
         """
@@ -650,29 +659,53 @@ class Replicator:
         """
         return self.name_mapper.map_object_name(object_name)
 
-    def _signal_handlers(self, table_name: str, result, source: str) -> None:
+    def _deliver_signal(self, conn, table_name: str, source: str | None, result,
+                        forced: bool) -> None:
         """
-        Сообщает обработчикам, что таблица изменилась — но только если merge реально что-то сделал.
-        1С регистрирует изменение объекта на любую перезапись, и в пакет приезжает масса записей,
-        идентичных тому, что уже лежит в БД (шумные поля при сравнении не учитываются, см.
-        DBWriter._noisy_fields). Обработчик всё равно выбирает данные сам, и на пустом прогоне
-        его SELECT вернул бы пусто — вызывать незачем.
+        Сообщает обработчикам, что таблица изменилась. Вызывает реестр идущих merge — в той же
+        транзакции, в которой снимает строку записи (см. WriteTracker._finish): иначе между
+        коммитом данных и сигналом помещается сбой, а повтор пакета сигнала не восстановит —
+        второй merge ничего не изменит, и пакет молча подтвердится.
 
-        Сообщаем через БД: ставим метку update_requested_at в handlers тем, у кого эта таблица есть
-        в update_on. Ни объектов обработчиков, ни их кода репликатору для этого не нужно, поэтому
-        они могут работать в другом процессе или контейнере.
+        Обычно сигналим, только если merge реально что-то сделал: 1С регистрирует изменение
+        объекта на любую перезапись, и в пакет приезжает масса записей, идентичных тому, что уже
+        лежит в БД (шумные поля при сравнении не учитываются, см. DBWriter._noisy_fields).
+        Обработчик всё равно выбирает данные сам, и на пустом прогоне его SELECT вернул бы пусто.
 
-        Появление новой колонки — отдельный случай: значения строк оно не меняет, merged_on не
-        двигает, и окно обработчика её не увидит никогда. Поэтому на added_fields подписчики
-        таблицы отправляются пересобирать витрину целиком.
+        forced=True — разбор брошенной строки: там неизвестно, что сделал прерванный merge и
+        сделал ли что-нибудь, поэтому сигналим безусловно. Лишний сигнал безвреден, он
+        идемпотентен.
+
+        Сообщаем через БД: ставим метку update_requested_at в handlers тем, у кого эта таблица
+        есть в update_on. Ни объектов обработчиков, ни их кода репликатору для этого не нужно,
+        поэтому они могут работать в другом процессе или контейнере.
         """
-        if result is None:
+        if not forced and (result is None or _rows_modified(result) <= 0):
             return
-        if result.added_fields:
-            self.handler_signals.request_full_rebuild(
-                table_name, f"{table_name} gained columns {sorted(result.added_fields)}", source)
-        if _rows_modified(result) > 0:
-            self.handler_signals.signal(table_name, source)
+        self.handler_signals.signal(table_name, source or SOURCE_CHANGES, conn=conn)
+
+    @staticmethod
+    def _warn_about_new_columns(table_name: str, result) -> None:
+        """
+        Новая колонка в таблице объекта — событие, о котором стоит знать, но не повод что-то
+        делать автоматически.
+
+        Раньше на него подписчикам заказывалась полная пересборка витрины. Смысла в этом нет.
+        Во-первых, витрину строит код обработчика, а он про колонку, которой вчера не было, ничего
+        не знает — её добавит человек, он же и закажет пересборку. Во-вторых, пересборка эту
+        колонку всё равно не наполнила бы: у строк, приехавших до её появления, в источнике лежит
+        NULL, и пересборка прочитала бы тот же NULL. Дочитать значения может только полная
+        выгрузка объекта — и решать, нужна ли она, тоже человеку: новый реквизит может быть в КХД
+        вовсе не нужен.
+
+        Исторически повод был другим: состав колонок «плавал» от пачки к пачке, потому что парсер
+        терял пустые реквизиты (поле, пустое у всех записей пачки, не создавало колонки вовсе).
+        Теперь пустой реквизит разбирается как NULL, и колонка заводится сразу — плавать нечему.
+        """
+        if result is not None and result.added_fields:
+            logger.warning("Table %s gained columns %s. Handlers that need them must be updated, "
+                           "and a full load of the object may be required to fill them for rows "
+                           "loaded earlier", table_name, sorted(result.added_fields))
 
     def list_objects(self) -> list[str]:
         """
@@ -860,7 +893,7 @@ class Replicator:
                 rows_modified += self._mark_missing_rows(
                     object_name, keys, started_at, reader,
                     recheck=date_filter is not None or windowed, log_id=log_id,
-                    date_column=(self.name_mapper.map_field_name(date_field)
+                    date_column=(self.name_mapper.map_field_name(date_field, object_name)
                                  if date_field else None),
                     date_from=date_from, date_to=date_to)
         self.onecdc_replicator_log.write_result(log_id, finish=True)
@@ -953,17 +986,19 @@ class Replicator:
             for obj_name, data_object in reader.items():
                 # Много страниц/объектов пишутся в одну строку лога — счётчики суммируются в БД.
                 table_name = self._handler_key(obj_name)
-                with self.writes.track(table_name):
-                    result = self.writer.save(obj_name, data_object,
-                                              full_load_started_at=page_started_at)
-                self.onecdc_replicator_log.write_result(log_id, result)
-                rows_modified += _rows_modified(result)
-                # Сигнал на каждую страницу, а не один в конце прогона: это метка времени в
-                # одной колонке (onecdc_handlers.update_requested_at), а не очередь событий, — тысяча
+                # Сигнал на каждую страницу, а не один в конце прогона: это метка времени в одной
+                # колонке (onecdc_handlers.update_requested_at), а не очередь событий, — тысяча
                 # страниц тысячу раз перепишет ту же метку, а не выстроит тысячу вызовов. Зато
                 # витрина начинает наполняться после первой же страницы, а не через часы, когда
-                # выгрузка закончится.
-                self._signal_handlers(table_name, result, SOURCE_FULL_LOAD)
+                # выгрузка закончится. Ставит его выход из блока, одной транзакцией со снятием
+                # строки реестра.
+                with self.writes.track(table_name, SOURCE_FULL_LOAD) as tracked:
+                    result = self.writer.save(obj_name, data_object,
+                                              full_load_started_at=page_started_at)
+                    tracked.result = result
+                    self.onecdc_replicator_log.write_result(log_id, result)
+                    self._warn_about_new_columns(table_name, result)
+                rows_modified += _rows_modified(result)
             total += page
             pages += 1
             if by_period:
@@ -1175,7 +1210,7 @@ class Replicator:
         и обращение по ключу роняло бы прогон.
         """
         metadata_obj = self.metadata.get(object_name)
-        return {self.name_mapper.map_field_name(field): type_mapping[type_name]
+        return {self.name_mapper.map_field_name(field, object_name): type_mapping[type_name]
                 for field, type_name in metadata_obj.primary_key.items()}
 
     def _full_load_keys(self, object_name: str) -> FullLoadKeys:
@@ -1192,7 +1227,8 @@ class Replicator:
             return []
         data = data_object.data
         fields = self.metadata.get(object_name).primary_key
-        columns = [(field, self.name_mapper.map_field_name(field)) for field in fields]
+        columns = [(field, self.name_mapper.map_field_name(field, object_name))
+                   for field in fields]
         return [{column: data[field][i] for field, column in columns}
                 for i in range(data_object.data_length)]
 
@@ -1217,7 +1253,7 @@ class Replicator:
             logger.info("Full load of %s: nothing to mark, table %s does not exist yet",
                         object_name, table_name)
             return 0
-        mark_field = self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD)
+        mark_field = self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD, object_name)
         scope = self._marking_scope(target, date_column, date_from, date_to)
         if recheck:
             candidates = keys.missing_rows(target, started_at, mark_field, scope=scope)
@@ -1226,18 +1262,19 @@ class Replicator:
                 logger.info("Full load of %s: %s of %s candidates are still in 1C (moved out of "
                             "the period, not deleted)", object_name, len(alive), len(candidates))
                 keys.add(alive)
-        with self.writes.track(table_name):
+        with self.writes.track(table_name, SOURCE_FULL_LOAD) as tracked:
             reset_values = self._resource_reset_values(object_name, target)
             marked = keys.mark_missing(target, started_at, mark_field,
                                        reset_values=reset_values, scope=scope)
-        if marked:
-            logger.info("Full load of %s: %s rows are gone from 1C and were marked deleted",
-                        object_name, marked)
-            # В журнал пометка идёт как deleted_row_count — тем же счётчиком, которым dbmerge
-            # считает строки, помеченные удалёнными.
-            if log_id is not None:
-                self.onecdc_replicator_log.write_result(log_id, _marked_result(marked))
-            self.handler_signals.signal(table_name, SOURCE_FULL_LOAD)
+            if marked:
+                logger.info("Full load of %s: %s rows are gone from 1C and were marked deleted",
+                            object_name, marked)
+                # В журнал пометка идёт как deleted_row_count — тем же счётчиком, которым dbmerge
+                # считает строки, помеченные удалёнными. Он же решает, нужен ли сигнал: пометка —
+                # такое же изменение строк, как merge.
+                tracked.result = _marked_result(marked)
+                if log_id is not None:
+                    self.onecdc_replicator_log.write_result(log_id, tracked.result)
         return marked
 
     def _resource_reset_values(self, object_name: str, target) -> dict:
@@ -1248,7 +1285,7 @@ class Replicator:
         column_types = metadata_obj.get_column_types()
         values = {}
         for resource in metadata_obj.resources:
-            column = self.name_mapper.map_field_name(resource)
+            column = self.name_mapper.map_field_name(resource, object_name)
             if column in target.c and isinstance(column_types.get(resource), (Integer, Numeric)):
                 values[column] = None
         return values
@@ -1294,7 +1331,7 @@ class Replicator:
         шаг заметен, и заплатить за него приходится: дешёвого способа спросить 1С о наборе по
         ключу у платформы нет.
         """
-        recorder_fields = [(field, self.name_mapper.map_field_name(field))
+        recorder_fields = [(field, self.name_mapper.map_field_name(field, object_name))
                            for field in metadata_obj.object_key]
         alive = []
         seen = set()
@@ -1325,7 +1362,7 @@ class Replicator:
         metadata_obj = self.metadata.get(object_name)
         if self._is_record_set_object(object_name):
             return self._still_in_1c_by_recorder(object_name, candidates, reader, metadata_obj)
-        fields = [(field, self.name_mapper.map_field_name(field), type_name)
+        fields = [(field, self.name_mapper.map_field_name(field, object_name), type_name)
                   for field, type_name in metadata_obj.primary_key.items()]
         terms = []
         for row in candidates:

@@ -109,11 +109,11 @@ class DBWriter:
 
         table_name = self.name_mapper.map_object_name(object_name)
 
-        col_map = self.name_mapper.get_column_mapping(list(data_object.data.keys()))
+        col_map = self.name_mapper.get_column_mapping(list(data_object.data.keys()), object_name)
         records = data_object.to_records_mapped(col_map)
 
-        key = [self.name_mapper.map_field_name(k) for k in metadata_obj.primary_key]
-        data_types = {self.name_mapper.map_field_name(col): typ
+        key = [self.name_mapper.map_field_name(k, object_name) for k in metadata_obj.primary_key]
+        data_types = {self.name_mapper.map_field_name(col, object_name): typ
                       for col, typ in metadata_obj.get_column_types().items()}
         # JSON-колонку (субконто регистра бухгалтерии) на postgres поднимаем до JSONB: dbmerge
         # сравнивает старое значение с новым через IS DISTINCT FROM, а у типа json такого
@@ -124,7 +124,7 @@ class DBWriter:
 
         object_key = metadata_obj.object_key
         started_at = full_load_started_at
-        skip_compare = self._noisy_fields(records)
+        skip_compare = self._noisy_fields(records, object_name)
 
         if not object_key:
             # Документ/справочник (одна запись по ключу): чистый upsert без удаления.
@@ -142,14 +142,17 @@ class DBWriter:
             # Выпавшие из набора строки помечаем, а не удаляем: исчезновение строки — такое же
             # событие, как изменение, и без следа его не увидит ни обработчик (нечему поднять
             # merged_on), ни guard полной выгрузки. Помечаем только те группы, что пришли в наборе.
-            mapped_object_key = [self.name_mapper.map_field_name(k) for k in object_key]
+            mapped_object_key = [self.name_mapper.map_field_name(k, object_name)
+                                 for k in object_key]
             with dbmerge(engine=self.engine, table_name=table_name, data=records,
                          key=key, data_types=data_types,
                          merged_on_field=MERGED_ON_FIELD, inserted_on_field=INSERTED_ON_FIELD,
                          skip_compare_fields=skip_compare,
                          delete_mode='mark',
-                         delete_mark_field=self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD),
-                         delete_mark_values=self._resource_reset_values(metadata_obj, records),
+                         delete_mark_field=self.name_mapper.map_field_name(
+                             IS_DELETED_OR_EMPTY_FIELD, object_name),
+                         delete_mark_values=self._resource_reset_values(metadata_obj, records,
+                                                                       object_name),
                          schema=self.schema, temp_schema=self.temp_schema) as merge:
                 scoped = self._scoped_delete_condition(merge.table, merge.temp_table, mapped_object_key)
                 if started_at is not None:
@@ -165,7 +168,7 @@ class DBWriter:
         self._ensure_merged_on_index(table_name)
         return result
 
-    def _noisy_fields(self, records: list[dict]) -> list[str]:
+    def _noisy_fields(self, records: list[dict], object_name: str) -> list[str]:
         """
         Поля, отличие в которых само по себе не считается изменением строки (skip_compare_fields):
         exchange_message_no и версия данных меняются при каждой записи объекта в 1С, даже если ни
@@ -178,9 +181,11 @@ class DBWriter:
         """
         present = records[0].keys()
         candidates = (EXCHANGE_MESSAGE_NO_FIELD, *VERSION_FIELDS)
-        return [col for col in map(self.name_mapper.map_field_name, candidates) if col in present]
+        return [col for col in (self.name_mapper.map_field_name(c, object_name)
+                                for c in candidates) if col in present]
 
-    def _resource_reset_values(self, metadata_obj, records: list[dict]) -> dict:
+    def _resource_reset_values(self, metadata_obj, records: list[dict],
+                               object_name: str) -> dict:
         """
         Чем ещё пометить строку, выпавшую из набора (delete_mark_values): числовые ресурсы регистра
         гасим в NULL. SUM игнорирует NULL, поэтому итог остаётся верным даже в запросе, забывшем
@@ -195,7 +200,7 @@ class DBWriter:
         present = records[0].keys()
         values = {}
         for resource in metadata_obj.resources:
-            column = self.name_mapper.map_field_name(resource)
+            column = self.name_mapper.map_field_name(resource, object_name)
             if column in present and isinstance(column_types.get(resource), (Integer, Numeric)):
                 values[column] = None
         return values
