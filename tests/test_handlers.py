@@ -401,24 +401,33 @@ def test_failed_handler_keeps_window_and_records_error(db):
     assert len(spy.calls) == 2
 
 
-def test_disabled_handler_does_not_accumulate_window(db):
+def test_a_disabled_handler_catches_up_when_enabled(db):
+    # Выключенный не вызывается — но сигнал ему СТАВИТСЯ и копится. Раньше он не ставился вовсе
+    # (подписки читались с WHERE enabled), а окно за простой всё равно копилось: last_run_at не
+    # двигается. Получалось худшее из двух — и окно накопилось, и браться за него обработчик
+    # решал по случайному поводу, при первом изменении после включения.
     spy = Spy()
     runner, _ = _runner(db, spy)
     runner.run_if_pending()
     spy.calls.clear()
+    before = _last_run_at(runner, spy.name)
 
     with runner.engine.begin() as conn:
         conn.execute(runner.table.update().where(runner.table.c.name == spy.name)
                      .values(enabled=False))
     _signal(db, "Catalog_X", SOURCE_CHANGES)
     runner.run_if_pending()
-    assert spy.calls == []
+    assert spy.calls == [], 'выключенный обработчик не вызывается'
+    assert _state(runner, spy.name).update_requested_at is not None, \
+        'сигнал выключенному должен копиться, а не испаряться'
 
     with runner.engine.begin() as conn:
         conn.execute(runner.table.update().where(runner.table.c.name == spy.name)
                      .values(enabled=True))
     runner.run_if_pending()
-    assert spy.calls == [], 'включение само по себе прогон не назначает — ждём изменения'
+
+    assert len(spy.calls) == 1, 'включение должно догнать простой само, а не ждать изменения'
+    assert spy.calls[0].last_run_at == before, 'окно за простой никуда не делось'
 
 
 def test_full_rebuild_request_opens_the_window_and_is_cleared_after_success(db):
@@ -1110,4 +1119,45 @@ def test_replicator_passes_the_source_to_the_signal(db):
         'бэкфилл не должен будить того, кто от бэкфилла отписался'
 
     _replicator_signal(rep, "Catalog_X", _result(updated=1), SOURCE_CHANGES)
+    assert _state(runner, 'quiet').update_requested_at is not None
+
+
+def test_a_handler_looks_again_once_the_replicator_can_see_it(db, monkeypatch):
+    """
+    Слепое окно регистрации. Репликатор держит подписки в кэше до SUBSCRIPTIONS_TTL, поэтому
+    изменения, сохранённые сразу после старта обработчика, сигнала не получают: в кэше его ещё
+    нет. Раньше такие строки ждали следующего изменения этой таблицы — недели, без единой ошибки
+    в логе. Теперь обработчик смотрит своё окно ещё раз, когда кэш точно перечитан.
+    """
+    import onecdc.handlers as handlers_module
+
+    monkeypatch.setattr(handlers_module, 'SUBSCRIPTIONS_TTL', 0.0)
+    spy = Spy()
+    runner, _ = _runner(db, spy)
+    runner.run_if_pending()          # стартовый прогон
+    spy.calls.clear()
+    # Изменение, попавшее в слепое окно: сигнала по нему не было.
+    assert _state(runner, spy.name).update_requested_at is None
+
+    runner._catch_up_at = 0.0        # TTL истёк — подписки репликатора перечитаны
+    runner.run_if_pending()
+
+    assert len(spy.calls) == 1, 'догонялка не сработала — строки слепого окна ждут неизвестно чего'
+    # И только один раз: она разовая, в холостую каждый проход не бегает.
+    spy.calls.clear()
+    runner.run_if_pending()
+    assert spy.calls == []
+
+
+def test_the_replicator_signals_a_disabled_handler_too(db):
+    # Решение «не запускаться» принимает сам цикл, первым же делом. Отметка выключенному не
+    # вредна — она копится и будет прочитана при включении.
+    quiet = Spy(name='quiet', on=["Catalog_X"])
+    runner = _runner_for(db, quiet)
+    with runner.engine.begin() as conn:
+        conn.execute(runner.table.update().where(runner.table.c.name == 'quiet')
+                     .values(enabled=False))
+
+    _signal(db, "Catalog_X", SOURCE_CHANGES)
+
     assert _state(runner, 'quiet').update_requested_at is not None

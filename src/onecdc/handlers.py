@@ -557,13 +557,22 @@ class HandlerSignals:
         return [name for name, _ in subscribed]
 
     def _read_subscriptions(self) -> dict[str, list[tuple[str, bool]]]:
-        """update_on всех включённых обработчиков, развёрнутый в отображение
-        таблица → [(имя, вызывать ли на полной выгрузке)]."""
+        """
+        update_on ВСЕХ обработчиков, развёрнутый в отображение таблица → [(имя, вызывать ли на
+        полной выгрузке)].
+
+        Всех, а не только включённых. Отметка выключенному не вредна: она лишь копится, а решение
+        «не запускаться» принимает сам цикл, первым же делом. Раньше выключенный отсюда выпадал, и
+        сигнал ему не ставился вовсе — а окно за время простоя всё равно копилось, потому что
+        last_run_at не двигался. Получалось худшее из двух: и окно накопилось, и браться за него
+        обработчик решал по случайному поводу — при первом изменении после включения, которого
+        могло не быть неделями.
+        """
         t = self.table
         subscriptions: dict[str, list[tuple[str, bool]]] = {}
         with self.engine.connect() as conn:
             rows = conn.execute(
-                select(t.c.name, t.c.update_on, t.c.on_full_load).where(t.c.enabled)).all()
+                select(t.c.name, t.c.update_on, t.c.on_full_load)).all()
         for name, update_on, on_full_load in rows:
             for table in update_on or ():
                 subscriptions.setdefault(table, []).append((name, bool(on_full_load)))
@@ -686,6 +695,17 @@ class HandlerLoop:
         self._prepared = False
         # Когда обработчику снова можно бежать (MIN_INTERVAL), по монотонным часам.
         self._next_allowed_at = 0.0
+        # Момент, когда репликатор ТОЧНО узнал о наших подписках, и повторная догонялка.
+        #
+        # Стартовый прогон (выше) закрывает только то, что было ДО него. А репликатор про нас ещё
+        # не знает: подписки он держит в кэше до SUBSCRIPTIONS_TTL и читает их одним запросом на
+        # все обработчики. Значит изменения, сохранённые сразу после нашего старта, сигнала не
+        # получат — и подождут следующего изменения этой таблицы, которого может не быть неделями.
+        # Ошибок при этом в логе нет, всё выглядит здоровым.
+        #
+        # Поэтому после истечения TTL смотрим окно ещё раз. Обычно оно пустое, и собственный
+        # SELECT обработчика вернёт ноль строк, — это одна холостая проверка на запуск процесса.
+        self._catch_up_at: float | None = time.monotonic() + SUBSCRIPTIONS_TTL + 1.0
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи.
         self._stop_signal: "StopSignal | None" = None
 
@@ -774,6 +794,12 @@ class HandlerLoop:
         Публичный, потому что цикл — не единственный способ его крутить: обработчика можно
         запускать и по расписанию снаружи (cron, вызов из своего кода), не поднимая run_forever.
         """
+        if self._catch_up_at is not None and time.monotonic() >= self._catch_up_at:
+            # Подписки репликатора к этому моменту точно перечитаны — если что-то прошло мимо
+            # сигнала, пока он о нас не знал, это последний шанс увидеть его без нового изменения.
+            self._catch_up_at = None
+            self._mark_dirty(set(self.handler.on), {SOURCE_STARTUP})
+
         enabled, last_run_at, full_rebuild, update_required, cursor = self._read_state()
         if not enabled:
             # Выключен в таблице — грязные отметки не копим, иначе после включения он получит
