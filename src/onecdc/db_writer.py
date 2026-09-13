@@ -73,7 +73,8 @@ class DBWriter:
         self._indexed_tables: set[str] = set()
 
     def save(self, object_name: str, data_object: DataObject,
-             full_load_started_at: datetime | None = None) -> mergeResult | None:
+             full_load_started_at: datetime | None = None,
+             always_touch: bool = False) -> mergeResult | None:
         """
         Сохраняет один объект через dbmerge.
 
@@ -94,6 +95,15 @@ class DBWriter:
 
         Строки старше отметки страницы снимок перезаписывает — это и делает полную выгрузку способом
         выровнять данные, а не только добить то, что ни разу не менялось.
+
+        always_touch=True (режим изменений, пока по объекту идёт полная выгрузка): отличие в
+        «шумных» полях снова считается изменением строки, то есть merged_on двигает КАЖДЫЙ пакет,
+        даже ничего не поменявший. Это единственный способ отличить «строку никто не переписывал»
+        от «строку никто не подтверждал», а guard'ы снимка нужен именно второй факт: очередь 1С
+        хранит ссылки на объекты, а не значения, поэтому изменение «туда и обратно» приезжает
+        одним пакетом с исходным значением — для БД это no-op, а для снимка, прочитавшего страницу
+        между этими двумя правками, след обязателен. Иначе снимок запишет устаревшее поверх
+        подтверждённого, и ни один сигнал об этом не придёт (см. Replicator._skip_compare_allowed).
 
         Возвращает mergeResult, либо None на ранних выходах (пустой набор / нет метаданных) —
         лог загрузки принимает None (write_result тогда просто не прибавляет счётчики).
@@ -124,7 +134,8 @@ class DBWriter:
 
         object_key = metadata_obj.object_key
         started_at = full_load_started_at
-        skip_compare = self._noisy_fields(records, object_name)
+        # Под снимком шум перестаёт быть шумом: см. always_touch.
+        skip_compare = [] if always_touch else self._noisy_fields(records, object_name)
 
         if not object_key:
             # Документ/справочник (одна запись по ключу): чистый upsert без удаления.

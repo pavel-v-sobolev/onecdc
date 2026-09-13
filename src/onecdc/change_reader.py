@@ -4,7 +4,7 @@ import xmltodict
 
 from onecdc.data_reader import DataReader
 from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, resolve_timeout
-from onecdc.common_functions import format_bytes, raise_for_status
+from onecdc.common_functions import format_bytes, parse_odata, raise_for_status
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -36,8 +36,9 @@ class ChangeReader(DataReader):
         raise_for_status(response, f'SelectChanges (message {self.message_no})')
         self.last_response_bytes = len(response.content)
 
-        change_data = xmltodict.parse(response.text,force_list=('d:element','entry'))
-        change_entries = (change_data.get('feed') or {}).get('entry') or []
+        feed = parse_odata(response.text, 'feed', f'SelectChanges (message {self.message_no})',
+                           force_list=('d:element', 'entry'))
+        change_entries = (feed or {}).get('entry') or []
 
         parsed = self.read_data_entries(change_entries)
         # Пакет приносит набор записей регистра бухгалтерии БЕЗ субконто (их нет в описании

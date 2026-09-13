@@ -6,8 +6,11 @@ import socket
 import uuid
 
 from datetime import date, datetime
+from typing import Any
+from xml.parsers.expat import ExpatError
 
 import requests
+import xmltodict
 from sqlalchemy import DateTime, func
 
 from onecdc.logging_config import get_logger
@@ -215,6 +218,76 @@ def odata_datetime_value(value: "date | datetime") -> str:
     return (f'{value.year:04d}-{value.month:02d}-{value.day:02d}'
             f'T{getattr(value, "hour", 0):02d}:{getattr(value, "minute", 0):02d}'
             f':{getattr(value, "second", 0):02d}')
+
+
+class ODataFormatError(ValueError):
+    """
+    Ответ пришёл с кодом 2xx, но это не ответ OData.
+
+    Отдельный тип, потому что обращаться с ним надо не как с «данных нет»: прогон полной выгрузки
+    обязан прерваться ДО пометки пропавших строк, иначе страница шлюза объявит удалённым весь
+    объект.
+    """
+
+
+# Корень ошибки OData: <error> или <m:error>, с любым префиксом пространства имён.
+_ODATA_ERROR_ROOT = re.compile(r'<\s*(?:[\w.-]+:)?error[\s/>]', re.I)
+# Приметы ответа «такого объекта нет» в теле. Нужны потому, что тело 1С отдаёт не всегда одинаково,
+# а по одному коду 404 её ответ от ответа веб-сервера не отличить. Тот же приём уже применён
+# к 404.15 от IIS (см. replicator._is_query_too_long).
+ENTITY_ABSENT_MARKERS = ('экземпляр сущности не найден', 'entity instance not found')
+
+
+def is_entity_absent(response: requests.Response) -> bool:
+    """
+    404 пришёл ОТ 1С и означает «экземпляра сущности нет», а не отказ инфраструктуры.
+
+    Проверять обязательно. Такой же 404 отдаёт IIS со снятой публикацией, ingress без нужного
+    правила во время обновления, чужой vhost. А вызывают эту проверку там, где «нет» трактуется
+    как ответ: в перепроверке кандидатов на пометку удалёнными. Принять отказ веб-сервера за
+    ответ 1С — значит объявить живые строки удалёнными и погасить их ресурсы; полминуты такого
+    404 дают полминуты ложных удалений подряд.
+
+    Признаётся ответ 1С двумя приметами: корень тела — ошибка OData (<error>/<m:error>, либо
+    JSON-исключение сервера приложений с odata.error), либо в теле есть сама формулировка
+    «экземпляр сущности не найден». Страница веб-сервера не содержит ни того, ни другого.
+    """
+    body = (getattr(response, 'text', '') or '').lstrip('\ufeff').strip()
+    if not body:
+        return False
+    lowered = body.lower()
+    if any(marker in lowered for marker in ENTITY_ABSENT_MARKERS):
+        return True
+    if body.startswith('{'):
+        return 'odata.error' in body
+    return bool(_ODATA_ERROR_ROOT.search(body[:512]))
+
+
+def parse_odata(body: str, root: str, context: str, force_list: tuple = ()) -> Any:
+    """
+    Разбирает ответ 1С и отдаёт содержимое ожидаемого корня (feed, entry, d:Result).
+
+    Отсутствие корня — ОШИБКА ФОРМАТА, а не «данных нет». Разница существенная: честное «нет
+    данных» от 1С выглядит как feed с нулём entry, а не как отсутствие feed. Раньше эти два случая
+    были неразличимы, и 200 со страницей шлюза («Service temporarily unavailable», корректный
+    XHTML — такой разбирается без ошибки) читался как пустой объект. Для полной выгрузки это
+    означало пометку всех строк удалёнными: прогон считал объект дочитанным и вычищал всё, чего
+    не увидел.
+
+    Корень проверяется на ПРИСУТСТВИЕ ключа, а не на непустоту: <feed/> — это пустой, но
+    совершенно законный ответ.
+    """
+    try:
+        parsed = xmltodict.parse(body, force_list=force_list)
+    except ExpatError as exc:
+        raise ODataFormatError(
+            f'{context}: response is not XML at all ({exc}); '
+            f'body starts with {body[:120]!r}') from exc
+    if not isinstance(parsed, dict) or root not in parsed:
+        raise ODataFormatError(
+            f'{context}: response has no <{root}> — this is not an OData answer, and it must not '
+            f'be read as "no data"; body starts with {body[:120]!r}')
+    return parsed[root]
 
 
 def raise_for_status(response: requests.Response, context: str = '') -> None:

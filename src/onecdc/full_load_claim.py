@@ -110,6 +110,34 @@ class FullLoadClaim:
             self._start_heartbeat()
         return True
 
+    def live_claims(self) -> set[str]:
+        """
+        Объекты, которые СЕЙЧАС кто-то выгружает целиком: захват стоит и его владелец подаёт
+        признаки жизни.
+
+        Нужно пишущему изменения: пока по объекту идёт снимок, пакет обязан оставлять след даже
+        когда значения не поменялись (см. Replicator._skip_compare_allowed). Иначе снимок,
+        прочитавший страницу до пакета, запишет устаревшее значение поверх подтверждённого —
+        guard проверяет merged_on, а его no-op пакет не двигает.
+
+        Живость обязательна: без неё упавшая посреди прогона выгрузка оставила бы объект в этом
+        режиме навсегда. Отсекается тем же CLAIM_HEARTBEAT_TTL, которым claim() перехватывает
+        брошенный захват, — одно правило на оба случая.
+
+        Один запрос на пакет к реестру объектов, а не на каждый объект пакета.
+        """
+        table = self.table
+        if table is None:
+            return set()
+        with self.engine.connect() as conn:
+            now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            rows = conn.execute(
+                select(table.c.object_full_name)
+                .where(table.c[OWNER_FIELD].is_not(None),
+                       table.c[HEARTBEAT_FIELD]
+                       >= now - timedelta(seconds=CLAIM_HEARTBEAT_TTL))).scalars().all()
+        return set(rows)
+
     def release(self, object_full_name: str) -> None:
         """Отпускает захват — только свой: чужой мог перехватить объект после нашего TTL."""
         with self._lock:

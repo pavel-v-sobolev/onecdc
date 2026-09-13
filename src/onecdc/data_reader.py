@@ -13,8 +13,8 @@ from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_VALUE_SU
                                     ENTITY_TYPES, EXT_DIMENSIONS_FIELDS, REGISTER_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, resolve_timeout)
 from onecdc.name_mapper import NameMapper
-from onecdc.common_functions import (format_bytes, odata_datetime_value,
-                                     parse_object_full_name, raise_for_status)
+from onecdc.common_functions import (format_bytes, is_entity_absent, odata_datetime_value,
+                                     parse_object_full_name, parse_odata, raise_for_status)
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -430,8 +430,9 @@ class DataReader(UserDict):
         raise_for_status(response, f'read {object_name}{query}')
         self.last_response_bytes = len(response.content)
 
-        object_data = xmltodict.parse(response.text, force_list=('d:element', 'entry'))
-        object_entries = (object_data.get('feed') or {}).get('entry') or []
+        feed = parse_odata(response.text, 'feed', f'read {object_name}{query}',
+                           force_list=('d:element', 'entry'))
+        object_entries = (feed or {}).get('entry') or []
 
         self.clear()
         self.read_data_entries(object_entries)
@@ -612,8 +613,9 @@ class DataReader(UserDict):
                                 timeout=resolve_timeout(self.request_timeout))
         raise_for_status(response, f'read {path}')
         self.last_response_bytes = len(response.content)
-        result = xmltodict.parse(response.text, force_list=(FUNCTION_ELEMENT_FIELD,))
-        return (result.get(FUNCTION_RESULT_FIELD) or {}).get(FUNCTION_ELEMENT_FIELD) or []
+        result = parse_odata(response.text, FUNCTION_RESULT_FIELD, f'read {path}',
+                             force_list=(FUNCTION_ELEMENT_FIELD,))
+        return (result or {}).get(FUNCTION_ELEMENT_FIELD) or []
 
     def _ext_dimensions_key(self, element: dict) -> tuple | None:
         """(регистратор, номер строки) элемента виртуальной таблицы — ключ сшивки с движением."""
@@ -701,8 +703,10 @@ class DataReader(UserDict):
             response = requests.get(f'{self.odata_url}/{path}?$select=Ref_Key',
                                     auth=self.odata_auth,
                                     timeout=resolve_timeout(self.request_timeout))
-            # Отсутствие элемента 1С сообщает честным 404 — это ответ, а не ошибка.
-            if response.status_code == 404:
+            # Отсутствие элемента 1С сообщает честным 404 — это ответ, а не ошибка. Но только
+            # если отвечала 1С: такой же 404 отдаёт веб-сервер перед ней (см. is_entity_absent),
+            # и тогда мы молча пропустили бы все планы и остались без видов субконто.
+            if response.status_code == 404 and is_entity_absent(response):
                 continue
             raise_for_status(response, f'read {path}')
             return chart_name
@@ -722,8 +726,8 @@ class DataReader(UserDict):
                                 auth=self.odata_auth,
                                 timeout=resolve_timeout(self.request_timeout))
         raise_for_status(response, f'read {chart_name}{query}')
-        entries = (xmltodict.parse(response.text, force_list=('entry',))
-                   .get('feed') or {}).get('entry') or []
+        entries = (parse_odata(response.text, 'feed', f'read {chart_name}',
+                               force_list=('entry',)) or {}).get('entry') or []
         names = {}
         for entry in entries:
             properties = (entry.get('content') or {}).get('m:properties') or {}
@@ -798,11 +802,17 @@ class DataReader(UserDict):
         response = requests.get(f"{self.odata_url}/{path}", auth=self.odata_auth,
                                 timeout=resolve_timeout(self.request_timeout))
         self.clear()
-        if response.status_code == 404:
+        # 404 засчитываем как «объекта нет» ТОЛЬКО от самой 1С. Такой же код отдаёт IIS со снятой
+        # публикацией, ingress без правила во время обновления или чужой vhost — а вызывают этот
+        # метод из перепроверки кандидатов на пометку, и «нет» там означает «пометить удалённым».
+        # Полминуты инфраструктурного 404 иначе = полминуты ложных удалений подряд, с обнулением
+        # ресурсов. Рядом уже есть такая же строгость к 404 у IIS (_is_query_too_long).
+        if response.status_code == 404 and is_entity_absent(response):
             return 0
         raise_for_status(response, f'read {object_name}({key})')
         self.last_response_bytes = len(response.content)
-        entry = xmltodict.parse(response.text, force_list=('d:element',)).get('entry')
+        entry = parse_odata(response.text, 'entry', f'read {object_name}({key})',
+                            force_list=('d:element',))
         if not entry:
             return 0
         self.read_data_entries([entry])
@@ -838,7 +848,8 @@ class DataReader(UserDict):
                                 timeout=resolve_timeout(self.request_timeout))
         raise_for_status(response, f'read {object_name}{query}')
 
-        entries = (xmltodict.parse(response.text, force_list=('entry',)).get('feed') or {}).get('entry') or []
+        entries = (parse_odata(response.text, 'feed', f'read {object_name} date bound',
+                               force_list=('entry',)) or {}).get('entry') or []
         if not entries:
             return None
         properties = (entries[0].get('content') or {}).get('m:properties') or {}

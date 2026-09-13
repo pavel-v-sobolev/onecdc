@@ -23,7 +23,7 @@ scoped-удаления (у него нет регистратора, и наб�
 import uuid
 
 from sqlalchemy import (Column, Index, MetaData, Table, and_, exists, func, insert, not_, or_,
-                        select, update)
+                        select, tuple_, update)
 from sqlalchemy.engine import Engine
 
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, truncate_to_bytes
@@ -38,6 +38,47 @@ KEYS_TABLE_TIMESTAMP_FORMAT = '%y%m%d%H%M%S'
 # Столько же, сколько у dbmerge: 63 байта лимита Postgres минус запас на суффикс индекса.
 MAX_KEYS_TABLE_NAME_LEN = 58
 UNIQUE_ID_LENGTH = 8
+
+
+def mark_orphaned_table_part(engine: Engine, part: Table, owner: Table,
+                             link_columns: list[str], owner_key_columns: list[str],
+                             started_at, mark_field: str) -> int:
+    """
+    Помечает строки табличной части, чей владелец помечен удалённым. Возвращает число помеченных.
+
+    Зачем отдельно от FullLoadKeys.mark_missing. Ключи прогона собираются только по самому
+    объекту: табличные части приезжают вложенными в entry владельца и заменяются группой при его
+    приходе. Владельца физически удалили в 1С — его entry не приходит вовсе, заменять нечего, и
+    строки его ТЧ живут дальше со своими суммами. А это ровно те таблицы, из которых витрины
+    считают итоги.
+
+    Условие — СОСТОЯНИЕ владельца, а не список помеченных этим прогоном. Список жил бы только
+    внутри прогона: сбой между пометкой владельца и пометкой его частей потерял бы его навсегда.
+    По состоянию то же самое находится и на следующем прогоне, а заодно подметаются части,
+    осиротевшие до появления этого механизма.
+
+    Пометка есть, гашения ресурсов нет — в отличие от mark_missing. У табличной части ресурсов
+    не бывает (это понятие регистра), и выпадение её строки из группы их тоже не гасит. Два разных
+    правила в одной таблице давали бы витрине разный результат в зависимости от того, как строка
+    выбыла.
+    """
+    merged_on = part.c['merged_on']
+    owner_marked = select(*(owner.c[c] for c in owner_key_columns)).where(
+        owner.c[mark_field].is_(True))
+    link = (tuple_(*(part.c[c] for c in link_columns)) if len(link_columns) > 1
+            else part.c[link_columns[0]])
+    statement = (update(part)
+                 .where(and_(
+                     # Идемпотентность: повторный прогон не поднимает merged_on заново и не будит
+                     # обработчиков впустую.
+                     not_(part.c[mark_field].is_(True)),
+                     # Тот же guard, что у владельца: строку, переписанную уже во время прогона,
+                     # снимок трогать не вправе — изменения авторитетнее снимка.
+                     or_(merged_on.is_(None), merged_on < started_at),
+                     link.in_(owner_marked)))
+                 .values(**{mark_field: True, 'merged_on': func.now()}))
+    with engine.begin() as conn:
+        return conn.execute(statement).rowcount
 
 
 class FullLoadKeys:

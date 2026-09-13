@@ -256,9 +256,9 @@ class MetadataReader(UserDict):
         properties = {}
         for item_property in item_properties:
             property_name = item_property['@Name']
-            property_type = item_property['@Type']
+            declared_type = item_property['@Type']
 
-            property_type = property_type.removeprefix(TYPE_PREFIX)
+            property_type = declared_type.removeprefix(TYPE_PREFIX)
 
             if GUESS_UUID_TYPES:
                 if property_name=='Recorder':
@@ -272,7 +272,24 @@ class MetadataReader(UserDict):
                 logger.debug(f'Property {item_name}.{property_name} of type {property_type} '
                              f'is not stored as a column')
             else:
-                logger.error(f'Property {item_name}.{property_name} has unknown type {property_type}')
+                # Неизвестный тип берём СТРОКОЙ, а не выбрасываем поле. Выбрасывание стоило дорого
+                # и не там, где кажется: поле пропадало и из ключа объекта (_read_metadata_item_key
+                # берёт из ключа только то, что уцелело здесь). Пустой ключ означал «сохранить
+                # невозможно», но выглядел как «сохранять нечего» — пакет подтверждался, данные
+                # исчезали с одной строкой в логе. Усечённый ключ был не лучше: две разные записи
+                # 1С получали один ключ, и в следующем пакете вторая затирала первую.
+                #
+                # Строкой безопасно: в m:properties 1С всё равно присылает текст, приводить его
+                # не к чему, и упасть на вставке нечем. Данные при этом сохраняются, а не теряются.
+                # Структура (StandardODATA.*) заведёт пустую колонку — маршрутизация в парсере идёт
+                # по значению, а не по метаданным, и словарь в запись не попадёт. Это дешевле, чем
+                # отдельная ветка, а ключ остаётся целым в любом случае.
+                # В сообщении тип КАК ОБЪЯВЛЕН, с префиксом: по 'Time' не понять, что искать,
+                # а по 'Edm.Time' видно и пространство имён, и что это примитив платформы.
+                logger.warning(f'Property {item_name}.{property_name} has unknown type '
+                               f'{declared_type}, storing it as String. Add the type to '
+                               f'type_mapping if a proper column type is needed')
+                properties[property_name] = 'String'
             
         if GUESS_UUID_TYPES:
             # list(): ниже в properties добавляется соседняя колонка <поле>_Value.
@@ -295,15 +312,30 @@ class MetadataReader(UserDict):
 
         return properties
 
-    def _read_metadata_item_key(self, item:dict, properties: dict):
+    def _read_metadata_item_key(self, item:dict, properties: dict, item_name: str | None = None):
         """
-        Читаем список ключевых полей объекта метаданных
+        Читаем список ключевых полей объекта метаданных.
+
+        Ключ обязан разобраться ЦЕЛИКОМ: без полного ключа нет идентичности строки, а значит
+        merge либо не сможет писать вовсе, либо склеит разные записи 1С в одну. Раньше недостающие
+        поля просто отбрасывались вместе с ключом, и обе беды случались молча.
+
+        После того как неизвестный тип стал строкой (см. _read_metadata_item_properties), поле
+        ключа может не найтись только у метаданных, которым нельзя доверять: Key ссылается на
+        необъявленное поле либо на тип, у которого колонки не бывает (Collection/Stream). Поэтому
+        здесь ERROR, а не warning: это не свойство данных, а поломка на стороне источника.
         """
         item_key = (item.get('Key') or {}).get('PropertyRef')
         # Ключа может не быть (например, у сущности без объявленного Key) — тогда пустой список,
         # иначе обращение к key_fields ниже упало бы с UnboundLocalError.
         key_fields = ([k.get('@Name') for k in item_key if k.get('@Name') is not None]
                       if item_key else [])
+
+        missing = [k for k in key_fields if k not in properties]
+        if missing:
+            logger.error(f'Key of {item_name or item.get("@Name")} refers to fields that are not '
+                         f'stored as columns: {missing}. Rows of this object cannot be identified, '
+                         f'so they will be skipped or merged into one another')
 
         return {k: properties[k] for k in key_fields if k in properties}
 
@@ -373,7 +405,7 @@ class MetadataReader(UserDict):
             # регистр с постфиксом RecordType содержит описание полей регистра и описание ключа
                 item_name = item_name.removesuffix("_RecordType")
                 properties = self._read_metadata_item_properties(item, item_name)
-                primary_key = self._read_metadata_item_key(item,properties)
+                primary_key = self._read_metadata_item_key(item, properties, item_name)
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 dimensions, resources, attributes = _classify_register_fields(
                     item_name, properties, complextypes)
@@ -395,7 +427,7 @@ class MetadataReader(UserDict):
             # запись, а набор записей регистратора (Recorder + коллекция RecordSet), и брать
             # ключ оттуда нельзя.
                 properties = self._read_metadata_item_properties(item, item_name)
-                primary_key = self._read_metadata_item_key(item,properties)
+                primary_key = self._read_metadata_item_key(item, properties, item_name)
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 dimensions, resources, attributes = _classify_register_fields(
                     item_name, properties, complextypes)
@@ -407,7 +439,7 @@ class MetadataReader(UserDict):
             # читаем его описание полей и ключ
             # (также может быть табличная часть документа или справочника)
                 properties = self._read_metadata_item_properties(item, item_name)
-                primary_key = self._read_metadata_item_key(item,properties)
+                primary_key = self._read_metadata_item_key(item, properties, item_name)
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 is_table_part = _check_object_is_table_part(item_name, complextypes)
                 self[item_name] = MetadataObject(item_name, properties, primary_key, object_key, 
@@ -416,6 +448,25 @@ class MetadataReader(UserDict):
 
 
     # --- Реестр объектов и состояния полной выгрузки (onecdc_metadata_objects) ---
+
+    def owner_of(self, object_full_name: str) -> str | None:
+        """
+        Владелец табличной части, либо None — объект самостоятельный.
+
+        Табличные части 1С публикует отдельными объектами с именем «владелец_ЧастьИмени», поэтому
+        владелец ищется как САМОЕ ДЛИННОЕ известное имя, являющееся префиксом: у документа с
+        подчёркиванием в собственном имени короткий префикс мог бы совпасть с чужим объектом.
+
+        Нужно там, где часть обязана разделить судьбу владельца: под полной выгрузкой владельца
+        его части пишутся той же страницей (см. Replicator._full_load_tables — обратное
+        отображение), и режим записи у них должен быть тот же.
+        """
+        obj = self.get(object_full_name)
+        if obj is None or not obj.is_table_part:
+            return None
+        candidates = [name for name in self
+                      if name != object_full_name and object_full_name.startswith(name + '_')]
+        return max(candidates, key=len) if candidates else None
 
     def resolve_object_name(self, name: str) -> str:
         """

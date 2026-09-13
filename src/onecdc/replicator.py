@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import requests
 from dbmerge import mergeResult
-from sqlalchemy import Engine, Integer, Numeric, and_
+from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
 from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, type_mapping
@@ -21,7 +21,7 @@ from onecdc.full_load_claim import FullLoadClaim
 from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
 from onecdc.db_logs import ReplicatorLog, LOAD_TYPE_CHANGES, LOAD_TYPE_FULL
-from onecdc.full_load_keys import FullLoadKeys
+from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
 from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
 from onecdc.stop_signal import StopSignal, install_signal_handlers
 from onecdc.write_tracker import WriteTracker
@@ -638,6 +638,10 @@ class Replicator:
         на справочники, регистры — на документы, поэтому родителей пишем раньше. Внутри группы
         исходный порядок пакета (сортировка стабильна).
         """
+        # Объекты, по которым прямо сейчас идёт снимок. Один запрос на пакет: пока снимок в
+        # полёте, его страницы могут быть старше наших данных, и no-op пакет обязан оставить
+        # след (см. DBWriter.save, always_touch).
+        claimed = self._full_load_claim.live_claims()
         for object_name, data_object in sorted(self.changes.items(),
                                                key=lambda kv: save_order_key(kv[0])):
             log_id = self.onecdc_replicator_log.start(
@@ -646,10 +650,25 @@ class Replicator:
             # Сигнал снимает строку реестра — он внутри блока, а не после него: пока строка есть,
             # обязанность сообщить об изменении не исполнена, и оборванная запись видна.
             with self.writes.track(table_name, SOURCE_CHANGES) as tracked:
-                tracked.result = self.writer.save(object_name, data_object)
+                tracked.result = self.writer.save(
+                    object_name, data_object,
+                    always_touch=self._under_full_load(object_name, claimed))
                 # Одно сохранение на строку лога: счётчики и завершение — одним запросом.
                 self.onecdc_replicator_log.write_result(log_id, tracked.result, finish=True)
                 self._warn_about_new_columns(table_name, tracked.result)
+
+    def _under_full_load(self, object_name: str, claimed: set[str]) -> bool:
+        """
+        Идёт ли сейчас полная выгрузка этого объекта — с точки зрения записи изменений.
+
+        Табличная часть наследует захват ВЛАДЕЛЬЦА: своего захвата у неё нет, а страница снимка
+        пишет её вместе с владельцем и той же записью. Без этого ТЧ остались бы без следа именно
+        тогда, когда он нужен, — и снимок затирал бы их устаревшими строками.
+        """
+        if object_name in claimed:
+            return True
+        owner = self.metadata.owner_of(object_name)
+        return owner is not None and owner in claimed
 
     def _handler_key(self, object_name: str) -> str:
         """
@@ -1275,7 +1294,61 @@ class Replicator:
                 tracked.result = _marked_result(marked)
                 if log_id is not None:
                     self.onecdc_replicator_log.write_result(log_id, tracked.result)
+        # Владелец исчез — его табличные части обязаны разделить судьбу. Отдельным шагом, потому
+        # что в ключах прогона их нет: они приезжают вложенно и заменяются группой при приходе
+        # владельца, а он не пришёл.
+        marked += self._mark_orphaned_table_parts(object_name, target, started_at, log_id)
         return marked
+
+    def _mark_orphaned_table_parts(self, object_name: str, target, started_at,
+                                   log_id: int | None) -> int:
+        """
+        Помечает строки табличных частей, чей владелец помечен удалённым.
+
+        Идёт ПОСЛЕ пометки владельца и после перепроверки кандидатов: перепроверка авторитетнее
+        снимка, и владелец, который не исчез, а уехал из окна выгрузки, до этого шага не дойдёт —
+        его строки не помечены, значит и части не тронем.
+
+        У каждой части своя таблица и свои подписчики, поэтому и строка реестра, и сигнал у неё
+        свои (см. CDC-07: сигнал снимает строку одной с ней транзакцией).
+        """
+        owner_key = list(self._primary_key_columns(object_name))
+        total = 0
+        for part_name in self._table_parts_of(object_name):
+            part_table_name = self._handler_key(part_name)
+            try:
+                part = Table(part_table_name, MetaData(), schema=self.db_schema,
+                             autoload_with=self.engine)
+            except NoSuchTableError:
+                continue        # часть ни разу не грузилась — помечать нечего
+            part_metadata = self.metadata.get(part_name)
+            # Связь с владельцем — object_key самой части (у табличной части это Ref_Key
+            # владельца по построению, см. MetadataReader._get_object_key), а не хардкод имени.
+            link = [self.name_mapper.map_field_name(field, part_name)
+                    for field in (part_metadata.object_key or [])]
+            if not link:
+                logger.warning("Full load of %s: table part %s has no link to its owner, "
+                               "its rows cannot be marked", object_name, part_name)
+                continue
+            mark_field = self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD, part_name)
+            with self.writes.track(part_table_name, SOURCE_FULL_LOAD) as tracked:
+                marked = mark_orphaned_table_part(
+                    self.engine, part, target, link, owner_key, started_at, mark_field)
+                if marked:
+                    logger.info("Full load of %s: %s rows of %s were marked deleted — their "
+                                "owner is gone from 1C", object_name, marked, part_name)
+                    tracked.result = _marked_result(marked)
+                    if log_id is not None:
+                        self.onecdc_replicator_log.write_result(log_id, tracked.result)
+            total += marked
+        return total
+
+    def _table_parts_of(self, object_name: str) -> list[str]:
+        """Табличные части объекта — обратное к MetadataReader.owner_of."""
+        prefix = object_name + '_'
+        return [name for name, obj in self.metadata.items()
+                if obj.is_table_part and name.startswith(prefix)
+                and self.metadata.owner_of(name) == object_name]
 
     def _resource_reset_values(self, object_name: str, target) -> dict:
         """Числовые ресурсы регистра гасим в NULL вместе с пометкой — ровно как при выпадении
