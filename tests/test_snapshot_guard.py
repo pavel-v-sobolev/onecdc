@@ -220,3 +220,42 @@ def test_marking_table_parts_is_idempotent(db, monkeypatch):
 
         assert repl.full_load('Document_ЗаказКлиента') > 0
         assert repl.full_load('Document_ЗаказКлиента') == 0
+
+
+# --- CDC-08: владение вшито в саму запись снимка ---
+
+def test_a_snapshot_write_is_fenced_by_the_lease(db):
+    """
+    Страница выгрузки пишется минутами, и проверка «до записи» к моменту записи успевает
+    устареть: мы могли замолчать на весь TTL уже после неё. Поэтому условие «объект всё ещё наш»
+    вшивается в сам оператор — проверяет его СУБД в момент записи, а не мы заранее.
+    """
+    from sqlalchemy import literal
+
+    def guard(value):
+        return DBWriter(db.engine, NameMapper(), schema=db.schema,
+                        lease_guard=lambda: literal(value))
+
+    _save(guard(True), "A", 1, "v1")
+    page_started_at = guard(True).db_now()
+    time.sleep(0.05)
+
+    # Аренда ушла — запись снимка обязана стать пустой.
+    lost = guard(False).save(
+        OBJ, DataObject(META, [{"Ref_Key": "R1", "Val": "B", "DataVersion": "v0",
+                                "is_deleted_or_empty": False, "exchange_message_no": None}]),
+        full_load_started_at=page_started_at)
+    assert _row(db)['Val'] == "A", 'снимок записал, потеряв аренду объекта'
+    assert lost.updated_row_count == 0
+
+    # Аренда наша — та же запись проходит.
+    _save(guard(True), "B", None, "v0", started=page_started_at)
+    assert _row(db)['Val'] == "B"
+
+
+def test_without_a_lease_the_guard_is_absent(db):
+    # Прямой вызов save и тесты идут без аренды вовсе — условия тогда быть не должно, иначе
+    # выгрузка на пустой базе не записала бы ничего.
+    w = _writer(db)
+    assert w.lease_guard is None
+    assert w._still_ours() is None

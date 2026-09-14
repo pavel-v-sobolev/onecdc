@@ -124,7 +124,11 @@ def test_a_complete_key_says_nothing(caplog):
     with caplog.at_level(logging.ERROR):
         _metadata(UNKNOWN_IN_KEY)
 
-    assert [r.message for r in caplog.records if r.levelno >= logging.ERROR] == []
+    # Только свои записи: в общий перехват попадает и посторонний шум — например, поток отметки
+    # живости чужого теста, наткнувшийся на снесённую схему.
+    errors = [r.message for r in caplog.records
+              if r.levelno >= logging.ERROR and r.name.startswith('onecdc.metadata_reader')]
+    assert errors == []
 
 
 # --- Сквозной сценарий: пакет больше не подтверждается впустую ---

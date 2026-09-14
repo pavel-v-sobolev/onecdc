@@ -60,7 +60,10 @@ class DBWriter:
     """
 
     def __init__(self, engine: Engine, name_mapper: NameMapper, schema: str | None = None,
-                 temp_schema: str | None = None):
+                 temp_schema: str | None = None, lease_guard=None):
+        # Функция без аргументов, отдающая условие «объект всё ещё наш» (см. _still_ours), либо
+        # None. Подставляет её тот, кто ведёт аренду, — writer про захваты ничего не знает.
+        self.lease_guard = lease_guard
         self.engine = engine
         self.name_mapper = name_mapper
         self.schema = schema
@@ -246,12 +249,28 @@ class DBWriter:
     # из 1С. Сейчас так и есть — его штампует dbmerge в момент записи. Сломается, если брать его из
     # поля 1С или переиспользовать отметку прошлой загрузки.
 
-    @staticmethod
-    def _not_touched_since(table, started_at: datetime):
-        """update_condition/delete_condition: трогаем целевую строку, только если её не переписывали
-        с момента старта прогона."""
+    def _not_touched_since(self, table, started_at: datetime):
+        """
+        update_condition/delete_condition: трогаем целевую строку, только если её не переписывали
+        с момента старта прогона — и только пока объект всё ещё наш (см. _still_ours).
+        """
         col = table.c[MERGED_ON_FIELD]
-        return or_(col.is_(None), col < started_at)
+        fresh = or_(col.is_(None), col < started_at)
+        ours = self._still_ours()
+        return fresh if ours is None else and_(fresh, ours)
+
+    def _still_ours(self):
+        """
+        Условие «аренда объекта всё ещё наша», вшиваемое прямо в запись снимка. None — арендой
+        никто не управляет (прямой вызов save, тесты), тогда условия нет.
+
+        Зачем внутри записи, а не проверкой перед ней. Страница выгрузки пишется минутами, а
+        проверка «до» к моменту записи давно устарела: мы могли замолчать на весь TTL уже после
+        неё. Условие внутри оператора проверяет СУБД **в момент записи** — это настоящий fencing,
+        а не наше собственное обещание. Для короткого действия (подтверждение пакета) хватает
+        проверки рядом, для длинного — нет.
+        """
+        return self.lease_guard() if self.lease_guard is not None else None
 
     @staticmethod
     def _group_not_touched_since(merge, mapped_object_key: list[str], started_at: datetime):

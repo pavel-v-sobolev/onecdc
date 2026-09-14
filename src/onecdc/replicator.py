@@ -9,19 +9,24 @@ from urllib.parse import quote
 
 import requests
 from dbmerge import mergeResult
-from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_
+from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_, exists
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
 from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, type_mapping
-from onecdc.common_functions import format_duration, instance_owner, odata_datetime_value
+from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, format_duration,
+                                     instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, IS_DELETED_OR_EMPTY_FIELD, ODATA_PREFIX,
                                 RECORDER_FIELDS, _odata_literal)
 from onecdc.change_reader import ChangeReader
-from onecdc.full_load_claim import FullLoadClaim
+from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
+                                    OWNER_FIELD, FullLoadClaim)
 from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
-from onecdc.db_logs import ReplicatorLog, LOAD_TYPE_CHANGES, LOAD_TYPE_FULL
+from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FIELD,
+                            NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog,
+                            create_table_if_absent, exchange_nodes_table)
 from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
+from onecdc.lease import Lease, lease_engine
 from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
 from onecdc.stop_signal import StopSignal, install_signal_handlers
 from onecdc.write_tracker import WriteTracker
@@ -137,6 +142,11 @@ RECHECK_MIN_QUERY_BYTES = 256
 # Apache), а IIS отдаёт 404.15 «Query String Too Long», то есть обычный 404: по одному коду его не
 # отличить от опечатки в имени объекта, поэтому 404 засчитываем только вместе с приметой в теле
 # (см. _is_query_too_long).
+# Сколько времени по МОНОТОННЫМ часам может пройти между продлением аренды узла и отправкой
+# подтверждения. С запасом меньше LEASE_ROLE_TTL: между ними всего несколько операторов, и любое
+# заметное время здесь означает, что процесс замирал (см. Replicator._confirm_package).
+CONFIRM_LEASE_BUDGET = 30.0
+
 URI_TOO_LONG_CODES = frozenset((414, 404))
 URI_TOO_LONG_MARKERS = ('404.15', 'query string', 'строка запроса', 'uri too long')
 
@@ -539,8 +549,12 @@ class Replicator:
         self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
                                     self.metadata, odata_auth=self._odata_auth,
                                     request_timeout=self._request_timeout)
+        # lease_guard вшивает «объект всё ещё наш» прямо в условие записи снимка. Проверять до
+        # записи здесь мало: страница пишется минутами, и проверка успевает устареть — а условие
+        # внутри оператора проверяет СУБД в момент записи (см. DBWriter._still_ours).
         self.writer = DBWriter(engine=self.engine, name_mapper=self.name_mapper,
-                               schema=self.db_schema, temp_schema=self.db_temp_schema)
+                               schema=self.db_schema, temp_schema=self.db_temp_schema,
+                               lease_guard=self._full_load_lease_guard)
         # Лог загрузки (строка на объект) пишет оркестратор: только здесь есть контекст обмена
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
         self.onecdc_replicator_log = ReplicatorLog(self.engine, self.db_schema)
@@ -554,6 +568,24 @@ class Replicator:
         # а брошенная строка — единственный след того, что сигнал не дошёл (см. _deliver_signal).
         self.writes = WriteTracker(self.engine, self.db_schema, self._exchange_name,
                                    deliver_signal=self._deliver_signal)
+        # Аренда узла обмена: читать изменения одного узла вправе ровно один процесс. Без неё
+        # два репликатора читают и подтверждают параллельно, а подтверждение удаляет регистрации
+        # изменений в самой 1С — вернуть их нечем (витрину-то всегда можно пересобрать).
+        # Таблицу создаём сразу и безусловно: захват — это UPDATE, и по отсутствующей строке он
+        # дал бы «занято», а отсутствие таблицы пришлось бы трактовать как «можно всем».
+        self._nodes_table = exchange_nodes_table(MetaData(), self.db_schema)
+        create_table_if_absent(self.engine, self._nodes_table)
+        # Отдельный пул под аренды: иначе страницы выгрузки разбирают соединения, потоку отметки
+        # живости не достаётся, и живой процесс теряет аренду (см. lease_engine).
+        self._lease_engine = lease_engine(self.engine)
+        self._node_lease = Lease(self._lease_engine, lambda: self._nodes_table,
+                                 instance_owner(exchange_name), subject='exchange-node',
+                                 key_field=NODE_KEY_FIELD, owner_field=NODE_OWNER_FIELD,
+                                 heartbeat_field=NODE_HEARTBEAT_FIELD)
+        self._node_lease.ensure_row(self._queue_guid, exchange_name=exchange_name)
+        # Кого мы уже сообщили как владельца узла: лог пишется только на переходах, иначе
+        # процесс, которому узел не достался, засыпал бы лог одинаковой строкой каждый цикл.
+        self._node_holder_logged: str | None = None
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи,
         # когда он крутится не в главном потоке и своего перехвата сигналов не имеет.
         self._stop_signal: "StopSignal | None" = None
@@ -576,6 +608,37 @@ class Replicator:
         1С (полезно для отладки/тестов — цикл становится повторяемым).
 
         """
+        # Узел обмена берём ПЕРЕД чтением, а не перед подтверждением. Проверки перед
+        # подтверждением мало: вред наносит уже сам SelectChanges второго процесса — он помечает
+        # свежие изменения номером сообщения, который потом удалит первый своим подтверждением.
+        # Захват должен закрывать цикл целиком.
+        if not self._claim_node():
+            return
+        # Аренда НЕ отпускается в конце цикла: захвативший читает узел, пока жив. Отпускать
+        # каждый цикл значило бы устраивать новую гонку раз в минуту — передача между циклами
+        # безопасна (пакета в полёте нет), но пользы в ней ноль, а читатель мигал бы между
+        # процессами без причины, и по логам было бы не понять, кто работает. Отпускаем только
+        # при штатной остановке (см. close), чтобы сменщик не ждал TTL.
+        self._run_once_claimed(notify_changes)
+
+    def _claim_node(self) -> bool:
+        """Захватывает узел обмена. False — читает кто-то другой, цикл пропускаем."""
+        if self._node_lease.acquire(self._queue_guid):
+            if self._node_holder_logged is not None:
+                logger.info("Exchange node %s is ours now, reading changes", self._queue_guid)
+                self._node_holder_logged = None
+            return True
+        holder = self._node_lease.live_owners().get(self._queue_guid, '?')
+        if self._node_holder_logged != holder:
+            # Только на переходе: иначе процесс, которому узел не достался, писал бы эту строку
+            # каждый цикл, и лог стал бы нечитаемым.
+            logger.info("Exchange node %s is being read by %s, skipping this cycle",
+                        self._queue_guid, holder)
+            self._node_holder_logged = holder
+        return False
+
+    def _run_once_claimed(self, notify_changes: bool) -> None:
+        """Тело цикла под захваченным узлом обмена (см. run_once)."""
         # Первый вызов: грузим метаданные. Дальше не перечитываем — это делает сам data_reader
         # при появлении нового объекта/поля (get_metadata держит is_loaded=True).
         if not self.metadata.is_loaded:
@@ -588,6 +651,16 @@ class Replicator:
         # занимает цикл. Загрузка метаданных сюда не входит: она разовая и к пакету не относится.
         started = time.monotonic()
         self.changes.read_changes()
+        # Узел могли перехватить, пока 1С формировала пакет (а он бывает на десятки мегабайт).
+        # Бросить работу здесь безопасно: набор перехватившего ВКЛЮЧАЕТ наш — он прочитает
+        # то же самое и сохранит сам (см. DESIGN.md «Как 1С отдаёт изменения»). Проверка не ради
+        # корректности — её обеспечивает заслон перед подтверждением, — а чтобы не тратить минуты
+        # на merge, который параллельно делает законный владелец, и не сталкиваться с ним на
+        # уникальном ключе.
+        if not self._node_lease.still_mine(self._queue_guid):
+            logger.warning("Exchange node %s was taken over while the package was being read — "
+                           "dropping this cycle, the package will come again", self._queue_guid)
+            return
         self._save_changes()
         logger.info("Changes package %s processed in %s: %s rows",
                     self.changes.message_no, format_duration(time.monotonic() - started),
@@ -599,9 +672,56 @@ class Replicator:
             self._require_full_load_for_new_objects()
         
         if notify_changes and len(self.changes) > 0:
-            self.changes.notify_changes_received()
+            self._confirm_package()
         else:
             logger.debug("No changes — skipping confirmation")
+
+    def _confirm_package(self) -> None:
+        """
+        Подтверждает пакет — единственное НЕОБРАТИМОЕ действие цикла: 1С удаляет по нему
+        регистрации изменений, и вернуть их нечем.
+
+        Три заслона, и каждый закрывает свой путь.
+
+        1. Проверка аренды с продлением. Потеряли узел, пока считали пакет, — не подтверждаем:
+           пакет придёт снова, потерь нет. Тот, кто перехватил узел, прочитает его целиком —
+           его набор ВКЛЮЧАЕТ наш (проверено на живой 1С, см. DESIGN.md «Как 1С отдаёт
+           изменения»), поэтому бросить работу здесь безопасно в любой момент.
+
+        2. Проверка по МОНОТОННЫМ часам прямо перед отправкой. Продление говорит «аренда наша ещё
+           LEASE_ROLE_TTL секунд», но если мы замерли между продлением и отправкой, отправим уже
+           после её истечения. Собственные часы это ловят, и им для этого не нужны ни сеть, ни БД
+           — то есть они не отказывают по тем же причинам, что и отметка живости.
+
+        3. Проверка ПОСЛЕ подтверждения. Предотвратить уже поздно, но потеря перестаёт быть
+           молчаливой: в логе ERROR, в журнале след. Автоматически при этом ничего не
+           перевыгружаем — потеря аренды НЕ означает потери данных: перехвативший почти наверняка
+           сохранил всё сам, и часы работы 1С по такому подозрению несоразмерны.
+        """
+        # Отсчёт СТАРТУЕТ ДО продления, а не после: замереть можно и между коммитом продления в
+        # БД и возвратом из still_mine, и этот кусок бюджет обязан покрывать.
+        started_at = time.monotonic()
+        if not self._node_lease.still_mine(self._queue_guid):
+            logger.warning("Exchange node %s was taken over while the package was being saved — "
+                           "not confirming it, the package will come again", self._queue_guid)
+            return
+
+        elapsed = time.monotonic() - started_at
+        if elapsed > CONFIRM_LEASE_BUDGET:
+            logger.error("Exchange node %s: %.0fs passed between renewing the lease and "
+                         "confirming the package — not confirming it, the package will come again",
+                         self._queue_guid, elapsed)
+            return
+
+        self.changes.notify_changes_received()
+
+        if not self._node_lease.still_mine(self._queue_guid):
+            logger.error(
+                "Exchange node %s was taken over while package %s was being confirmed. The "
+                "confirmation may have removed change registrations this process never received. "
+                "Check whether the other reader is alive: if it is, it has the data; if it is "
+                "not, run a full load of the exchange plan objects",
+                self._queue_guid, self.changes.message_no)
 
 
     def _require_full_load_for_new_objects(self) -> None:
@@ -1583,6 +1703,29 @@ class Replicator:
         self._full_load_page_size[object_name] = page_size
         return page_size
 
+    def _full_load_lease_guard(self):
+        """
+        Условие «объект, который сейчас пишется снимком, всё ещё наш» — для вшивания в саму
+        запись (см. DBWriter._still_ours).
+
+        None, когда снимок не идёт: в режиме изменений guard'ов нет вовсе, а прямой вызов
+        full_load на пустой базе может идти и без реестра. Условие поэтому строится только
+        по факту захвата.
+
+        Захват объекта живёт в реестре onecdc_metadata_objects, и условие — коррелированный
+        EXISTS по нему. Дороже обычного guard'а на один подзапрос по первичному ключу небольшой
+        таблицы, и это единственный способ проверить владение В МОМЕНТ записи, а не до неё.
+        """
+        objects = self._full_load_claim.held_objects()
+        table = self.metadata.objects_table
+        if not objects or table is None:
+            return None
+        return exists().where(
+            table.c.object_full_name.in_(sorted(objects)),
+            table.c[OWNER_FIELD] == self._full_load_claim.owner,
+            table.c[HEARTBEAT_FIELD] >= DB_NOW_WITHOUT_TIMEZONE
+            - timedelta(seconds=CLAIM_HEARTBEAT_TTL))
+
     def _full_load_tables(self, object_name: str) -> list[str]:
         """
         Имена таблиц (в терминах реестра незавершённых merge), в которые пишет полная выгрузка
@@ -1703,6 +1846,18 @@ class Replicator:
 
                 stop.wait(delay)
             logger.info("Replication loop stopping, waiting for full loads to finish")
+        self.close()
+
+    def close(self) -> None:
+        """
+        Штатная остановка: отпускает аренду узла обмена и гасит поток отметки живости.
+
+        Без неё сменщик ждал бы истечения TTL — а он у роли длинный (LEASE_ROLE_TTL, четверть
+        часа). Разница между аккуратным рестартом и `kill -9` ровно в этом: при первом узел
+        подхватывается мгновенно, при втором — через TTL.
+        """
+        self._node_lease.release(self._queue_guid)
+        self._node_lease.close()
 
     @contextmanager
     def claim_full_load(self, object_full_name: str):

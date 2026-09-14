@@ -1005,7 +1005,9 @@ def test_rebuild_resumes_from_the_cursor_after_a_restart(db):
     assert state.rebuild_cursor == '2025', 'место остановки записано'
     assert 'block 2026 failed' in state.last_error
 
-    # Новый процесс: свой HandlerLoop, состояние только из БД.
+    # Новый процесс: свой HandlerLoop, состояние только из БД. Предыдущий ушёл штатно и отпустил
+    # аренду имени — иначе сменщик ждал бы истечения её TTL, как ждал бы после падения.
+    runner.close()
     resumed = BlockSpy()
     restarted = _runner_for(db, resumed)
     restarted.run_if_pending()

@@ -9,6 +9,11 @@ from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Таймаут подтверждения пакета: (connect, read). Намеренно свой, а не общий DEFAULT_REQUEST_TIMEOUT
+# — см. notify_changes_received. Должен быть заведомо меньше LEASE_ROLE_TTL: запрос не вправе
+# пережить аренду узла обмена.
+NOTIFY_TIMEOUT: tuple[float, float] = (30, 30)
+
 
 class ChangeReader(DataReader):
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
@@ -56,10 +61,17 @@ class ChangeReader(DataReader):
 
     def notify_changes_received(self):
         """
-        Подтвердить получение изменений, отправив запрос на сервер
+        Подтвердить получение изменений, отправив запрос на сервер.
+
+        Таймаут здесь СВОЙ и короткий, а не общий (NOTIFY_TIMEOUT). Общий рассчитан на чтение
+        пакета — 15 минут на ответ, потому что пакет 1С формирует долго. Для подтверждения это
+        опасно: аренда узла обмена живёт LEASE_ROLE_TTL, и запрос, провисевший дольше, применится
+        уже тогда, когда узлом владеет другой процесс. Причём **без всякого замирания** — просто
+        от медленного ответа. Подтверждению читать нечего, оно быстрое, поэтому короткий таймаут
+        ничего не ломает и убирает целый класс расхождений.
         """
         url = f"{self.odata_url}/NotifyChangesReceived?DataExchangePoint='{self.odata_url}/ExchangePlan_{self.exchange_name}(guid'{self.queue_guid}')'&MessageNo={self.message_no}"
-        response = requests.post(url,auth=self.odata_auth,timeout=resolve_timeout(self.request_timeout))
+        response = requests.post(url, auth=self.odata_auth, timeout=NOTIFY_TIMEOUT)
         # Не-2xx -> HTTPError. Подтверждение не прошло — изменения не списаны и придут снова
         # (в run_forever цикл повторится, save идемпотентен).
         raise_for_status(response, f'NotifyChangesReceived (message {self.message_no})')

@@ -80,6 +80,35 @@ def create_index_if_absent(engine: Engine, index: Index, table_name: str,
 
 
 
+EXCHANGE_NODES = "onecdc_exchange_nodes"
+# Аренда узла обмена: имена колонок вынесены, потому что по ним работает общий Lease.
+NODE_KEY_FIELD = 'queue_guid'
+NODE_OWNER_FIELD = 'reader_owner'
+NODE_HEARTBEAT_FIELD = 'reader_heartbeat_at'
+
+
+def exchange_nodes_table(metadata: MetaData, schema_name: str | None) -> Table:
+    """
+    Кто сейчас читает изменения этого узла обмена.
+
+    Ключ — узел (`queue_guid`), а НЕ имя плана обмена: очередь со своим ReceivedNo принадлежит
+    узлу (см. ChangeReader.get_last_received_no — номер читается из строки узла), и по имени плана
+    она не определяется. Два репликатора на разные узлы — независимая работа, и ключ это отражает.
+
+    Отдельная таблица, а не колонки в существующей: состояния уровня «узел обмена» в проекте до
+    сих пор не было вовсе — реестр объектов про объекты, handlers про обработчиков.
+    """
+    return Table(
+        EXCHANGE_NODES, metadata,
+        Column(NODE_KEY_FIELD, String(64), primary_key=True),
+        # Только чтобы строка читалась глазами: ключ и так уникален.
+        Column("exchange_name", String(255)),
+        Column(NODE_OWNER_FIELD, String(255)),
+        Column(NODE_HEARTBEAT_FIELD, DateTime),
+        schema=schema_name,
+    )
+
+
 def _onecdc_replicator_log_table(metadata: MetaData, schema_name: str | None) -> Table:
     return Table(
         REPLICATOR_LOG, metadata,

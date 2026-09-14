@@ -98,11 +98,13 @@ from datetime import datetime, timedelta
 from types import ModuleType
 from typing import Callable, Iterable, Iterator
 
-from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, Engine, Float,
-                        func, insert, inspect, MetaData, or_, select, String, Table, text, update)
+from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, Engine, exists,
+                        Float, func, insert, inspect, MetaData, or_, select, String, Table,
+                        text, update)
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, instance_owner
 from onecdc.db_logs import _check_create_schema, create_table_if_absent
+from onecdc.lease import LEASE_ROLE_TTL, Lease, lease_engine
 from onecdc.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
 from onecdc.stop_signal import StopSignal, install_signal_handlers
 # Реестр незавершённых merge переехал в свой модуль (им пользуется и репликатор). Имена
@@ -118,6 +120,9 @@ HANDLERS_TABLE = "onecdc_handlers"
 # Метка сигнала об изменении подписанной таблицы (см. _handlers_table). Вынесена в
 # константу: на неё смотрят и перенос со старого булева флага, и сам цикл.
 UPDATE_REQUESTED_FIELD = "update_requested_at"
+# Аренда имени обработчика — колонки вынесены, потому что по ним работает общий Lease.
+LEASE_OWNER_FIELD = "lease_owner"
+LEASE_HEARTBEAT_FIELD = "lease_heartbeat_at"
 
 # Откуда пришло изменение: пакет изменений или страница полной выгрузки.
 SOURCE_CHANGES = 'changes'
@@ -186,6 +191,20 @@ class HandlerContext:
     # Handler.rebuild). None — начинаем с начала. Смысл метки известен только обработчику: он
     # сам нарезал блоки, он же и решает, какие из них пропустить.
     rebuild_from: str | None
+    # Условие «имя этого обработчика всё ещё наше», годное прямо в SQL: подставьте его в
+    # source_condition/delete_condition своего merge —
+    #
+    #     merge.exec(source_condition=and_(source_key.in_(groups), context.lease_is_mine))
+    #
+    # Зачем. Витрину пишет ВАШ код, и вшить туда проверку за вас мы не можем. А проверка,
+    # сделанная перед вызовом, к концу длинного handle() успевает устареть: аренда уходит по
+    # молчанию, и за час её можно потерять незаметно. Условие внутри оператора проверяет СУБД
+    # в момент записи — тогда устаревший процесс не затрёт результат того, кто перехватил имя.
+    #
+    # Оговорка: условие действует НА КАЖДЫЙ оператор отдельно. Потеряв аренду посередине, вы
+    # получите частично применённый результат, а не «как будто ничего не было». Это лучше
+    # полного затирания свежего старым, но пересборкой такое всё равно лечится.
+    lease_is_mine: Any
     # Что привело к вызову. Только для логов: выбирать данные обязательно по окну.
     #
     # Точности тут немного, и это осознанно. Репликатор сообщает об изменении меткой времени в
@@ -454,6 +473,12 @@ def _handlers_table(metadata: MetaData, schema_name: str | None) -> Table:
         # устроена полная выгрузка объекта.
         Column("full_rebuild_is_required", Boolean, nullable=False, server_default=text('false')),
         Column("last_full_rebuild_dt", DateTime, nullable=True),
+        # Аренда имени: витрину этого обработчика считает ровно один процесс. Поднять второй с тем
+        # же NAME ничто не мешает (rolling restart, дублированный контейнер), а CAS по last_run_at
+        # ловит только отметку: к моменту проверки витрина уже переписана, а у отправщика во
+        # внешнюю систему письма ушли. Поэтому владение берётся ДО вызова кода обработчика.
+        Column(LEASE_OWNER_FIELD, String(255), nullable=True),
+        Column(LEASE_HEARTBEAT_FIELD, DateTime, nullable=True),
         Column("last_full_rebuild_minutes", Float, nullable=True),
         # Метка последнего ЗАВЕРШЁННОГО блока идущей пересборки (см. Handler.rebuild). Нужна,
         # чтобы пересборка на десятки минут переживала перезапуск процесса: генератор блоков живёт
@@ -706,6 +731,20 @@ class HandlerLoop:
         # Поэтому после истечения TTL смотрим окно ещё раз. Обычно оно пустое, и собственный
         # SELECT обработчика вернёт ноль строк, — это одна холостая проверка на запуск процесса.
         self._catch_up_at: float | None = time.monotonic() + SUBSCRIPTIONS_TTL + 1.0
+        # Аренда имени: витрину этого обработчика считает ровно один процесс. Держится на ВСЮ
+        # единицу работы — прогон целиком, а пересборку со всеми её блоками. Отпускать между
+        # блоками нельзя: два процесса повели бы пересборку по очереди, и блок, досчитанный
+        # первым позже, затёр бы группы, в которые второй уже внёс свежее. rebuild_cursor нужен
+        # для того, чтобы пересборку подхватили ПОСЛЕ смерти процесса, а не чтобы её вели двое.
+        # Отдельный пул: отметку живости не должно обесточивать тем, что обработчик занял
+        # соединения своей витриной (см. lease_engine).
+        self._lease = Lease(lease_engine(engine), lambda: self.table,
+                            instance_owner(f'handler:{self.name}'),
+                            subject='handler', key_field='name',
+                            owner_field=LEASE_OWNER_FIELD,
+                            heartbeat_field=LEASE_HEARTBEAT_FIELD)
+        # Кого мы уже сообщили как владельца: лог только на переходах (см. Replicator._claim_node).
+        self._lease_holder_logged: str | None = None
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи.
         self._stop_signal: "StopSignal | None" = None
 
@@ -773,13 +812,27 @@ class HandlerLoop:
         self._stop_signal = stop
         with load_mode(LOAD_MODE_HANDLER):
             logger.info("Handler %s started", self.name)
-            while not stop.requested:
-                try:
-                    self.run_if_pending()
-                except Exception:
-                    logger.exception("Handler %s dispatch failed", self.name)
-                stop.wait(poll_interval)
+            try:
+                while not stop.requested:
+                    try:
+                        self.run_if_pending()
+                    except Exception:
+                        logger.exception("Handler %s dispatch failed", self.name)
+                    stop.wait(poll_interval)
+            finally:
+                # Уходим аккуратно — отпускаем имя сразу, не заставляя сменщика ждать TTL.
+                self.close()
             logger.info("Handler %s stopped", self.name)
+
+    def close(self) -> None:
+        """
+        Штатная остановка: отпускает аренду имени и гасит её поток отметки живости.
+
+        Без неё сменщик ждал бы истечения TTL (полторы минуты) даже при аккуратном рестарте —
+        а при аккуратном ждать незачем: мы знаем, что уходим, и можем сказать об этом сразу.
+        """
+        self._lease.release(self.name)
+        self._lease.close()
 
     def request_stop(self) -> None:
         """Просит идущий run_forever завершиться после текущего прогона — то же, что SIGTERM, но
@@ -794,6 +847,9 @@ class HandlerLoop:
         Публичный, потому что цикл — не единственный способ его крутить: обработчика можно
         запускать и по расписанию снаружи (cron, вызов из своего кода), не поднимая run_forever.
         """
+        if not self._claim_name():
+            return
+
         if self._catch_up_at is not None and time.monotonic() >= self._catch_up_at:
             # Подписки репликатора к этому моменту точно перечитаны — если что-то прошло мимо
             # сигнала, пока он о нас не знал, это последний шанс увидеть его без нового изменения.
@@ -825,6 +881,64 @@ class HandlerLoop:
             self._run_rebuild(last_run_at, cursor)
         else:
             self._run(last_run_at, full_rebuild, update_required)
+
+    def _check_lease_after_run(self) -> None:
+        """
+        Аренда имени уходила, пока шёл прогон? Тогда витрину параллельно считал кто-то ещё, и
+        наши записи могли лечь поверх его свежих — а окно уже уйдёт вперёд, и пересчитать эти
+        группы будет некому. Расхождение молчаливое: ни ошибки, ни сигнала.
+
+        В отличие от подтверждения пакета в 1С, здесь есть чем чиниться: пересборка — штатная
+        операция самого обработчика, она ограничена его же данными и 1С не трогает. Поэтому
+        заказываем её автоматически.
+
+        Кроме отправщиков во внешнюю систему (on_full_load=False): для них пересборка означает
+        повторную отправку всего с начала времён, то есть лекарство дороже болезни. Им остаётся
+        ERROR в логе и решение человека.
+        """
+        if self._lease.still_mine(self.name):
+            return
+        if not self.handler.on_full_load:
+            logger.error(
+                "Handler %s lost its lease while running: another process may have been building "
+                "the same data mart, and results could have overwritten each other. A rebuild is "
+                "NOT requested automatically because this handler opted out of backfill — decide "
+                "and request it yourself if the data mart looks stale", self.name)
+            return
+        logger.error("Handler %s lost its lease while running — requesting a full rebuild, "
+                     "its results may have overwritten those of another process", self.name)
+        with self.engine.begin() as conn:
+            conn.execute(update(self.table).where(self.table.c.name == self.name)
+                         .values(full_rebuild_is_required=True))
+
+    def _lease_condition(self):
+        """Условие «имя всё ещё наше» для SQL обработчика (см. HandlerContext.lease_is_mine)."""
+        t = self.table
+        return exists().where(
+            t.c.name == self.name,
+            t.c[LEASE_OWNER_FIELD] == self._lease.owner,
+            t.c[LEASE_HEARTBEAT_FIELD] >= DB_NOW_WITHOUT_TIMEZONE
+            - timedelta(seconds=LEASE_ROLE_TTL))
+
+    def _claim_name(self) -> bool:
+        """
+        Захватывает имя обработчика. False — витрину считает другой процесс, проход пропускаем.
+
+        Не ждём освобождения в цикле, а пропускаем проход и пробуем на следующем: процессы
+        симметричны, роли ведущего нет, и кому повезёт в следующий раз — заранее не определено
+        (см. lease). Поднятый рядом второй контейнер благодаря этому безвреден и ничего не требует
+        от пользователя.
+        """
+        if self._lease.acquire(self.name):
+            if self._lease_holder_logged is not None:
+                logger.info("Handler %s is ours now", self.name)
+                self._lease_holder_logged = None
+            return True
+        holder = self._lease.live_owners().get(self.name, '?')
+        if self._lease_holder_logged != holder:
+            logger.info("Handler %s is being run by %s, skipping this pass", self.name, holder)
+            self._lease_holder_logged = holder
+        return False
 
     def _read_state(self) -> tuple[bool, datetime | None, bool, bool, str | None]:
         """Состояние обработчика из БД: (включён, last_run_at, заказана ли пересборка, ждёт ли
@@ -894,6 +1008,7 @@ class HandlerLoop:
             # last_run_at = граница, ВЗЯТАЯ ДО вызова: всё, что смёржилось за время работы
             # обработчика, окажется правее неё и попадёт в следующее окно, а не потеряется.
             elapsed = time.monotonic() - started
+            self._check_lease_after_run()
             if self._save_success(boundary, last_run_at, expected_rebuild, update_requested):
                 logger.info("Handler %s finished in %.1fs (objects=%s)",
                             self.name, elapsed, sorted(objects))
@@ -915,6 +1030,7 @@ class HandlerLoop:
                  sources: Iterable[str], full_rebuild: bool,
                  rebuild_from: str | None) -> HandlerContext:
         return HandlerContext(
+            lease_is_mine=self._lease_condition(),
             engine=self.engine, schema=self.schema, temp_schema=self.temp_schema,
             last_run_at=window_start, boundary=boundary,
             objects=frozenset(objects), sources=frozenset(sources), full_rebuild=full_rebuild,
@@ -984,6 +1100,14 @@ class HandlerLoop:
                 blocks = ()
             try:
                 for label in blocks:
+                    if not self._lease.still_mine(self.name):
+                        # Пересборка идёт часами, и аренду за это время можно потерять молча.
+                        # Между блоками — естественная точка разрыва: бросаем, а место остановки
+                        # уже записано, и тот, кто перехватил имя, продолжит с него.
+                        logger.error("Handler %s lost its lease during the rebuild — stopping at "
+                                     "block %s, whoever holds the name now will continue",
+                                     self.name, label)
+                        return
                     self._save_rebuild_cursor(str(label))
                     logger.info("Handler %s: rebuild block %s done", self.name, label)
                     if self._stop_requested():

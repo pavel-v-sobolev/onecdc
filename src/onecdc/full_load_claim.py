@@ -138,6 +138,11 @@ class FullLoadClaim:
                        >= now - timedelta(seconds=CLAIM_HEARTBEAT_TTL))).scalars().all()
         return set(rows)
 
+    def held_objects(self) -> set[str]:
+        """Объекты, которые этот процесс сейчас держит. Снимок — множество меняется из потоков."""
+        with self._lock:
+            return set(self._held)
+
     def release(self, object_full_name: str) -> None:
         """Отпускает захват — только свой: чужой мог перехватить объект после нашего TTL."""
         with self._lock:
