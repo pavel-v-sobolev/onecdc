@@ -715,7 +715,12 @@ def test_dead_replicator_does_not_freeze_the_boundary(db):
     tracked = tracker.track("Catalog_Nomenklatura")
     assert tracker.boundary(["Catalog_Nomenklatura"]) == tracked.started_at
 
-    # Отматываем отметку живости за TTL — как будто процесс умер и перестал её обновлять.
+    # Процесс умер — гасим его поток отметки живости ДО того, как отматывать отметку назад.
+    # Иначе тест гоняется сам с собой: поток поднимается вместе с первым merge и делает первый
+    # UPDATE сразу, а не через MERGE_HEARTBEAT_PERIOD. Приди он после нашего отматывания — строка
+    # снова свежая, граница прижата к ней, и тест падает «boundary == started_at». На загруженной
+    # машине это выпадало примерно раз в несколько прогонов (и уронило CI).
+    tracker.close()
     with db.engine.begin() as conn:
         conn.execute(tracker.table.update().values(
             heartbeat_at=tracked.started_at - timedelta(seconds=MERGE_HEARTBEAT_TTL + 60)))

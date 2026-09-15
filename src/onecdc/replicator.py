@@ -516,7 +516,11 @@ class Replicator:
         # внутри оператора проверяет СУБД в момент записи (см. DBWriter._still_ours).
         self.writer = DBWriter(engine=self.engine, name_mapper=self.name_mapper,
                                schema=self.db_schema, temp_schema=self.db_temp_schema,
-                               lease_guard=self._full_load_lease_guard)
+                               lease_guard=self._full_load_lease_guard,
+                               # Смена типа колонки в 1С обесценивает уже загруженное: writer
+                               # отставляет старое в сторону, а наполнить новое историей может
+                               # только полная выгрузка (см. DBWriter._retype_changed_columns).
+                               request_full_load=self._request_full_load)
         # Лог загрузки (строка на объект) пишет оркестратор: только здесь есть контекст обмена
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
         self.onecdc_replicator_log = ReplicatorLog(self.engine, self.db_schema)
@@ -1278,6 +1282,17 @@ class Replicator:
                         "%s in one go", object_name, empty_in_a_row, cursor)
             read(None, cursor, max_pages=None)
         return total, rows_modified
+
+    def _request_full_load(self, object_name: str) -> None:
+        """Заказывает объекту полную выгрузку. Если автоматические выгрузки выключены, заказ не
+        ставим — иначе он висел бы в реестре вечно, — но говорим об этом громко: наполнить новую
+        колонку историей иначе нечем, данные потекут только потоком изменений."""
+        if not self._automatic_full_load:
+            logger.warning("Full load of %s is needed but automatic_full_load=False: the new "
+                           "column/table will fill from changes only, without history. Run "
+                           "full_load(%r) when convenient", object_name, object_name)
+            return
+        self.metadata.require_full_load(object_name)
 
     def _is_record_set_object(self, object_name: str) -> bool:
         """

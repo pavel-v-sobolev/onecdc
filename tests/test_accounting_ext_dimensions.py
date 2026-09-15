@@ -131,8 +131,23 @@ def reader(monkeypatch):
     return obj
 
 
+def _read_with_subconto(reader, times: int = 1) -> None:
+    """
+    Боевой путь чтения регистра с субконто: страница — НАБОР ЗАПИСЕЙ, аналитика добирается вторым
+    запросом к виртуальной таблице (DataReader._fill_subconto).
+
+    Отдельного чтения регистра из виртуальной таблицы больше нет: листать её нечем (`$skip` — 400,
+    `Top` режет по строкам и обрезает набор посередине), поэтому сам регистр читается обычным
+    `$skip` по наборам, а таблица нужна только за субконто.
+    """
+    reader.read_subconto = True
+    for _ in range(times):
+        reader.response_queue = [(200, _record_set_feed()), (200, reader.response_text)]
+        reader.read_object(REG, key_fields=["Recorder"])
+
+
 def test_ext_dimension_slots_are_folded_by_kind(reader):
-    reader.read_accounting_register(REG)
+    _read_with_subconto(reader)
 
     data = reader[REG].data
     dr = data[EXT_DIMENSIONS_FIELDS['Dr']][0]
@@ -148,31 +163,13 @@ def test_ext_dimension_slots_are_folded_by_kind(reader):
 def test_virtual_table_extras_do_not_become_columns(reader):
     # Виртуальная таблица шире движения: сами слоты и PointInTime в регистре не существуют,
     # и колонок под них в таблице быть не должно.
-    reader.read_accounting_register(REG)
+    _read_with_subconto(reader)
 
     columns = set(reader[REG].data)
     assert not [c for c in columns if c.startswith('ExtDimensionDr')
                 or c.startswith('ExtDimensionCr') or c.startswith('ExtDimensionType')]
     assert 'PointInTime' not in columns
     assert {'Recorder', 'LineNumber', 'Summa'} <= columns
-
-
-def test_empty_numeric_from_virtual_table_becomes_zero(reader):
-    # Одно и то же движение платформа описывает по-разному: набор записей отдаёт пустой ресурс
-    # нулём, виртуальная таблица — m:null. Пакет изменений приходит набором, полная выгрузка —
-    # таблицей, и без выравнивания они переписывали бы друг друга вечно.
-    reader.read_accounting_register(REG)
-
-    assert reader[REG].data["KolichestvoDr"] == [0]
-
-
-def test_page_is_read_by_period_window_not_by_top(reader):
-    # Top отдаёт произвольное подмножество выборки, а не её начало, поэтому страницу им не режут:
-    # окно берётся целиком, одним запросом с Condition по периоду.
-    reader.read_accounting_register(REG, condition="Period ge datetime'2013-01-01T00:00:00'")
-
-    url = _ext_urls(reader)[-1]
-    assert 'Condition' in url and 'Top' not in url
 
 
 def test_changes_package_is_enriched_by_periods(reader):
@@ -262,7 +259,7 @@ def test_kind_key_is_the_predefined_name(reader):
     # а предопределённое имя из плана видов характеристик говорит всё.
     reader.chart_names = {KIND_1: "StatiZatrat", KIND_2: "RabotnikiOrganizatsij"}
 
-    reader.read_accounting_register(REG)
+    _read_with_subconto(reader)
 
     data = reader[REG].data
     assert data[EXT_DIMENSIONS_FIELDS['Dr']][0] == {
@@ -276,7 +273,7 @@ def test_kind_without_predefined_name_stays_a_guid(reader):
     # него остаётся Guid — это по-прежнему рабочий вариант, вид join-ится к плану видов.
     reader.chart_names = {KIND_2: "RabotnikiOrganizatsij"}
 
-    reader.read_accounting_register(REG)
+    _read_with_subconto(reader)
 
     assert list(reader[REG].data[EXT_DIMENSIONS_FIELDS['Dr']][0]) == [KIND_1]
 
@@ -286,7 +283,7 @@ def test_missing_chart_leaves_guids_and_warns(reader, caplog):
     reader.chart_names = None
 
     with caplog.at_level(logging.WARNING):
-        reader.read_accounting_register(REG)
+        _read_with_subconto(reader)
 
     assert list(reader[REG].data[EXT_DIMENSIONS_FIELDS['Dr']][0]) == [KIND_1]
     assert 'JSON keys stay GUIDs' in caplog.text
@@ -297,8 +294,7 @@ def test_chart_is_read_once_per_process(reader):
     # видов субконто за прогон не меняется.
     reader.chart_names = {KIND_1: "StatiZatrat"}
 
-    reader.read_accounting_register(REG)
-    reader.read_accounting_register(REG)
+    _read_with_subconto(reader, times=2)
 
     chart_calls = [u for u in reader.requested_urls if CHART in unquote(u)]
     assert len(chart_calls) == 2, 'проба адресом + чтение плана, и только на первом чтении'

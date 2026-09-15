@@ -1,8 +1,9 @@
 
 from datetime import datetime
 
+from sqlalchemy.exc import CompileError, DatabaseError, NoSuchTableError
 from sqlalchemy import (Engine, Index, JSON, MetaData, Table, Integer, Numeric,
-                        tuple_, select, or_, and_, exists)
+                        inspect, text, tuple_, select, or_, and_, exists)
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge, mergeResult
 
@@ -10,7 +11,7 @@ from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD, FULL_LOAD
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
 from onecdc.db_logs import create_index_if_absent
-from onecdc.name_mapper import NameMapper, fit_identifier_length
+from onecdc.name_mapper import NameMapper, _short_hash, fit_identifier_length
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -39,6 +40,52 @@ def save_order_key(object_name: str) -> int:
     return len(SAVE_ORDER_PREFIXES)
 
 
+# Типы, которые для нас одно и то же. VARCHAR/TEXT различаются в Postgres только объявлением, а
+# JSON/JSONB — наше собственное поднятие в save(). Всё остальное считаем разными типами: разрядность
+# целого тоже меняется не просто так, и запись большого значения в узкую колонку либо падает, либо
+# молча теряет дробную часть (NUMERIC → BIGINT Postgres округляет при вставке).
+TYPE_EQUIVALENTS = {'TEXT': 'VARCHAR', 'JSON': 'JSONB'}
+# Постфикс отставленной в сторону колонки или таблицы (см. DBWriter._retype_changed_columns).
+RETIRED_SUFFIX = 'Old'
+
+
+def _type_name(dialect, type_) -> str | None:
+    """
+    Имя типа без длины и точности: VARCHAR(50) → VARCHAR, NUMERIC(15, 2) → NUMERIC.
+
+    Длину и точность отбрасываем НАМЕРЕННО. Сами мы их никогда не задаём (см. type_mapping —
+    все девять типов объявлены без ограничений), поэтому ограничение в колонке может стоять только
+    одно: то, которое поставил руками пользователь. Сужать своё поле — его право, и переименовывать
+    такую колонку было бы самоуправством.
+
+    None — тип, которого мы не знаем (пользователь завёл колонку своим типом, отражение вернуло
+    NullType). Тогда не трогаем ничего.
+    """
+    try:
+        compiled = dialect.type_compiler_instance.process(type_)
+    except (CompileError, AttributeError, TypeError):
+        return None
+    name = compiled.split('(')[0].strip().upper()
+    return TYPE_EQUIVALENTS.get(name, name)
+
+
+def _retired_name(base: str, salt: str, taken: set[str]) -> str:
+    """
+    Имя отставленного: `Имя_Old_хэш4`, уложенное в лимит длины и не совпадающее с занятыми.
+
+    Хэш нужен потому, что тип может поменяться и во второй раз: без него второе переименование
+    упёрлось бы в уже существующее имя. Считается он от старого типа, поэтому имя ещё и говорит,
+    что именно отставили. Совпало — подсаливаем и пробуем снова, как это делает реестр имён.
+    """
+    attempt = 0
+    while True:
+        digest = _short_hash(f'{base}:{salt}:{attempt}' if attempt else f'{base}:{salt}')
+        candidate = fit_identifier_length(f'{base}_{RETIRED_SUFFIX}_{digest}')
+        if candidate not in taken:
+            return candidate
+        attempt += 1
+
+
 class DBWriter:
     """
     Сохраняет объекты 1С (DataObject) в БД через dbmerge, по одному вызовом save().
@@ -58,7 +105,7 @@ class DBWriter:
     """
 
     def __init__(self, engine: Engine, name_mapper: NameMapper, schema: str | None = None,
-                 temp_schema: str | None = None, lease_guard=None):
+                 temp_schema: str | None = None, lease_guard=None, request_full_load=None):
         # Функция без аргументов, отдающая условие «объект всё ещё наш» (см. _still_ours), либо
         # None. Подставляет её тот, кто ведёт аренду, — writer про захваты ничего не знает.
         self.lease_guard = lease_guard
@@ -72,6 +119,11 @@ class DBWriter:
         # Таблицы, для которых индекс по merged_on уже обеспечен в этом процессе (чтобы не рефлексить
         # и не дёргать checkfirst на каждом save).
         self._indexed_tables: set[str] = set()
+        # Функция «этому объекту нужна полная выгрузка» либо None. Подставляет её тот, кто ведёт
+        # реестр объектов: writer знает про смену типа колонки, но не про план обмена.
+        self._request_full_load = request_full_load
+        # Таблицы, у которых состав типов уже сверен в этом процессе (см. _retype_changed_columns).
+        self._retyped_tables: set[str] = set()
 
     def save(self, object_name: str, data_object: DataObject,
              full_load_started_at: datetime | None = None,
@@ -135,6 +187,10 @@ class DBWriter:
         if self.engine.dialect.name in JSONB_DIALECTS:
             data_types = {col: JSONB() if isinstance(typ, JSON) and not isinstance(typ, JSONB)
                           else typ for col, typ in data_types.items()}
+
+        # Тип поля мог поменяться в 1С — сверяем ДО merge: dbmerge заводит недостающие колонки,
+        # но тип существующей не меняет, и запись упёрлась бы в несовместимость типов.
+        self._retype_changed_columns(table_name, object_name, data_types, key)
 
         object_key = metadata_obj.object_key
         started_at = full_load_started_at
@@ -325,6 +381,150 @@ class DBWriter:
         """Table-описание целевой таблицы по отражению из БД. Нужно тем, кто пишет в неё не через
         dbmerge, — например пометке пропавших строк полной выгрузки (см. full_load_keys)."""
         return Table(table_name, MetaData(), schema=self.schema, autoload_with=self.engine)
+
+    def _retype_changed_columns(self, table_name: str, object_name: str,
+                                data_types: dict, key: list[str]) -> None:
+        """
+        Тип поля поменялся в 1С — отставляем старое в сторону и даём dbmerge завести новое.
+
+        Без этого прогон просто падал бы: dbmerge заводит недостающие колонки, но тип существующей
+        не меняет никогда, и первая же запись упиралась бы в «column is of type uuid but expression
+        is of type character varying». Менять тип на месте нельзя и нам: в колонке лежат данные, и
+        привести их к новому типу может быть некому (текст → guid), а гадать за пользователя,
+        какие строки выбросить, библиотека не вправе.
+
+        Что именно отставляем, зависит от того, входит ли колонка в первичный ключ:
+
+        - **обычная колонка** — переименовывается в `Имя_Old_хэш4`, dbmerge заводит новую рядом;
+        - **колонка ключа** — переименовывается ТАБЛИЦА целиком.
+
+        Второе не придирка. Postgres тащит constraint за переименованием: колонка остаётся в
+        первичном ключе, а `PRIMARY KEY` подразумевает `NOT NULL` — новую в ключ никто не добавит,
+        старую больше никто не заполнит, и любая вставка упадёт по not-null (проверено). К тому же
+        после смены типа ключа старые строки всё равно неопознаваемы: сопоставить их с источником
+        нечем.
+
+        Дальше объекту заказывается полная выгрузка — она наполнит новое историей. Если заказ
+        выключен, данные всё равно потекут потоком изменений, просто без истории; поэтому WARNING,
+        а не ERROR, и в обоих случаях в сообщении стоит новое имя отставленного — иначе старые
+        значения потом не найти.
+
+        Сверка идёт один раз на таблицу за процесс: отражение стоит запроса, а save зовётся на
+        каждую страницу. Смена типа посреди прогона — случай исчезающий.
+        """
+        if table_name in self._retyped_tables:
+            return
+        self._retyped_tables.add(table_name)
+        inspector = inspect(self.engine)
+        if not inspector.has_table(table_name, schema=self.schema):
+            return                      # таблицы ещё нет — заведёт dbmerge, сверять нечего
+        dialect = self.engine.dialect
+        actual = {column['name']: column['type']
+                  for column in inspector.get_columns(table_name, schema=self.schema)}
+        changed = {}
+        for column, expected_type in data_types.items():
+            if column not in actual:
+                continue                # новой колонки ещё нет — это переезд состава, не типа
+            expected = _type_name(dialect, expected_type)
+            current = _type_name(dialect, actual[column])
+            if expected is None or current is None:
+                logger.warning("%s.%s: unknown column type, leaving it alone", table_name, column)
+                continue
+            if expected != current:
+                changed[column] = (current, expected)
+        if not changed:
+            return
+
+        key_changed = [column for column in changed if column in key]
+        if key_changed:
+            self._retire_table(table_name, object_name, changed, key_changed)
+        else:
+            self._retire_columns(table_name, object_name, changed, set(actual))
+        if self._request_full_load is not None:
+            self._request_full_load(object_name)
+
+    def _retire_columns(self, table_name: str, object_name: str, changed: dict,
+                        taken: set[str]) -> None:
+        """Отставляет обычные колонки: переименование, новую заведёт dbmerge."""
+        preparer = self.engine.dialect.identifier_preparer
+        full_name = preparer.format_table(Table(table_name, MetaData(), schema=self.schema))
+        for column, (current, expected) in changed.items():
+            retired = _retired_name(column, current, taken)
+            taken.add(retired)
+            with self.engine.begin() as conn:
+                conn.execute(text(f'ALTER TABLE {full_name} RENAME COLUMN '
+                                  f'{preparer.quote(column)} TO {preparer.quote(retired)}'))
+            logger.warning(
+                "%s: type of %s changed in 1C (%s -> %s). The old column was renamed to %s and is "
+                "no longer written; a new one will be created empty. A full load is requested to "
+                "fill it with history — without it the column fills from changes only",
+                table_name, column, current, expected, retired)
+
+    def _retire_table(self, table_name: str, object_name: str, changed: dict,
+                      key_changed: list[str]) -> None:
+        """Отставляет таблицу целиком: тип поменялся у колонки первичного ключа."""
+        preparer = self.engine.dialect.identifier_preparer
+        inspector = inspect(self.engine)
+        taken = set(inspector.get_table_names(schema=self.schema))
+        retired = _retired_name(table_name, ','.join(sorted(changed)), taken)
+        full_name = preparer.format_table(Table(table_name, MetaData(), schema=self.schema))
+        with self.engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE {full_name} RENAME TO {preparer.quote(retired)}'))
+        self._retire_indexes(table_name, retired)
+        logger.warning(
+            "%s: type of KEY column(s) %s changed in 1C (%s). Renaming the column is impossible — "
+            "a primary key column stays in the key and NOT NULL after a rename, and every insert "
+            "would fail. The whole table was renamed to %s and a new one will be created empty; "
+            "its old rows cannot be matched to the source anyway. A full load is requested to fill "
+            "the new table — without it it fills from changes only",
+            table_name, ', '.join(key_changed),
+            '; '.join(f'{c}: {old} -> {new}' for c, (old, new) in changed.items()), retired)
+
+    def _retire_indexes(self, table_name: str, retired: str) -> None:
+        """
+        Уводит за таблицей имена её индексов и первичного ключа.
+
+        Переименование таблицы их НЕ трогает: индекс `ix_<таблица>_merged_on` и constraint
+        `<таблица>_pkey` остаются под прежними именами, и новая таблица упирается в занятое имя
+        («relation already exists»). Имена индексов живут в одном пространстве имён с таблицами,
+        поэтому уводить их надо явно. У первичного ключа Postgres переименует вместе с индексом и
+        сам constraint.
+
+        Сбой здесь прогон не роняет: таблица уже переименована, данные целы, а занятое имя индекса
+        помешает разве что созданию нового — и об этом будет своя ошибка, по делу.
+        """
+        inspector = inspect(self.engine)
+        names = [index['name'] for index in inspector.get_indexes(retired, schema=self.schema)
+                 if index.get('name')]
+        primary = (inspector.get_pk_constraint(retired, schema=self.schema) or {}).get('name')
+        if primary:
+            names.append(primary)
+        preparer = self.engine.dialect.identifier_preparer
+        schema_prefix = f'{preparer.quote_schema(self.schema)}.' if self.schema else ''
+        # Имена индексов живут в одном пространстве с таблицами, поэтому занятыми считаем и те,
+        # и другие. Проверка обязательна: совпади имя — переименование упадёт, а create_index_if_absent
+        # увидит существующий индекс СТАРОЙ таблицы, решит, что всё сделано, и новая осталась бы
+        # без индекса по merged_on. Молча и с тихо просевшими обработчиками.
+        taken = set(inspector.get_table_names(schema=self.schema))
+        for table in taken.copy():
+            taken.update(index['name'] for index
+                         in inspector.get_indexes(table, schema=self.schema) if index.get('name'))
+        for name in names:
+            # Имя индекса выводится из имени таблицы, поэтому подстановка даёт и читаемость —
+            # сразу видно, чьим индексом он был.
+            derived = (name.replace(table_name, retired, 1) if table_name in name
+                       else f'{retired}_{name}')
+            new_name = fit_identifier_length(derived)
+            if new_name in taken:
+                new_name = _retired_name(name, retired, taken)
+            taken.add(new_name)
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text(f'ALTER INDEX {schema_prefix}{preparer.quote(name)} '
+                                      f'RENAME TO {preparer.quote(new_name)}'))
+            except DatabaseError as error:
+                logger.warning("Could not rename index %s of the retired table %s: %s",
+                               name, retired, error)
 
     def _ensure_merged_on_index(self, table_name: str) -> None:
         """

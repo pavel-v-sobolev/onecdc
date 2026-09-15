@@ -108,7 +108,7 @@ PREDEFINED_NAME_FIELD = 'PredefinedDataName'
 EXT_DIMENSION_VALUE_KEY = 'value'
 EXT_DIMENSION_TYPE_KEY = 'type'
 # Числовые типы 1С. Нужны, чтобы согласовать два ответа платформы об одном и том же движении:
-# см. _ext_dimensions_record.
+# см. _ext_dimensions.
 NUMERIC_TYPES = ('Double', 'Int64', 'Int32', 'Int16')
 # Бюджет длины СЕГМЕНТА адреса, в который сводятся периоды одного запроса за субконто
 # (см. _ext_dimensions_chunk). Параметры функции 1С лежат в пути, и режет их http.sys своим
@@ -475,52 +475,13 @@ class DataReader(UserDict):
             if object_name.startswith(ACCOUNTING_REGISTER_TYPE):
                 self.fill_ext_dimensions(object_name)
 
-    def read_accounting_register(self, object_name: str, top: int | None = None,
-                                 after_period: datetime | None = None,
-                                 condition: str | None = None) -> int:
-        """
-        Читает СТРАНИЦУ регистра бухгалтерии из виртуальной таблицы RecordsWithExtDimensions —
-        движения вместе с субконто (в наборе записей субконто нет вовсе, см.
-        RECORDS_WITH_EXT_DIMENSIONS). Возвращает число прочитанных движений.
-
-        Страница здесь устроена иначе, чем у read_object, потому что у этой функции работают не
-        query-опции, а собственные параметры. Проверено на живой 1С:
-
-        | `$skip`                            | 400                                            |
-        | `$orderby` и параметр `Order`      | **200 и молча проигнорированы** (порядок не тот)|
-        | `Top`, `Condition`                 | работают                                       |
-        | `Condition` по `Period` и `*_Key`  | работают, в том числе через `or`               |
-        | `Condition` по `Recorder` как guid | 500                                            |
-        | `Condition` по `Recorder` строкой  | **200 и НОЛЬ строк** (молча врёт)              |
-
-        Отсюда курсор: `Period gt <последний период>` плюс `Top`. Ни смещения, ни сортировки нет,
-        поэтому хвостовой неполный период отбрасывает вызывающий (см. Replicator._load_pages) —
-        иначе движения одной секунды разорвались бы между страницами.
-
-        condition — дополнительное условие (диапазон дат), объединяется с курсором по AND.
-        """
-        terms = []
-        if after_period is not None:
-            terms.append(f"Period gt {_odata_literal(after_period, 'DateTime')}")
-        if condition:
-            terms.append(condition)
-        elements = self._request_ext_dimensions(object_name, ' and '.join(terms) or None, top)
-        self._ensure_ext_dimension_kinds(object_name, elements)
-
-        self.clear()
-        self._add_records(object_name, [self._ext_dimensions_record(object_name, element)
-                                        for element in elements])
-        logger.info('Read %s: %s records, %s', object_name, len(elements),
-                    format_bytes(self.last_response_bytes))
-        return len(elements)
-
     def fill_ext_dimensions(self, object_name: str) -> int:
         """
         Дочитывает субконто к уже разобранным движениям регистра бухгалтерии — для ПАКЕТА
         ИЗМЕНЕНИЙ, который приносит набор записей без аналитики. Возвращает число запросов в 1С.
 
         Адресно, по регистратору, субконто не спросить: `Condition` по `Recorder` отвечает 500, а
-        строковым литералом — 200 и ноль строк, то есть врёт молча (см. read_accounting_register).
+        строковым литералом — 200 и ноль строк, то есть врёт молча (см. _request_ext_dimensions).
         Зато период каждого движения известен из самого набора, а `Condition` по `Period` работает
         и понимает `or`. Поэтому спрашиваем периоды пакета (пачками, см.
         _ext_dimensions_chunk) и сшиваем ответ с движениями по паре
@@ -638,7 +599,26 @@ class DataReader(UserDict):
 
     def _request_ext_dimensions(self, object_name: str, condition: str | None,
                                 top: int | None) -> list:
-        """Запрос к RecordsWithExtDimensions; возвращает список элементов ответа (d:element)."""
+        """
+        Запрос к RecordsWithExtDimensions; возвращает список элементов ответа (d:element).
+
+        У этой таблицы работают не query-опции, а собственные параметры. Проверено на живой 1С:
+
+        | `$skip`                            | 400                                             |
+        | `$orderby` и параметр `Order`      | **200 и молча проигнорированы** (порядок не тот)|
+        | `Top`, `Condition`                 | работают                                        |
+        | `Condition` по `Period` и `*_Key`  | работают, в том числе через `or`                |
+        | `Condition` по `Recorder` как guid | 500                                             |
+        | `Condition` по `Recorder` строкой  | **200 и НОЛЬ строк** (молча врёт)               |
+
+        Отсюда и то, что читать её постранично НЕЛЬЗЯ: `Top` режет по СТРОКАМ, обрезая набор
+        регистратора посередине, и отдаёт произвольное подмножество выборки, а не её начало
+        (`Top=5` дал январь 2012, `Top=20` — июнь 2012 … март 2013). Единственная рабочая
+        адресация — перечисление периодов, чем и занят fill_ext_dimensions. Сам регистр читается
+        не отсюда, а обычным `$skip` по наборам записей.
+
+        Параметр top остаётся только для проб: боевой код передаёт None.
+        """
         # Слэш оставляем как есть: имя функции — сегмент пути, а не значение. Закодированный
         # %2F часть веб-серверов (IIS по умолчанию) отвергает, не доводя запрос до 1С.
         path = quote(f"{object_name}/{self._ext_dimensions_segment(condition, top)}",
@@ -659,24 +639,6 @@ class DataReader(UserDict):
         if not isinstance(recorder, str) or not isinstance(line_number, str):
             return None
         return self._convert_value(recorder, 'Guid'), self._convert_value(line_number, 'Int64')
-
-    def _ext_dimensions_record(self, object_name: str, element: dict) -> dict:
-        """
-        Движение из виртуальной таблицы: поля самого регистра разбираются как обычно, слоты
-        субконто сворачиваются в JSON.
-
-        Поля, которых в описании регистра нет, отбрасываем ЗДЕСЬ, а не в _get_record_fields:
-        виртуальная таблица шире движения (PointInTime, сами слоты), и без фильтра каждое такое
-        поле заводило бы в таблице лишнюю колонку и перечитывало метаданные.
-        """
-        metadata_obj = self.metadata[object_name]
-        properties = {k: v for k, v in element.items()
-                      if k.startswith('d:') and k.removeprefix('d:') in metadata_obj}
-        record = self._get_record_fields(properties, object_name)
-
-        self._zero_empty_numerics(object_name, record)
-        record.update(self._ext_dimensions(object_name, element))
-        return record
 
     def _zero_empty_numerics(self, object_name: str, record: dict) -> None:
         """

@@ -627,6 +627,24 @@ class MetadataReader(UserDict):
                 conn.execute(update(table).where(table.c.object_full_name == object_full_name)
                              .values(full_load_is_required=True))
 
+    def require_full_load(self, object_full_name: str) -> None:
+        """
+        Помечает объект как требующий полной выгрузки БЕЗУСЛОВНО — в отличие от
+        require_full_load_if_new, которая срабатывает только для ни разу не выгружавшихся.
+
+        Нужно там, где уже загруженные данные обесценились не по вине источника: колонка сменила
+        тип и старая отставлена в сторону, новая пуста (см. DBWriter._retype_changed_columns).
+        Заказ снимет сам прогон выгрузки, как и для нового объекта.
+        """
+        table = self.objects_table
+        if table is None:
+            logger.warning('Cannot request a full load of %s: object registry is not set up '
+                           '(no engine)', object_full_name)
+            return
+        with self.engine.begin() as conn:
+            conn.execute(update(table).where(table.c.object_full_name == object_full_name)
+                         .values(full_load_is_required=True))
+
     def was_fully_loaded(self, object_full_name: str) -> bool:
         """
         Выгружался ли объект целиком хоть раз (last_full_load_dt заполнен).
