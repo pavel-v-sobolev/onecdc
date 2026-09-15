@@ -150,4 +150,6 @@ def test_accounting_register_fields_are_classified_by_dr_cr_turnover():
     assert obj.resources == ["Summa", "CurrencySummaDr", "CurrencySummaCr"]
     # Recorder_Value — соседняя колонка для нессылочного значения составного типа
     # (COMPOSITE_VALUE_SUFFIX), к полям регистра отношения не имеет.
-    assert obj.attributes == ["Content", "Recorder_Value"]
+    # Recorder — составное поле, но соседней колонки у него нет: регистратором бывает только
+    # ссылка на документ, примитива там не бывает никогда.
+    assert obj.attributes == ["Content"]

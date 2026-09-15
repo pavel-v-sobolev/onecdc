@@ -9,7 +9,7 @@ import uuid
 
 import xmltodict
 
-from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_VALUE_SUFFIX,
+from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_GUID_SUFFIX,
                                     ENTITY_TYPES, EXT_DIMENSIONS_FIELDS, REGISTER_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, resolve_timeout)
 from onecdc.name_mapper import NameMapper
@@ -300,28 +300,31 @@ def _scalar_property_value(value: Any) -> tuple[bool, str | None]:
     return False, None
 
 
-def _composite_primitive_fields(raw: dict, metadata_obj) -> dict:
+def _composite_reference_fields(raw: dict, metadata_obj) -> set:
     """
-    Находит составные поля, в которых у ЭТОЙ записи лежит не ссылка, и отдаёт {поле: сырое значение}.
+    Составные поля, в которых у ЭТОЙ записи лежит ССЫЛКА (а не число, строка или дата).
 
     Тип конкретного значения приходит в парном <поле>_Type: у ссылок это имя объекта 1С, у
     примитивов — Edm.Double / Edm.String / Edm.DateTime и т.п. Метаданные OData объявляют само поле
     строкой и о составе типа не говорят ничего, поэтому решать приходится по каждой записи.
 
-    Такие значения уходят в соседнюю колонку <поле>_Value текстом, а в uuid-колонке остаётся NULL.
-    Почему не одной текстовой колонкой на всё: ссылки в ней перестали бы джойниться с ключами
-    других таблиц, а это основной сценарий. Почему не только uuid: непреобразуемое значение роняло
-    вставку всей пачки, и объект не грузился вовсе («Дополнительные реквизиты» с числом в Значение).
+    Само поле хранит значение КАК ПРИШЛО, текстом, всегда. Ссылка дополнительно кладётся в
+    соседнюю <поле>_Guid — по ней джойнятся ключи других таблиц, а это основной сценарий.
+
+    Почему не наоборот (uuid в самом поле, примитив в соседней колонке), как было раньше: тогда у
+    примитива в самом поле оставался NULL, а поле бывает и в первичном ключе — и две записи с
+    разными значениями получали один и тот же ключ, потому что NULL в ключе заменяется нулевым
+    guid. Дальше либо склейка, либо падение всей пачки на уникальном индексе.
     """
-    primitives = {}
+    references = set()
     for field_name, value in raw.items():
         if not field_name.endswith('_Type') or not isinstance(value, str):
             continue
         base_name = field_name.removesuffix('_Type')
-        if base_name in raw and base_name + COMPOSITE_VALUE_SUFFIX in metadata_obj.keys():
-            if value.startswith(EDM_TYPE_PREFIX):
-                primitives[base_name] = raw[base_name]
-    return primitives
+        if base_name in raw and base_name + COMPOSITE_GUID_SUFFIX in metadata_obj.keys():
+            if not value.startswith(EDM_TYPE_PREFIX):
+                references.add(base_name)
+    return references
 
 
 class DataReader(UserDict):
@@ -970,6 +973,28 @@ class DataReader(UserDict):
             return None
         return value
 
+    def _is_known_table_part(self, object_name: str | None, field_name: str) -> bool:
+        """
+        Свойство — это табличная часть владельца? Отвечают МЕТАДАННЫЕ, а не форма значения.
+
+        Форма ненадёжна. Опустевшую табличную часть 1С кодирует по-разному, и из четырёх известных
+        форм по значению узнаётся только одна — `<d:X m:type="Collection(...)"/>`. Остальные три
+        (`xsi:nil="true"`, `m:null="true"`, пустой элемент `<d:X/>`) неотличимы от пустого скаляра:
+        надгробие не ставилось, и ранее загруженные строки части оставались жить, а пустой элемент
+        после CDC-01 ещё и заводил владельцу лишнюю скалярную колонку.
+
+        А имя — признак твёрдый: табличные части 1С публикует отдельными объектами с именем
+        «владелец_ЧастьИмени», на этом же соглашении держится MetadataReader.owner_of. Если такой
+        объект в метаданных есть, свойство — табличная часть, как бы 1С ни записала пустоту.
+
+        Классификация по форме остаётся запасным путём: часть, которой в метаданных ещё нет
+        (появилась между их чтением и пакетом), узнаётся по `Collection(...)` как раньше.
+        """
+        if not object_name:
+            return False
+        part = self.metadata.get(f'{object_name}_{field_name}')
+        return part is not None and part.is_table_part
+
     def _get_record_fields(self, properties: dict, object_name: str | None = None) -> dict:
         if object_name not in self.metadata.keys():
             self.metadata.get_metadata()
@@ -985,17 +1010,19 @@ class DataReader(UserDict):
         for k, v in properties.items():
             if not k.startswith('d:'):
                 continue
+            field_name = k.removeprefix('d:')
+            if self._is_known_table_part(object_name, field_name):
+                continue          # это табличная часть, колонки у неё быть не должно
             is_scalar, value = _scalar_property_value(v)
             if not is_scalar:
                 continue
-            field_name = k.removeprefix('d:')
             # У поля _Type в значении полное имя типа ("StandardODATA.Catalog_Контрагенты");
             # префикс убираем, остаётся имя объекта 1С либо примитив вида Edm.Double.
             if field_name.endswith('_Type') and value is not None:
                 value = value.removeprefix(ODATA_PREFIX)
             raw[field_name] = value
 
-        primitives = _composite_primitive_fields(raw, metadata_obj)
+        references = _composite_reference_fields(raw, metadata_obj)
 
         fields = {}
         for field_name, value in raw.items():
@@ -1019,12 +1046,11 @@ class DataReader(UserDict):
                 # 'Edm.Double'. Распознавание примитива идёт по сырому значению (см. primitives).
                 value = value.removeprefix(EDM_TYPE_PREFIX)
 
-            if field_name in primitives:
-                # Не ссылка: в uuid-колонке ей места нет — значение уходит в соседнюю
-                # текстовую <поле>_Value как есть, здесь остаётся NULL.
-                fields[field_name + COMPOSITE_VALUE_SUFFIX] = value
-                fields[field_name] = None
-                continue
+            if field_name in references:
+                # Ссылка: кладём её ещё и в соседнюю uuid-колонку, чтобы по ней джойнились ключи
+                # других таблиц. Само поле остаётся текстом со значением как пришло — ниже.
+                fields[field_name + COMPOSITE_GUID_SUFFIX] = self._convert_value(
+                    value, 'Guid', context=f'{object_name}.{field_name}')
 
             converted = self._convert_value(value, type_name,
                                             context=f'{object_name}.{field_name}')
@@ -1048,12 +1074,12 @@ class DataReader(UserDict):
                 fields[key_field] = self._default_key_value(key_type)
 
         # Соседняя колонка составного поля заполняется у КАЖДОЙ записи, даже когда значение —
-        # ссылка и колонка остаётся пустой: иначе состав полей плавал бы от записи к записи.
+        # примитив и ссылки в нём нет: иначе состав полей плавал бы от записи к записи.
         for field_name in raw:
             if field_name.endswith('_Type'):
-                value_name = field_name.removesuffix('_Type') + COMPOSITE_VALUE_SUFFIX
-                if value_name in metadata_obj.keys():
-                    fields.setdefault(value_name, None)
+                guid_name = field_name.removesuffix('_Type') + COMPOSITE_GUID_SUFFIX
+                if guid_name in metadata_obj.keys():
+                    fields.setdefault(guid_name, None)
 
         # Спец-поле «строку не учитывать»: пометка удаления у документа/справочника либо
         # неактивная запись регистра. Active сравниваем именно с False: у объектов его нет вовсе,
@@ -1122,6 +1148,26 @@ class DataReader(UserDict):
             logger.error(f'No recorder field in empty record set of {object_name}')
             return None
         record.update(recorder_fields)
+
+        # Числовые ресурсы — ЯВНЫМ NULL, а не отсутствием поля.
+        #
+        # Это гасит суммы там, где набор опустел: во-первых у самой строки, на которую надгробие
+        # ляжет по ключу, во-вторых у остальных строк набора — DBWriter._resource_reset_values
+        # собирает список гашения из полей записи, и без них он выходил пустым. Раньше результат
+        # зависел от состава пакета: приехал рядом живой набор того же регистра — DataObject
+        # дополнял надгробие его колонками, и гашение срабатывало; приехало одно надгробие —
+        # суммы распроведённого документа оставались в таблице (CDC-23). А распроведение одного
+        # документа как раз и даёт пакет с единственным пустым набором.
+        #
+        # Именно NULL, не ноль. Для SUM они равнозначны, но COUNT ноль сосчитает, а AVG утянет
+        # вниз; и главное — в колонке ресурса NULL уже значит «строка погашена», а ноль значит
+        # «ресурс пуст» (см. _zero_empty_numerics). Поэтому выравнивание на ноль в эту ветку не
+        # заходит и заходить не должно: оно склеило бы два разных факта.
+        #
+        # Строковые ресурсы не трогаем — суммировать их некому, а NULL стёр бы содержимое.
+        for resource in metadata_obj.resources:
+            if metadata_obj.get(resource) in NUMERIC_TYPES:
+                record[resource] = None
 
         record[IS_DELETED_OR_EMPTY_FIELD] = True
         record[EXCHANGE_MESSAGE_NO_FIELD] = self.exchange_message_no
@@ -1203,23 +1249,31 @@ class DataReader(UserDict):
 
         self._add_records(object_name, new_records)
 
-    def _get_record_table_parts(self, properties):
+    def _get_record_table_parts(self, properties, object_name: str | None = None):
         """
-        Ищем табличные части в свойствах объекта: всё, что не разобрал _scalar_property_value.
+        Ищем табличные части в свойствах объекта: сначала по метаданным (см. _is_known_table_part),
+        и только потом — по форме значения, для частей, которых в метаданных ещё нет.
 
-        Раньше условие было «любой dict, кроме xsi:nil». Классификатор общий с _get_record_fields —
-        чтобы одно и то же свойство не попало разом и в колонку, и в табличную часть: скаляр с
-        явным типом (<d:Цена m:type="Edm.Double">1.5</d:Цена>) в xmltodict тоже dict.
+        Классификатор формы общий с _get_record_fields — чтобы одно и то же свойство не попало
+        разом и в колонку, и в табличную часть: скаляр с явным типом
+        (<d:Цена m:type="Edm.Double">1.5</d:Цена>) в xmltodict тоже dict.
         """
         table_parts = {}
         for k, v in properties.items():
-            if not k.startswith('d:') or not isinstance(v, dict):
+            if not k.startswith('d:'):
                 continue
-            if v.get('@xsi:nil') == 'true':
+            field_name = k.removeprefix('d:')
+            if self._is_known_table_part(object_name, field_name):
+                # Пустоту 1С кодирует четырьмя способами, и в трёх из них значение — не словарь
+                # либо словарь без @m:type. Приводим к общему виду: строк нет, а имя объекта
+                # выводится из имени владельца (см. _get_entity_records).
+                table_parts[field_name] = v if isinstance(v, dict) else {}
+                continue
+            if not isinstance(v, dict) or v.get('@xsi:nil') == 'true':
                 continue
             is_scalar, _ = _scalar_property_value(v)
             if not is_scalar:
-                table_parts[k.removeprefix('d:')] = v
+                table_parts[field_name] = v
         return table_parts
 
     def _get_entity_records(self, object_name: str, properties: dict):
@@ -1235,27 +1289,31 @@ class DataReader(UserDict):
         # Пометку удаления документа/справочника распространяем на его табличные части.
         parent_deleted = fields.get(IS_DELETED_OR_EMPTY_FIELD)
 
-        table_parts = self._get_record_table_parts(properties)
+        table_parts = self._get_record_table_parts(properties, object_name)
 
         for table_part_key, table_part in table_parts.items():
             table_part_full_name = table_part.get('@m:type')
             if table_part_full_name:
                 table_part_name, _ = parse_object_full_name(table_part_full_name)
-                table_part_rows = table_part.get('d:element') or []
-                if table_part_rows:
-                    for table_part_row in table_part_rows:
-                        row = self._get_record_fields(table_part_row, table_part_name)
-                        row['Ref_Key'] = ref_key
-                        row[IS_DELETED_OR_EMPTY_FIELD] = parent_deleted
-                        self._add_records(table_part_name, [row])
-                else:
-                    # Табличная часть пришла без строк — добавляем фиктивную запись,
-                    # чтобы scoped-удаление по Ref_Key убрало ранее сохраненные строки.
-                    ref_key = fields.get('Ref_Key')
-                    if ref_key is not None and table_part_name in self.metadata.keys():
-                        self._add_records(table_part_name,
-                                          [self._make_empty_table_part_record(table_part_name, ref_key)])
+            else:
+                # @m:type у ОПУСТЕВШЕЙ части 1С указывает не всегда — имя выводим из имени
+                # владельца. Сюда доходят только части, подтверждённые метаданными
+                # (см. _is_known_table_part), поэтому имя заведомо верное.
+                table_part_name = f'{object_name}_{table_part_key}'
 
-                # Связываем объект-ТЧ с владельцем — чтобы to_nested_records нашёл его сам.
-                if table_part_name in self:
-                    self[object_name].table_parts[table_part_key] = self[table_part_name]
+            table_part_rows = table_part.get('d:element') or []
+            if table_part_rows:
+                for table_part_row in table_part_rows:
+                    row = self._get_record_fields(table_part_row, table_part_name)
+                    row['Ref_Key'] = ref_key
+                    row[IS_DELETED_OR_EMPTY_FIELD] = parent_deleted
+                    self._add_records(table_part_name, [row])
+            elif ref_key is not None and table_part_name in self.metadata.keys():
+                # Табличная часть пришла без строк — добавляем фиктивную запись, чтобы
+                # scoped-удаление по Ref_Key убрало ранее сохранённые строки.
+                self._add_records(table_part_name,
+                                  [self._make_empty_table_part_record(table_part_name, ref_key)])
+
+            # Связываем объект-ТЧ с владельцем — чтобы to_nested_records нашёл его сам.
+            if table_part_name in self:
+                self[object_name].table_parts[table_part_key] = self[table_part_name]
