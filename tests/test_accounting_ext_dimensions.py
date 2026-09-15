@@ -302,3 +302,80 @@ def test_chart_is_read_once_per_process(reader):
 
     chart_calls = [u for u in reader.requested_urls if CHART in unquote(u)]
     assert len(chart_calls) == 2, 'проба адресом + чтение плана, и только на первом чтении'
+
+
+# --- Субконто как опция ---
+
+def _record_set_feed() -> str:
+    """Ответ 1С на чтение НАБОРА ЗАПИСЕЙ регистра: движения внутри d:RecordSet, субконто в них нет."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices"
+          xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+      <entry>
+      <category term="StandardODATA.{REG}"/>
+      <content><m:properties>
+        <d:Recorder>{REC}</d:Recorder>
+        <d:Recorder_Type>StandardODATA.Document_AvansovyjOtchet</d:Recorder_Type>
+        <d:RecordSet m:type="Collection(StandardODATA.{REG}_RecordType)">
+          <d:element>
+            <d:LineNumber>1</d:LineNumber>
+            <d:Period>2013-01-14T12:00:01</d:Period>
+            <d:AccountDr_Key>51817a38-e8d9-4e9b-a6d8-ae22629ba12c</d:AccountDr_Key>
+            <d:Summa>1650</d:Summa>
+            <d:KolichestvoDr m:null="true"/>
+          </d:element>
+        </d:RecordSet>
+      </m:properties></content></entry>
+    </feed>"""
+
+
+def test_subconto_are_not_read_by_default(reader):
+    """
+    По умолчанию субконто НЕ читаются: чтение регистра — один запрос, к виртуальной таблице не
+    ходим вовсе.
+
+    Так решено потому, что дёшево её читать нельзя: `$skip` она не поддерживает, а `Top` режет по
+    строкам, обрезая набор регистратора посередине, и отдаёт произвольное подмножество (проверено
+    на живой 1С). Остаётся перечислять периоды — на большом регистре это много запросов.
+    """
+    reader.response_text = _record_set_feed()
+    assert reader.read_subconto is False, 'умолчание должно быть «не читать»'
+
+    reader.read_object(REG, key_fields=["Recorder"])
+
+    assert _ext_urls(reader) == [], 'к виртуальной таблице ходить не должны'
+    assert "ExtDimensionsDr" not in reader[REG].data, 'колонок субконто быть не должно'
+
+
+def test_subconto_are_read_when_asked(reader):
+    # Та же страница, но с включённой опцией: субконто добираются вторым запросом по периодам.
+    reader.read_subconto = True
+    reader.chart_names = {KIND_1: "StatiZatrat"}
+    reader.response_queue = [(200, _record_set_feed()), (200, _result(_element()))]
+
+    reader.read_object(REG, key_fields=["Recorder"])
+
+    assert _ext_urls(reader), 'виртуальную таблицу обязаны спросить'
+    assert reader[REG].data["ExtDimensionsDr"][0] == {
+        "StatiZatrat": {"value": VALUE_1, "type": "Catalog_StatiZatrat"}}
+
+
+def test_an_empty_numeric_of_a_record_set_becomes_zero(reader):
+    """
+    Пустой ресурс регистра — это НОЛЬ, а не NULL, и в наборе записей тоже.
+
+    1С отдаёт незаполненное число элементом `<d:KolichestvoDr m:null="true"/>`, а такую форму
+    разобрать однозначно нельзя — поле из записи выпадает. Раньше выравнивание на ноль стояло
+    только на пути виртуальной таблицы, и комментарий рядом утверждал, что набор записей отдаёт
+    ноль сам. Измерение на живой 1С показало обратное: `m:null` приходит из ОБОИХ источников.
+    Значит пакет изменений писал NULL, полная выгрузка — ноль, и при работающем CDC они
+    переписывали бы строку по очереди без конца.
+
+    NULL в колонке ресурса занят другим смыслом — им помечается погашенная строка.
+    """
+    reader.response_text = _record_set_feed()
+
+    reader.read_object(REG, key_fields=["Recorder"])
+
+    assert reader[REG].data["KolichestvoDr"] == [0]

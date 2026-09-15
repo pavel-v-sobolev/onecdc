@@ -3,7 +3,7 @@ import requests
 import xmltodict
 
 from onecdc.data_reader import DataReader
-from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, resolve_timeout
+from onecdc.metadata_reader import MetadataReader, resolve_timeout
 from onecdc.common_functions import format_bytes, parse_odata, raise_for_status
 from onecdc.logging_config import get_logger
 
@@ -18,8 +18,9 @@ NOTIFY_TIMEOUT: tuple[float, float] = (30, 30)
 class ChangeReader(DataReader):
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
                  metadata: MetadataReader, odata_auth: tuple[str, str] | None = None,
-                 request_timeout: float | None = None):
-        super().__init__(odata_url, metadata, odata_auth, request_timeout)
+                 request_timeout: float | None = None, read_subconto: bool = False):
+        super().__init__(odata_url, metadata, odata_auth, request_timeout,
+                         read_subconto=read_subconto)
         self.exchange_name = exchange_name
         self.queue_guid = queue_guid
         self.message_no = 0
@@ -53,11 +54,9 @@ class ChangeReader(DataReader):
         self.entries_read = len(change_entries)
         parsed = self.read_data_entries(change_entries)
         # Пакет приносит набор записей регистра бухгалтерии БЕЗ субконто (их нет в описании
-        # движения вовсе) — дочитываем их отдельным запросом по периодам пакета, иначе колонки
-        # приехали бы пустыми и затёрли аналитику, полученную полной выгрузкой.
-        for object_name in list(self.keys()):
-            if object_name.startswith(ACCOUNTING_REGISTER_TYPE):
-                self.fill_ext_dimensions(object_name)
+        # движения вовсе) — дочитываем их отдельным запросом по периодам пакета, если чтение
+        # субконто включено (см. DataReader._fill_subconto).
+        self._fill_subconto()
         # Одна строка на пакет: что пришло, сколько строк и сколько весил ответ. Раньше лог писался
         # на каждую entry, и один пакет давал сотни одинаковых строк.
         logger.info("Read changes (message %s): %s entries, %s rows, %s%s",

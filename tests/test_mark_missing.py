@@ -46,7 +46,9 @@ def _record(**fields):
 def _pages(rep, object_name, monkeypatch, pages, recheck_answer=None):
     """
     Подменяет чтение страниц: pages — список списков записей, по одной странице на вызов.
-    recheck_answer — что 1С отвечает на перепроверку по ключу (запрос без пагинации).
+
+    recheck_answer оставлен ради одного: в calls["recheck"] копятся запросы БЕЗ $top, то есть те,
+    которыми шла перепроверка кандидатов. Она убрана, и тесты проверяют, что таких запросов нет.
     """
     meta = rep.metadata[object_name]
     remaining = list(pages)
@@ -164,33 +166,53 @@ def test_row_written_during_the_run_is_not_marked(db, monkeypatch):
     assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is False
 
 
-def test_candidate_still_in_1c_survives_recheck(db, monkeypatch):
-    # Выгрузка за период: строки может не быть в окне, потому что у неё изменилась дата, а не
-    # потому что её удалили. Перед пометкой кандидат перепроверяется запросом по ключу.
+def test_a_row_that_moved_out_of_the_period_is_marked_anyway(db, monkeypatch):
+    """
+    Строка, уехавшая за пределы прочитанного, помечается удалённой — и это ОЖИДАЕМОЕ поведение.
+
+    Раньше кандидатов переспрашивали в 1С по ключу. Спросить так можно только прямым адресом, а
+    ответ «такого нет» приходит кодом 404 — и отличить его от отказа инфраструктуры можно лишь по
+    телу ответа, которое веб-сервер волен подменить своей страницей (IIS так и делает по
+    умолчанию). То есть правильность пометки зависела от настройки публикации, а на регистре по
+    регистратору обходного пути нет вовсе: составной Recorder не фильтруется ничем.
+
+    Поэтому переспрашивать перестали. Пометка снимается сама, когда строка приедет изменением
+    (см. соседний тест) либо следующей выгрузкой её нового периода.
+    """
     rep = _replicator(db)
     _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
     rep.full_load(CATALOG, batch_size=10)
 
-    calls = _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]],
-                   recheck_answer=[_record(Ref_Key="b", Val="2")])
-    rep.full_load(CATALOG, batch_size=10, mark_missing=True,
-                  date_field="Date", date_from=date(2026, 6, 1))
-
-    assert calls["recheck"], "перепроверка не выполнялась"
-    assert "Ref_Key eq 'b'" in calls["recheck"][0]
-    assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is False
-
-
-def test_candidate_absent_in_1c_is_marked_after_recheck(db, monkeypatch):
-    rep = _replicator(db)
-    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
-    rep.full_load(CATALOG, batch_size=10)
-
-    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]], recheck_answer=[])
+    # Строка b жива в 1С, но уехала из читаемого периода — прогон её не видит.
+    calls = _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
     rep.full_load(CATALOG, batch_size=10, mark_missing=True,
                   date_field="Date", date_from=date(2026, 6, 1))
 
     assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is True
+    assert calls["recheck"] == [], 'запросов на перепроверку быть не должно'
+
+
+def test_the_mark_is_lifted_when_the_row_arrives_with_changes(db, monkeypatch):
+    """
+    Обратная сторона отказа от перепроверки: ложная пометка обязана сниматься сама.
+
+    На этом обещании всё и держится — объект, уехавший в другой период, это ЗАПИСЬ объекта в 1С,
+    а значит регистрация в плане обмена и пакет изменений. Приехав, он перезаписывает строку, и
+    пометка уходит вместе с остальными значениями.
+    """
+    rep = _replicator(db)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
+    rep.full_load(CATALOG, batch_size=10)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+    rep.full_load(CATALOG, batch_size=10, mark_missing=True,
+                  date_field="Date", date_from=date(2026, 6, 1))
+    assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is True
+
+    # Тот же объект приезжает изменением (номер пакета >= 1, как у потока изменений).
+    rep.writer.save(CATALOG, DataObject(rep.metadata[CATALOG],
+                                        [_record(Ref_Key="b", Val="2", exchange_message_no=7)]))
+
+    assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is False, 'пометка не снялась'
 
 
 def test_independent_register_row_is_marked_and_resource_reset(db, monkeypatch):
@@ -230,162 +252,3 @@ def test_empty_object_without_table_is_not_a_failure(db, monkeypatch):
     assert rep.full_load(CATALOG, batch_size=10, mark_missing=True) == 0
 
 
-def test_recheck_batches_by_query_length_not_key_count(db, monkeypatch):
-    """
-    Пачка перепроверки набирается по ДЛИНЕ строки запроса, а не по числу ключей: ограничивает её
-    веб-сервер перед 1С (IIS по умолчанию — 2048 байт на query string), и меряет он байты.
-
-    Раньше здесь стояло фиксированное «20 ключей на запрос», и на составном ключе с длинным
-    кириллическим значением двадцать ключей давали query string за 2048 байт: IIS отвечал 404.15
-    «Query String Too Long», и перепроверка падала целиком.
-    """
-    from urllib.parse import quote
-    from onecdc.replicator import RECHECK_MAX_QUERY_BYTES, RECHECK_QUERY_RESERVE_BYTES
-
-    rep = _replicator(db)
-    budget = RECHECK_MAX_QUERY_BYTES - RECHECK_QUERY_RESERVE_BYTES
-    assert rep._recheck_query_budget == budget
-
-    # Ключ регистра составной, и значение длинное — как имя типа регистратора в реальной базе.
-    long_value = "Документ_РеализацияТоваровУслуг_ДлинноеИмя"
-    candidates = [{"Period": f"2026-01-{i:02d}", "Sklad": long_value} for i in range(1, 41)]
-    sent = []
-    monkeypatch.setattr(DataReader, "read_object",
-                        lambda self, name, extra_filter=None, **kw: (sent.append(extra_filter), 0)[1])
-
-    rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
-
-    assert len(sent) > 1, 'сорок таких ключей обязаны разойтись по нескольким запросам'
-    for flt in sent:
-        encoded = len(quote(flt, safe="':"))
-        assert encoded <= budget or flt.count(' or ') == 0, \
-            f'закодированная длина {encoded} превысила бюджет {budget}'
-    # Ключи не потерялись и не продублировались.
-    assert sum(flt.count('(') for flt in sent) == len(candidates)
-
-
-def test_recheck_lowers_the_budget_when_the_server_refuses(db, monkeypatch):
-    """
-    Страховка: лимит веб-сервера оказался ниже умолчания. Получив 404.15 (так его отдаёт IIS) или
-    414, перепроверка опускает бюджет и повторяет ТУ ЖЕ пачку, а не теряет её.
-    """
-    import requests
-    from onecdc.replicator import RECHECK_BUDGET_DIVISOR
-
-    rep = _replicator(db)
-    before = rep._recheck_query_budget
-    candidates = [{"Period": f"2026-01-{i:02d}", "Sklad": "S" * 200} for i in range(1, 11)]
-    sent = []
-
-    class _Resp:
-        status_code = 404
-        text = 'Ошибка IIS 10.0 — 404.15 — Query String Too Long'
-
-    def fake_read_object(self, name, extra_filter=None, **kw):
-        sent.append(extra_filter)
-        # Отказываем только первой (самой длинной) пачке.
-        if len(sent) == 1:
-            raise requests.HTTPError('too long', response=_Resp())
-        return 0
-
-    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
-    rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
-
-    assert rep._recheck_query_budget == before // RECHECK_BUDGET_DIVISOR, 'бюджет обязан опуститься'
-    assert len(sent[1]) < len(sent[0]), 'та же пачка пересобрана короче'
-    # Ни один ключ не потерян: суммарно отправлено ровно столько условий, сколько кандидатов.
-    assert sum(flt.count('(') for flt in sent[1:]) == len(candidates)
-
-
-def test_recheck_does_not_mistake_a_real_404_for_a_long_query(db, monkeypatch):
-    """
-    IIS отдаёт «слишком длинно» обычным 404, поэтому по одному коду его не отличить от опечатки в
-    имени объекта. Без приметы в теле 404 обязан пробрасываться, а не запускать деление бюджета.
-    """
-    import requests
-
-    rep = _replicator(db)
-    before = rep._recheck_query_budget
-    candidates = [{"Period": f"2026-01-{i:02d}", "Sklad": "S" * 200} for i in range(1, 11)]
-
-    class _Resp:
-        status_code = 404
-        text = '<m:error><m:message>Ресурс не найден</m:message></m:error>'
-
-    def fake_read_object(self, name, extra_filter=None, **kw):
-        raise requests.HTTPError('not found', response=_Resp())
-
-    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
-    with pytest.raises(requests.HTTPError):
-        rep._still_in_1c(REGISTER, candidates, DataReader("http://x", rep.metadata))
-    assert rep._recheck_query_budget == before, 'настоящий 404 бюджет трогать не должен'
-
-
-def test_recheck_of_a_record_set_register_asks_by_recorder_only(db, monkeypatch):
-    """
-    У регистра, подчинённого регистратору, перепроверять пачками через $filter нельзя ничем:
-    `LineNumber` лежит внутри RecordSet (400 «Сегмент пути LineNumber не найден!»), `Recorder eq
-    guid'…'` даёт 500 «Нельзя сравнивать поля неограниченной длины», а `Recorder eq '…'` строкой
-    отвечает 200 и НОЛЬ строк — то есть молча врёт, и перепроверка пометила бы удалённым весь
-    регистр.
-
-    Поэтому спрашиваем про НАБОР прямым адресом, по одному запросу на регистратора: набор и есть
-    та единица, которая либо существует, либо нет. Один регистратор — один запрос, сколько бы его
-    строк ни было в кандидатах, а имя типа в адресе пишется с префиксом StandardODATA.
-    """
-    from onecdc.metadata_reader import MetadataObject
-
-    rep = _replicator(db)
-    name = "AccumulationRegister_R"
-    rep.metadata[name] = MetadataObject(
-        name, {"Recorder": "String", "Recorder_Type": "String", "LineNumber": "Int64"},
-        {"Recorder": "String", "LineNumber": "Int64", "Recorder_Type": "String"},
-        object_key=["Recorder", "Recorder_Type"])
-
-    # Два регистратора, у каждого по три строки.
-    candidates = [{"Recorder": rec, "Recorder_Type": "Document_X", "LineNumber": n}
-                  for rec in ("r-1", "r-2") for n in (1, 2, 3)]
-    asked = []
-    monkeypatch.setattr(DataReader, "read_by_key",
-                        lambda self, name, key_values: (asked.append(key_values), 0)[1])
-    # $filter-путь для такого объекта не должен использоваться вовсе.
-    monkeypatch.setattr(DataReader, "read_object",
-                        lambda *a, **k: pytest.fail("перепроверка набора обязана идти по ключу"))
-
-    rep._still_in_1c(name, candidates, DataReader("http://x", rep.metadata))
-
-    assert len(asked) == 2, 'каждый регистратор спрашивается ровно один раз'
-    assert [k["Recorder"] for k in asked] == ["r-1", "r-2"]
-    assert all(k["Recorder_Type"] == "StandardODATA.Document_X" for k in asked), \
-        'в адресе имя типа обязано быть с префиксом'
-    assert all("LineNumber" not in k for k in asked), 'по LineNumber спрашивать нельзя'
-
-
-def test_recheck_keeps_the_namespace_of_an_unavailable_recorder_type(db, monkeypatch):
-    """
-    Регистратором может быть документ, НЕ опубликованный в этом интерфейсе OData: его тип приходит
-    со своим пространством имён — `UnavailableEntities.UnavailableEntity_<guid>`. Обычному типу в
-    адресе надо вернуть снятый `StandardODATA.`, а этому — нельзя: с ним 1С отвечает 400
-    «Недопустимое значение … для свойства составного типа». Отличаем по точке: в имени объекта 1С
-    её нет.
-    """
-    from onecdc.metadata_reader import MetadataObject
-
-    rep = _replicator(db)
-    name = "AccumulationRegister_R"
-    rep.metadata[name] = MetadataObject(
-        name, {"Recorder": "String", "Recorder_Type": "String", "LineNumber": "Int64"},
-        {"Recorder": "String", "LineNumber": "Int64", "Recorder_Type": "String"},
-        object_key=["Recorder", "Recorder_Type"])
-
-    unavailable = "UnavailableEntities.UnavailableEntity_767d0764-f1b6-4eb3-a430-24b3ea7175ef"
-    candidates = [{"Recorder": "r-1", "Recorder_Type": "Document_X", "LineNumber": 1},
-                  {"Recorder": "r-2", "Recorder_Type": unavailable, "LineNumber": 1}]
-    asked = []
-    monkeypatch.setattr(DataReader, "read_by_key",
-                        lambda self, name, key_values: (asked.append(key_values), 0)[1])
-
-    rep._still_in_1c(name, candidates, DataReader("http://x", rep.metadata))
-
-    assert asked[0]["Recorder_Type"] == "StandardODATA.Document_X", 'обычному типу префикс нужен'
-    assert asked[1]["Recorder_Type"] == unavailable, 'у недоступной сущности своё пространство имён'

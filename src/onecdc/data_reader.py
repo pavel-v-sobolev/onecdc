@@ -327,12 +327,15 @@ def _composite_primitive_fields(raw: dict, metadata_obj) -> dict:
 class DataReader(UserDict):
     def __init__(self, odata_url: str, metadata: MetadataReader,
                  odata_auth: tuple[str, str] | None = None,
-                 request_timeout: float | None = None):
+                 request_timeout: float | None = None,
+                 read_subconto: bool = False):
         super().__init__()
         self.odata_url = odata_url
         self.metadata = metadata
         self.odata_auth = odata_auth
         self.request_timeout = request_timeout
+        # Читать ли субконто регистра бухгалтерии (см. _fill_subconto). По умолчанию НЕТ.
+        self.read_subconto = read_subconto
         # номер пакета обмена, проставляется в записи при чтении изменений
         self.exchange_message_no = None  
 
@@ -443,9 +446,34 @@ class DataReader(UserDict):
 
         self.clear()
         self.read_data_entries(object_entries)
+        self._fill_subconto()
         logger.info('Read %s: %s entries, %s rows, %s', object_name, len(object_entries),
                     self.rows_read(), format_bytes(self.last_response_bytes))
         return len(object_entries)
+
+    def _fill_subconto(self) -> None:
+        """
+        Дочитывает субконто прочитанным движениям регистра бухгалтерии — если это включено.
+
+        В описании движения (`_RecordType`) субконто нет вовсе: они живут только в виртуальной
+        таблице RecordsWithExtDimensions. Поэтому и пакет изменений, и страница полной выгрузки
+        приносят движения БЕЗ аналитики, и её приходится добирать отдельным запросом.
+
+        По умолчанию выключено, и это осознанно. У виртуальной таблицы нет ни `$skip`, ни
+        работающего `Top` (он режет по строкам, обрезая набор посередине, и отдаёт произвольное
+        подмножество — проверено на живой 1С), поэтому единственный способ её адресовать —
+        перечислять периоды. На большом регистре это много запросов, и цена растёт с объёмом.
+        Аналитику того же движения обычно проще взять из его документа-регистратора, чем разбирать
+        JSON-колонку субконто.
+
+        Один вход на оба пути чтения: и read_changes, и read_object зовут это, чтобы «включено»
+        значило одно и то же везде.
+        """
+        if not self.read_subconto:
+            return
+        for object_name in list(self.keys()):
+            if object_name.startswith(ACCOUNTING_REGISTER_TYPE):
+                self.fill_ext_dimensions(object_name)
 
     def read_accounting_register(self, object_name: str, top: int | None = None,
                                  after_period: datetime | None = None,
@@ -646,21 +674,37 @@ class DataReader(UserDict):
                       if k.startswith('d:') and k.removeprefix('d:') in metadata_obj}
         record = self._get_record_fields(properties, object_name)
 
-        # Незаполненное числовое поле платформа отдаёт ПО-РАЗНОМУ, смотря откуда его читать: в
-        # наборе записей это <d:КоличествоDr>0</d:КоличествоDr>, в виртуальной таблице —
-        # <d:КоличествоDr m:null="true"/>. Проверено на одном и том же движении. Разница не
-        # безобидна: пакет изменений приходит набором записей, полная выгрузка — виртуальной
-        # таблицей, и без выравнивания они переписывали бы друг друга вечно — каждый прогон
-        # отчитывался бы изменёнными строками, хотя в 1С ничего не менялось.
-        # Выравниваем на НУЛЕ, а не на NULL: у ресурса регистра пустого значения не бывает вовсе,
-        # пустой ресурс в 1С — это ноль, и набор записей говорит ровно это. NULL в этих колонках
-        # остаётся признаком погашенной строки (см. DBWriter._resource_reset_values).
+        self._zero_empty_numerics(object_name, record)
+        record.update(self._ext_dimensions(object_name, element))
+        return record
+
+    def _zero_empty_numerics(self, object_name: str, record: dict) -> None:
+        """
+        Пустое числовое поле записи регистра выравнивает на НОЛЬ, а не на NULL.
+
+        Незаполненное число 1С отдаёт элементом `<d:КоличествоDr m:null="true"/>`, а разобрать
+        такую форму однозначно нельзя: по значению пустой скаляр неотличим от пустой табличной
+        части (см. _scalar_property_value), поэтому поле из записи просто выпадает — и в колонку
+        легла бы NULL.
+
+        Для регистра это неверно: пустого значения у ресурса не бывает вовсе, пустой ресурс в 1С —
+        это ноль. А NULL в этих колонках занят: им помечается ПОГАШЕННАЯ строка
+        (DBWriter._resource_reset_values), и путать два разных факта в одной колонке нельзя.
+
+        Выравнивать надо на ОБОИХ путях чтения. Проверено на живой 1С (демо БП, 15.09.2026): и
+        набор записей, и виртуальная таблица отдают `m:null` для одних и тех же полей
+        (`ВалютнаяСумма*`, `Количество*`) и ноль — для других (`СуммаВР*`, `СуммаПР*`). Раньше
+        выравнивание стояло только на пути виртуальной таблицы, а комментарий рядом утверждал, что
+        набор записей отдаёт ноль сам. Это неверно: пакет изменений писал NULL, полная выгрузка —
+        ноль, и при работающем CDC они переписывали бы друг друга вечно, а самопроверка «выгрузка
+        должна вернуть 0» ничего бы не значила.
+        """
+        metadata_obj = self.metadata.get(object_name)
+        if metadata_obj is None:
+            return
         for field, type_name in metadata_obj.items():
             if type_name in NUMERIC_TYPES and record.get(field) is None:
                 record[field] = 0
-
-        record.update(self._ext_dimensions(object_name, element))
-        return record
 
     def _ensure_ext_dimension_kinds(self, object_name: str, elements: list) -> None:
         """
@@ -1171,7 +1215,9 @@ class DataReader(UserDict):
         """
         if RECORD_SET_FIELD not in properties:
             # Независимый регистр сведений: одна плоская запись, поля прямо в properties.
-            self._add_records(object_name, [self._get_record_fields(properties, object_name)])
+            record = self._get_record_fields(properties, object_name)
+            self._zero_empty_numerics(object_name, record)
+            self._add_records(object_name, [record])
             return
 
         record_set = properties.get(RECORD_SET_FIELD)
@@ -1186,6 +1232,7 @@ class DataReader(UserDict):
                 row = self._get_record_fields(record, object_name)
                 for field, value in recorder_fields.items():
                     row.setdefault(field, value)
+                self._zero_empty_numerics(object_name, row)
                 new_records.append(row)
         else:
             # Регистраторный регистр с пустым набором — набор записей удалён.

@@ -114,43 +114,11 @@ PERIOD_FIELD = 'Period'
 RECORD_SET_FIELD = 'RecordSet'
 RECORD_SET_LAMBDA = 'r'
 
-# Перепроверка кандидатов на пометку (mark_missing при выгрузке за период): ключи объединяются в
-# один $filter через OR. Ограничивает эту строку не 1С, а веб-сервер перед ней, и меряет он БАЙТЫ,
-# а не количество ключей — поэтому и бюджет здесь в байтах. Раньше тут стояло фиксированное «20
-# ключей на запрос», и на составном ключе регистра (Recorder + LineNumber + Recorder_Type, где
-# тип регистратора — длинное кириллическое имя в процентном кодировании) двадцать ключей давали
-# далеко за 2048 байт.
-#
-# Значения по умолчанию у распространённых веб-серверов:
-#
-#   IIS      maxQueryString 2048 байт, maxUrl 4096 (requestFiltering/requestLimits)
-#   Apache   LimitRequestLine 8190 байт (вся строка запроса целиком)
-#   nginx    large_client_header_buffers 8k (строка запроса)
-#
-# Берём самый жёсткий — IIS: под Windows 1С обычно публикуется именно там. Пользователю это
-# задавать не нужно: лимит либо совпадает с умолчанием, либо больше него, а меньше не бывает.
-RECHECK_MAX_QUERY_BYTES = 2048
-# Запас в той же строке на всё, что не $filter: $orderby по полям ключа, само «$filter=» и «?».
-RECHECK_QUERY_RESERVE_BYTES = 512
-
-# Страховка на случай, если лимит всё-таки урезали ниже умолчания: получив от сервера «строка
-# запроса слишком длинная», бюджет делим и повторяем ту же пачку. Только вниз и до конца процесса —
-# как потолок размера страницы. Ниже RECHECK_MIN_QUERY_BYTES не опускаемся: там уже и один ключ не
-# всегда влезает, и дальнейшее деление только маскировало бы настоящую причину отказа.
-RECHECK_BUDGET_DIVISOR = 2
-RECHECK_MIN_QUERY_BYTES = 256
-
-# Коды, которыми веб-серверы отвечают на слишком длинную строку запроса. 414 — стандартный (nginx,
-# Apache), а IIS отдаёт 404.15 «Query String Too Long», то есть обычный 404: по одному коду его не
-# отличить от опечатки в имени объекта, поэтому 404 засчитываем только вместе с приметой в теле
-# (см. _is_query_too_long).
 # Сколько времени по МОНОТОННЫМ часам может пройти между продлением аренды узла и отправкой
 # подтверждения. С запасом меньше LEASE_ROLE_TTL: между ними всего несколько операторов, и любое
 # заметное время здесь означает, что процесс замирал (см. Replicator._confirm_package).
 CONFIRM_LEASE_BUDGET = 30.0
 
-URI_TOO_LONG_CODES = frozenset((414, 404))
-URI_TOO_LONG_MARKERS = ('404.15', 'query string', 'строка запроса', 'uri too long')
 
 
 def _is_permanent_error(exc: BaseException) -> bool:
@@ -158,22 +126,6 @@ def _is_permanent_error(exc: BaseException) -> bool:
     response = getattr(exc, 'response', None)
     status = getattr(response, 'status_code', None)
     return status in PERMANENT_HTTP_CODES
-
-
-def _is_query_too_long(exc: BaseException) -> bool:
-    """
-    Отказ «строка запроса слишком длинная». 414 — стандартный код, но IIS отдаёт 404.15 обычным
-    404, поэтому 404 засчитываем, только если в теле есть примета: иначе мы приняли бы за него
-    опечатку в имени объекта и молча резали бы запросы вдвое до самого дна.
-    """
-    response = getattr(exc, 'response', None)
-    status = getattr(response, 'status_code', None)
-    if status not in URI_TOO_LONG_CODES:
-        return False
-    if status != 404:
-        return True
-    body = (getattr(response, 'text', '') or '').lower()
-    return any(marker in body for marker in URI_TOO_LONG_MARKERS)
 
 
 def _recorder_type_for_url(field: str, value) -> str:
@@ -485,7 +437,8 @@ class Replicator:
                  db_temp_schema: str | None = None,
                  request_timeout: float | None = None,
                  full_load_workers: int = 2,
-                 automatic_full_load: bool = True):
+                 automatic_full_load: bool = True,
+                 read_subconto: bool = False):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
         # Перехват SIGTERM/SIGINT ставим здесь, а не при запуске цикла: run_forever типовая точка
@@ -538,19 +491,26 @@ class Replicator:
         # размер обратно — см. _load_pages.
         self._full_load_page_limit: dict[str, int] = {}
         # Бюджет длины $filter перепроверки, в байтах. Считается от умолчания самого жёсткого
-        # веб-сервера и только опускается — если тот всё-таки ответил «слишком длинно»
-        # (см. RECHECK_MAX_QUERY_BYTES и _still_in_1c). Общий на все объекты: ограничение стоит
-        # перед 1С, а не внутри неё, и от объекта не зависит.
-        self._recheck_query_budget = RECHECK_MAX_QUERY_BYTES - RECHECK_QUERY_RESERVE_BYTES
         # Захват объекта под выгрузку (см. full_load_claim): не пускает второго ни в этом процессе,
         # ни в чужом. Репликатор и расписание могут быть подняты в разных контейнерах, поэтому
         # заслон только один и только в БД — множество в памяти их бы не развело.
         self._full_load_claim = FullLoadClaim(
             engine, lambda: self.metadata.objects_table,
             owner=instance_owner(exchange_name))
+        # Субконто регистра бухгалтерии: по умолчанию НЕ читаем (см. DataReader._fill_subconto).
+        self._read_subconto = read_subconto
+        if read_subconto:
+            logger.warning(
+                "read_subconto=True: ext dimensions are read from the RecordsWithExtDimensions "
+                "virtual table, which supports neither $skip nor a usable Top, so they can only "
+                "be addressed by listing periods. On a large accounting register this means many "
+                "requests and it scales poorly. Analytics of the same posting is usually easier to "
+                "take from its recorder document than from the subconto JSON column")
+
         self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
                                     self.metadata, odata_auth=self._odata_auth,
-                                    request_timeout=self._request_timeout)
+                                    request_timeout=self._request_timeout,
+                                    read_subconto=self._read_subconto)
         # lease_guard вшивает «объект всё ещё наш» прямо в условие записи снимка. Проверять до
         # записи здесь мало: страница пишется минутами, и проверка успевает устареть — а условие
         # внутри оператора проверяет СУБД в момент записи (см. DBWriter._still_ours).
@@ -918,7 +878,8 @@ class Replicator:
                   date_field: str | None = None,
                   date_from: date | datetime | str | None = None,
                   date_to: date | datetime | str | None = None,
-                  mark_missing: bool = True) -> int:
+                  mark_missing: bool = True,
+                  read_subconto: bool | None = None) -> int:
         """
         Полная постраничная выгрузка объекта 1С в целевую таблицу: страницами, размер которых
         подбирается по их весу (batch_size — лишь верхняя граница, см. ниже), и каждая страница
@@ -970,9 +931,15 @@ class Replicator:
         с источником молча. Плата за пометку — таблица ключей на прогон и один UPDATE в конце.
 
         Область пометки — то, что прогон читал: выгрузка за период помечает только строки этого
-        периода (см. _marking_scope). Внутри неё каждый кандидат перед пометкой ещё и
-        перепроверяется запросом в 1С: из окна строка могла не исчезнуть, а уехать (у документа
-        изменилась дата, у независимого регистра — поле ключа).
+        периода (см. _marking_scope). Кандидаты не переспрашиваются в 1С — не увидели, значит
+        помечаем; ложная пометка снимается сама, когда строка приедет изменением (почему так —
+        DESIGN.md, «Не увидели — помечаем»).
+
+        read_subconto — читать ли субконто регистра бухгалтерии. None (по умолчанию) означает
+        «как задано у репликатора», True/False перекрывают его на этот прогон. Выключено по
+        умолчанию: субконто добираются из виртуальной таблицы, у которой нет ни `$skip`, ни
+        работающего `Top`, поэтому адресовать её можно только списками периодов — на большом
+        регистре это много запросов (см. DataReader._fill_subconto).
 
         Возвращает число РЕАЛЬНО изменённых строк (вставлено + обновлено + удалено, по всем
         страницам и вложенным объектам). Это проверка самого CDC: если изменения доезжают исправно,
@@ -1001,13 +968,12 @@ class Replicator:
         # Ключ сортировки: справочник/документ → [Ref_Key], регистраторный → [Recorder]/
         # [Recorder_Key], независимый регистр → весь первичный ключ (составной ключ).
         key_fields = self._full_load_key(object_name)
-        # Регистр бухгалтерии читается из виртуальной таблицы (только там есть субконто), а у неё
-        # ни $skip, ни сортировки: страницы идут курсором по периоду, см. _load_pages.
-        by_period = self._is_accounting_register(object_name)
         date_filter = self._build_date_filter(object_name, date_field, date_from, date_to)
 
         reader = DataReader(self._odata_url, self.metadata, odata_auth=self._odata_auth,
-                            request_timeout=self._request_timeout)
+                            request_timeout=self._request_timeout,
+                            read_subconto=(self._read_subconto if read_subconto is None
+                                           else read_subconto))
         # Полная выгрузка = базовая версия: ниже любого номера пакета изменений (>=1), и заодно
         # след автора строки для guard'а вставки (см. FULL_LOAD_MESSAGE_NO).
         reader.exchange_message_no = FULL_LOAD_MESSAGE_NO
@@ -1016,17 +982,12 @@ class Replicator:
         # (guard'ы save берут свою отметку на каждую страницу, см. ниже).
         started_at = self.writer.db_now()
 
-        # Поле, по которому объект можно порезать на периоды, если он окажется глубоким. Нужно
-        # везде, где страницы берутся через $skip, то есть всюду, кроме регистра бухгалтерии:
-        # его курсор по периоду в глубину не уходит (смещения нет вовсе), и окна ему не нужны —
-        # точнее, он и так читается только окнами.
-        partition_field = (None if by_period
-                           else self._partition_date_field(object_name, date_field))
+        # Поле, по которому объект можно порезать на периоды, если он окажется глубоким.
+        partition_field = self._partition_date_field(object_name, date_field)
 
         log_id = self.onecdc_replicator_log.start(self._exchange_name, object_name, None, LOAD_TYPE_FULL)
-        logger.info("Full load of %s started (batch_size=%s, key=%s, paging=%s, date_filter=%s, "
+        logger.info("Full load of %s started (batch_size=%s, key=%s, date_filter=%s, "
                     "partition_field=%s)", object_name, batch_size, key_fields,
-                    'period' if by_period else 'skip',
                     date_filter, partition_field)
         total = 0
         rows_modified = 0
@@ -1037,7 +998,7 @@ class Replicator:
         with stack:
             if keys is not None:
                 stack.enter_context(keys)
-            page_args = dict(reader=reader, key_fields=key_fields, by_period=by_period,
+            page_args = dict(reader=reader, key_fields=key_fields,
                              batch_size=batch_size, keys=keys, log_id=log_id)
             # Читался ли объект окнами по дате. Важно для пометки пропавших строк: окно
             # порождает «уехавшие» строки (см. _mark_missing_rows), и неважно, задал его
@@ -1048,25 +1009,11 @@ class Replicator:
             # (а таких большинство) окна только вредят: он укладывается в пару страниц, а за
             # обход пришлось бы заплатить запросом на каждое окно истории, даже пустое.
             # Лимит страниц ставим, только если резать вообще есть по чему.
-            if by_period:
-                # Регистр бухгалтерии читается ТОЛЬКО окнами: у виртуальной таблицы нет ни
-                # смещения, ни сортировки, а Top отдаёт произвольное подмножество выборки, а не
-                # её начало (проверено: Top=20 вернул двадцать движений вразброс по всей истории).
-                # Значит, единственный способ прочитать объект целиком и ничего не потерять —
-                # разбить время на отрезки и взять каждый отрезок ЦЕЛИКОМ.
-                windowed = True
-                records, modified = self._load_by_windows(
-                    object_name, reader=reader, date_field=PERIOD_FIELD,
-                    date_filter=date_filter, page_args=page_args)
-                total += records
-                rows_modified += modified
-                exhausted = True
-            else:
-                records, modified, exhausted = self._load_pages(
-                    object_name, extra_filter=date_filter, **page_args,
-                    max_pages=FULL_LOAD_PARTITION_MAX_PAGES if partition_field else None)
-                total += records
-                rows_modified += modified
+            records, modified, exhausted = self._load_pages(
+                object_name, extra_filter=date_filter, **page_args,
+                max_pages=FULL_LOAD_PARTITION_MAX_PAGES if partition_field else None)
+            total += records
+            rows_modified += modified
 
             if not exhausted:
                 # Объект глубокий: $skip уже уходит далеко, и дальше цена растёт квадратично —
@@ -1090,8 +1037,7 @@ class Replicator:
                 # Пометка — только здесь, после последней страницы: прогон, упавший на середине,
                 # объявил бы «пропавшим» весь непрочитанный хвост объекта.
                 rows_modified += self._mark_missing_rows(
-                    object_name, keys, started_at, reader,
-                    recheck=date_filter is not None or windowed, log_id=log_id,
+                    object_name, keys, started_at, log_id=log_id,
                     date_column=(self.name_mapper.map_field_name(date_field, object_name)
                                  if date_field else None),
                     date_from=date_from, date_to=date_to)
@@ -1103,7 +1049,7 @@ class Replicator:
 
     def _load_pages(self, object_name: str, *, reader: DataReader, key_fields: list[str],
                     extra_filter: str | None, batch_size: int, keys, log_id,
-                    max_pages: int | None, by_period: bool = False) -> tuple[int, int, bool]:
+                    max_pages: int | None) -> tuple[int, int, bool]:
         """
         Постраничное чтение одной выборки (объект целиком либо его окно по периоду) с записью
         каждой страницы. Возвращает (сколько записей прочитано, сколько строк изменено, дочитано ли
@@ -1112,8 +1058,6 @@ class Replicator:
         max_pages ограничивает число страниц: превышение означает «выборка слишком глубокая», и
         вызывающий режет её на меньшие периоды (см. full_load). None — читать до конца.
 
-        by_period — регистр бухгалтерии: читается из виртуальной таблицы, где нет ни $skip, ни
-        сортировки, и курсором служит сам ПЕРИОД (см. DataReader.read_accounting_register).
         """
         skip = 0
         total = 0
@@ -1145,23 +1089,9 @@ class Replicator:
             # тогда её merge не держал бы границу. Обращение локальное, в сеть не ходит.
             page_started_at = self.writes.boundary(self._full_load_tables(object_name))
             try:
-                if by_period:
-                    # Окно берётся ЦЕЛИКОМ, одним запросом: страницу внутри него не отрезать
-                    # ничем — Top отдаёт произвольное подмножество, а не начало выборки
-                    # (см. read_accounting_register).
-                    page = reader.read_accounting_register(object_name, condition=extra_filter)
-                else:
-                    page = reader.read_object(object_name, top=page_size, key_fields=key_fields,
-                                              extra_filter=extra_filter, skip=skip)
+                page = reader.read_object(object_name, top=page_size, key_fields=key_fields,
+                                          extra_filter=extra_filter, skip=skip)
             except requests.HTTPError as exc:
-                if by_period:
-                    # Окно не по зубам серверу 1С. Уменьшать тут нечего — размер выборки задаёт
-                    # только ширина окна, поэтому отдаём «не дочитано» и вызывающий сузит окно.
-                    if _is_permanent_error(exc):
-                        raise
-                    logger.warning("Full load of %s: window failed, narrowing it (%s)",
-                                   object_name, exc)
-                    return total, rows_modified, False
                 # Страница не по зубам серверу 1С (упирается в память/временные файлы) —
                 # уменьшаем её и повторяем с того же места. Смещение не сдвигалось.
                 if _is_permanent_error(exc) or page_size <= FULL_LOAD_MIN_BATCH:
@@ -1200,9 +1130,6 @@ class Replicator:
                 rows_modified += _rows_modified(result)
             total += page
             pages += 1
-            if by_period:
-                # Окно прочитано целиком — «следующей страницы» у него не бывает.
-                break
             if page < page_size:
                 break
             if max_pages is not None and pages >= max_pages:
@@ -1386,17 +1313,11 @@ class Replicator:
         """
         return not self._is_record_set_object(object_name)
 
-    def _is_accounting_register(self, object_name: str) -> bool:
-        """Регистр бухгалтерии: читается из виртуальной таблицы RecordsWithExtDimensions, потому
-        что субконто есть только там (см. DataReader.read_accounting_register)."""
-        return object_name.startswith(ACCOUNTING_REGISTER_TYPE)
-
     def _window(self, object_name: str, date_field: str,
                 start: datetime | None, end: datetime | None) -> _Window:
         """Окно [start, end) с фильтром, подходящим этому объекту (см. _Window)."""
         return _Window(date_field, start, end,
-                       record_set=(self._is_record_set_object(object_name)
-                                   and not self._is_accounting_register(object_name)))
+                       record_set=self._is_record_set_object(object_name))
 
     def _primary_key_columns(self, object_name: str) -> dict:
         """
@@ -1432,16 +1353,18 @@ class Replicator:
                 for i in range(data_object.data_length)]
 
     def _mark_missing_rows(self, object_name: str, keys: FullLoadKeys, started_at,
-                           reader: DataReader, recheck: bool, log_id: int | None = None,
+                           log_id: int | None = None,
                            date_column: str | None = None,
                            date_from: date | datetime | str | None = None,
                            date_to: date | datetime | str | None = None) -> int:
         """
         Помечает строки, которых прогон в 1С не увидел, и сообщает об этом обработчикам.
 
-        recheck=True (выгрузка шла за период) — кандидаты сперва перепроверяются в 1С: из окна
-        строка могла не исчезнуть, а уехать (у документа изменилась дата, у независимого регистра —
-        поле, входящее в ключ). Ответ перепроверки авторитетнее снимка: он свежее.
+        Не увидел — значит помечает, без переспрашивания. Кандидат мог не исчезнуть, а уехать за
+        пределы прочитанного (у документа изменилась дата, у регистра — период регистратора), и
+        тогда пометка ложная; снимается она сама, когда строка приедет изменением или следующей
+        выгрузкой её нового периода. Почему переспрашивать перестали — см. DESIGN.md,
+        «Пропавшие строки».
         """
         table_name = self._handler_key(object_name)
         try:
@@ -1454,13 +1377,6 @@ class Replicator:
             return 0
         mark_field = self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD, object_name)
         scope = self._marking_scope(target, date_column, date_from, date_to)
-        if recheck:
-            candidates = keys.missing_rows(target, started_at, mark_field, scope=scope)
-            if candidates:
-                alive = self._still_in_1c(object_name, candidates, reader)
-                logger.info("Full load of %s: %s of %s candidates are still in 1C (moved out of "
-                            "the period, not deleted)", object_name, len(alive), len(candidates))
-                keys.add(alive)
         with self.writes.track(table_name, SOURCE_FULL_LOAD) as tracked:
             reset_values = self._resource_reset_values(object_name, target)
             marked = keys.mark_missing(target, started_at, mark_field,
@@ -1543,110 +1459,6 @@ class Replicator:
                 values[column] = None
         return values
 
-    def _recheck_batch(self, terms: list[str], start: int) -> list[str]:
-        """
-        Сколько условий влезает в один $filter начиная с terms[start], по бюджету длины
-        (см. RECHECK_MAX_QUERY_BYTES). Меряем ЗАКОДИРОВАННУЮ длину — считает байты веб-сервер, а
-        до него строка доезжает уже процентно-закодированной, и кириллический тип регистратора в
-        ней раздувается втрое.
-
-        Одно условие возвращается всегда, даже если оно само больше бюджета: разбить его нельзя,
-        и уж лучше попробовать и получить внятный отказ, чем зациклиться.
-        """
-        batch = [terms[start]]
-        size = len(quote(terms[start], safe="':"))
-        separator = len(quote(' or ', safe="':"))
-        for term in terms[start + 1:]:
-            size += separator + len(quote(term, safe="':"))
-            if size > self._recheck_query_budget:
-                break
-            batch.append(term)
-        return batch
-
-    def _still_in_1c_by_recorder(self, object_name: str, candidates: list[dict],
-                                 reader: DataReader, metadata_obj) -> list[dict]:
-        """
-        Перепроверка кандидатов у регистра, подчинённого регистратору: по одному запросу НА НАБОР,
-        прямым адресом (DataReader.read_by_key).
-
-        Пачками через `$filter` тут нельзя вообще ничем: `Recorder` — поле неограниченной длины, и
-        `eq guid'…'` 1С отвергает с 500, а `eq '…'` строкой отвечает 200 и НОЛЬ строк, то есть
-        молча врёт (подробности и таблица — в read_by_key). Спрашивать по строке тоже нельзя:
-        `LineNumber` лежит внутри RecordSet, и фильтр по нему — 400 «Сегмент пути LineNumber не
-        найден!».
-
-        Спрашиваем поэтому про НАБОР: он и есть та единица, которая либо существует в 1С, либо нет.
-        Набор приходит целиком, _page_keys достаёт из него ключи строк — и строка, выпавшая из
-        набора, в «живые» не попадёт, то есть будет помечена, как и задумано.
-
-        Цена — запрос на каждый набор-кандидат. Это терпимо потому, что кандидаты здесь не весь
-        объект, а только строки, которых прогон не увидел; но на выгрузке, где «пропало» многое,
-        шаг заметен, и заплатить за него приходится: дешёвого способа спросить 1С о наборе по
-        ключу у платформы нет.
-        """
-        recorder_fields = [(field, self.name_mapper.map_field_name(field, object_name))
-                           for field in metadata_obj.object_key]
-        alive = []
-        seen = set()
-        for row in candidates:
-            key = {field: _recorder_type_for_url(field, row[column])
-                   for field, column in recorder_fields}
-            values = tuple(key.values())
-            if values in seen:
-                continue     # один регистратор приходит на каждую свою строку — спрашиваем раз
-            seen.add(values)
-            if reader.read_by_key(object_name, key):
-                alive.extend(self._page_keys(object_name, reader))
-        return alive
-
-    def _still_in_1c(self, object_name: str, candidates: list[dict],
-                     reader: DataReader) -> list[dict]:
-        """
-        Кандидаты, которые в 1С всё-таки есть: запрашиваем их по ключу пачками и возвращаем те,
-        что пришли в ответе.
-
-        Пачка набирается по длине строки запроса, а не по числу ключей: ограничивает её веб-сервер
-        перед 1С, и меряет он байты. У документа ключ — один guid, и в пачку их влезают десятки; у
-        регистра ключ составной, с длинным именем типа регистратора, и влезает несколько.
-
-        Запрос идёт БЕЗ фильтра по периоду — в том и смысл: проверяем существование объекта, а не
-        попадание в окно.
-        """
-        metadata_obj = self.metadata.get(object_name)
-        if self._is_record_set_object(object_name):
-            return self._still_in_1c_by_recorder(object_name, candidates, reader, metadata_obj)
-        fields = [(field, self.name_mapper.map_field_name(field, object_name), type_name)
-                  for field, type_name in metadata_obj.primary_key.items()]
-        terms = []
-        for row in candidates:
-            conj = ' and '.join(f"{field} eq {_odata_literal(row[column], type_name)}"
-                                for field, column, type_name in fields)
-            terms.append(f"({conj})" if ' and ' in conj else conj)
-
-        alive = []
-        index = 0
-        while index < len(terms):
-            batch = self._recheck_batch(terms, index)
-            try:
-                reader.read_object(object_name, extra_filter=' or '.join(batch),
-                                   key_fields=[fields[0][0]])
-            except requests.HTTPError as exc:
-                # Страховка: лимит веб-сервера оказался ниже умолчания, от которого мы считали.
-                # Бюджет опускаем и повторяем ТУ ЖЕ пачку — она пересоберётся короче.
-                if (not _is_query_too_long(exc) or len(batch) == 1
-                        or self._recheck_query_budget <= RECHECK_MIN_QUERY_BYTES):
-                    raise
-                self._recheck_query_budget = max(RECHECK_MIN_QUERY_BYTES,
-                                                 self._recheck_query_budget
-                                                 // RECHECK_BUDGET_DIVISOR)
-                logger.warning("Recheck of %s: the web server refused the query string as too "
-                               "long, lowering the budget to %s bytes and retrying",
-                               object_name, self._recheck_query_budget)
-                continue
-            alive.extend(self._page_keys(object_name, reader))
-            index += len(batch)
-        return alive
-
     @staticmethod
     def _odata_datetime(value: date | datetime | str) -> str:
         """OData-литерал datetime'YYYY-MM-DDTHH:MM:SS' из datetime/date (date → полночь) или строки.
@@ -1723,11 +1535,7 @@ class Replicator:
             return None
         if not date_field:
             raise ValueError("full_load: date_from/date_to require date_field")
-        # Регистр бухгалтерии читается не набором записей, а виртуальной таблицей
-        # RecordsWithExtDimensions (там движения плоские и Period лежит на верхнем уровне),
-        # поэтому лямбда по вложенной коллекции ему не нужна и не подходит.
-        record_set = (self._is_record_set_object(object_name)
-                      and not self._is_accounting_register(object_name))
+        record_set = self._is_record_set_object(object_name)
         field = f'{RECORD_SET_LAMBDA}/{date_field}' if record_set else date_field
         clauses = []
         if date_from is not None:

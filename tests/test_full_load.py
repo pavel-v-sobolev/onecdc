@@ -924,25 +924,29 @@ def test_window_title_and_filter(db):
 
 
 def _mark_missing_spy(rep, monkeypatch):
-    """Перехватывает шаг пометки и возвращает словарь с его аргументами: сама пометка здесь не
-    интересна, интересен признак recheck — с ним прогон перепроверяет кандидатов в 1С."""
+    """Перехватывает шаг пометки: сама пометка здесь не интересна, интересен факт, что прогон до
+    неё дошёл."""
     captured = {}
 
-    def spy(self, object_name, keys, started_at, reader, recheck, log_id=None, **kwargs):
-        captured["recheck"] = recheck
+    def spy(self, object_name, keys, started_at, log_id=None, **kwargs):
+        captured["called"] = True
+        captured.update(kwargs)
         return 0
 
     monkeypatch.setattr(Replicator, "_mark_missing_rows", spy)
     return captured
 
 
-def test_partitioned_run_rechecks_candidates(db, monkeypatch):
+def test_a_windowed_run_still_reaches_the_marking_step(db, monkeypatch):
     """
-    Нарезка читает объект окнами по дате — ровно так же, как пользовательский период, и порождает
-    ту же проблему: строка не исчезла, а уехала. Окна идут от свежих к старым, поэтому
-    документ, у которого во время прогона поменяли дату с февраля на апрель, не попал ни в
-    апрельское чтение (тогда его там не было), ни в февральское (уже нет). Без перепроверки его
-    пометили бы удалённым.
+    Глубокий объект уходит в обход окнами и всё равно доходит до пометки пропавших.
+
+    Раньше здесь проверялась связка «окна → перепроверить кандидатов в 1С»: окна идут от свежих к
+    старым, и документ, у которого во время прогона поменяли дату, мог не попасть ни в одно из
+    них. Перепроверка убрана (спросить 1С об одной строке можно только прямым адресом, а ответ
+    «нет такой» приходит кодом 404, неотличимым от отказа инфраструктуры), поэтому такой документ
+    теперь помечается — и пометка снимается сама, когда он приедет изменением. Остаётся проверить,
+    что шаг пометки при обходе окнами вообще выполняется.
     """
     rep, calls = _partitioned(db, monkeypatch, lambda flt, skip: 1 if flt else 10)
     captured = _mark_missing_spy(rep, monkeypatch)
@@ -950,19 +954,7 @@ def test_partitioned_run_rechecks_candidates(db, monkeypatch):
     rep.full_load("Document_Y", batch_size=10, mark_missing=True)
 
     assert [c for c in calls if c], 'объект должен был уйти в обход окнами'
-    assert captured["recheck"] is True, 'окно создала нарезка — кандидатов надо перепроверить'
-
-
-def test_run_without_any_window_does_not_recheck(db, monkeypatch):
-    """Обратная сторона: объект прочитан сплошь, окна не было ни от пользователя, ни от нарезки —
-    перепроверять нечего, и лишних запросов в 1С прогон не делает."""
-    rep, calls = _partitioned(db, monkeypatch, lambda flt, skip: 1)
-    captured = _mark_missing_spy(rep, monkeypatch)
-
-    rep.full_load("Document_Y", batch_size=10, mark_missing=True)
-
-    assert calls == [None], 'объект дочитан с первого захода'
-    assert captured["recheck"] is False
+    assert captured.get("called"), 'шаг пометки пропавших не выполнен'
 
 
 def test_a_table_part_cannot_be_loaded_on_its_own(db):
