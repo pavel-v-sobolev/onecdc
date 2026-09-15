@@ -32,6 +32,7 @@ class ChangeReader(DataReader):
         self.clear()
         self.message_no = self.get_last_received_no()+1
         self.exchange_message_no = self.message_no
+        self.entries_read = 0
 
         logger.info(f"Reading changes from 1C (message {self.message_no})")
 
@@ -45,6 +46,11 @@ class ChangeReader(DataReader):
                            force_list=('d:element', 'entry'))
         change_entries = (feed or {}).get('entry') or []
 
+        # Сколько entry было В ОТВЕТЕ — отдельно от того, сколько объектов удалось разобрать.
+        # Различать обязательно: пакет из одних неподдерживаемых классов даёт ноль объектов, и по
+        # их числу он неотличим от пустого пакета. А трактовки у этих двух случаев противоположные
+        # (см. Replicator.run_once): пустой не подтверждаем, непустой — обязаны.
+        self.entries_read = len(change_entries)
         parsed = self.read_data_entries(change_entries)
         # Пакет приносит набор записей регистра бухгалтерии БЕЗ субконто (их нет в описании
         # движения вовсе) — дочитываем их отдельным запросом по периодам пакета, иначе колонки

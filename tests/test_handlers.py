@@ -49,9 +49,30 @@ class Spy(Handler):
             raise RuntimeError('handler failed on purpose')
 
 
+# Все циклы, заведённые помощниками ниже, чтобы гасить их потоки отметки живости по концу теста.
+_RUNNERS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_runners(db):
+    """
+    Гасит потоки отметки живости всех заведённых в тесте циклов.
+
+    Без этого поток аренды переживает тест, а схему у него из-под ног сносит уборка фикстуры — и
+    в логе следующих тестов идут «relation ... does not exist» от чужого heartbeat. Само по себе
+    это безвредно, но ровно такой шум и прячет настоящую ошибку, когда она появится.
+
+    Зависимость от db — ради порядка уборки, а не ради самого db: фикстуры гасятся в обратном
+    порядке заведения, и без этой связи цикл закрывался бы уже по снесённой схеме.
+    """
+    yield
+    while _RUNNERS:
+        _RUNNERS.pop().close()
+
+
 def _runner(db, handler):
     """HandlerLoop на одного обработчика — как в боевом коде, с настоящим реестром merge."""
-    runner = HandlerLoop(engine=db.engine, schema=db.schema, handler=handler)
+    runner = _runner_for(db, handler)
     return runner, runner.writes
 
 
@@ -64,7 +85,9 @@ def _replicator(db, exchange="План", **kwargs):
 
 def _runner_for(db, handler):
     """HandlerLoop на боевом пути."""
-    return HandlerLoop(engine=db.engine, schema=db.schema, handler=handler)
+    runner = HandlerLoop(engine=db.engine, schema=db.schema, handler=handler)
+    _RUNNERS.append(runner)
+    return runner
 
 
 def _signal(db, object_name, source=SOURCE_CHANGES):

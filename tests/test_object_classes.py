@@ -7,6 +7,7 @@
 """
 
 import logging
+from contextlib import contextmanager
 
 import pytest
 
@@ -35,6 +36,25 @@ def _reader(*objects: str) -> DataReader:
     return reader
 
 
+@contextmanager
+def caplog_at_error():
+    """Перехват записей уровня ERROR без фикстуры caplog: тест параметризован, и держать в нём
+    ещё и фикстуру ради одного списка записей ни к чему."""
+    records = []
+
+    class _Catcher(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Catcher(level=logging.ERROR)
+    logger = logging.getLogger('onecdc')
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
 @pytest.mark.parametrize("object_name", [
     "ChartOfCharacteristicTypes_Vidy",
     "ChartOfAccounts_Hozraschetnyi",
@@ -42,15 +62,28 @@ def _reader(*objects: str) -> DataReader:
     "BusinessProcess_Soglasovanie",
     "Task_Poruchenie",
 ])
-def test_reference_classes_are_parsed_like_catalogs(object_name):
+def test_unverified_reference_classes_are_not_claimed_as_supported(object_name):
+    """
+    Планы видов характеристик, планы счетов, планы видов расчёта, бизнес-процессы и задачи из
+    поддерживаемых УБРАНЫ.
+
+    Раньше они числились поддерживаемыми, и этот же тест закреплял обратное — что они разбираются
+    как справочники. Доказывал он при этом только диспетчеризацию: и метаданные, и entry в нём
+    собраны руками из трёх полей. Живых ответов 1С этих классов нет ни в записанных ответах, ни на
+    доступном контуре (демо УТ их в OData не публикует), то есть подтвердить обещание нечем.
+
+    Громкий пропуск честнее тихого сохранения неизвестно чего: пользователь увидит CHANGES LOST и
+    уберёт объект из плана обмена, а не найдёт через полгода перекошенную таблицу. Класс вернётся
+    в SUPPORTED_TYPES вместе с записанными ответами 1С и тестом на них.
+    """
     reader = _reader(object_name)
 
-    reader.read_data_entries([_entry(object_name, {"d:Ref_Key": REF, "d:Description": "X",
-                                                   "d:DeletionMark": "false"})])
+    with caplog_at_error() as records:
+        parsed = reader.read_data_entries([_entry(object_name, {"d:Ref_Key": REF})])
 
-    data = reader[object_name].data
-    assert data["Description"] == ["X"]
-    assert data[IS_DELETED_OR_EMPTY_FIELD] == [False]
+    assert object_name not in reader, 'класс не должен сохраняться'
+    assert parsed[object_name] == 1, 'но сосчитан быть должен: пакет подтверждается по прочитанным'
+    assert any("CHANGES LOST" in r.getMessage() for r in records), 'пропуск обязан быть громким'
 
 
 def test_accounting_register_is_parsed_like_accumulation_register(caplog):
@@ -86,7 +119,11 @@ def test_accounting_register_is_parsed_like_accumulation_register(caplog):
 
 def test_unsupported_class_is_skipped_and_reported(caplog):
     # Регистр расчёта не поддерживается: у него своя структура записи (периоды действия, вытеснение).
-    # Уровень WARNING, а не ERROR: пакет всё равно подтверждается, цикл репликации не останавливается.
+    #
+    # Уровень ERROR, а не WARNING. Формально это состав плана обмена, а не сбой прогона — но цена
+    # молча исчезающие изменения: пакет подтверждается целиком, 1С их больше не пришлёт, а дочитать
+    # полной выгрузкой нельзя, этот класс мы не умеем разбирать вовсе. Предупреждение раз в пакет
+    # никто не читает.
     reader = _reader()
 
     with caplog.at_level(logging.WARNING):
@@ -98,13 +135,93 @@ def test_unsupported_class_is_skipped_and_reported(caplog):
     assert "CalculationRegister_Nachisleniya" not in reader   # не сохранён
     assert parsed["CalculationRegister_Nachisleniya"] == 2     # но сосчитан
     text = caplog.text
-    assert "unsupported" in text and "lost" in text
+    assert "CHANGES LOST" in text
     assert "2 entries" in text                                 # один лог на пакет, с количеством
-    assert [r.levelname for r in caplog.records if "unsupported" in r.getMessage()] == ["WARNING"]
+    assert "Catalog" in text, 'в сообщении должен быть перечень поддерживаемых классов'
+    assert [r.levelname for r in caplog.records if "CHANGES LOST" in r.getMessage()] == ["ERROR"]
 
 
-def test_reference_classes_are_saved_before_documents():
-    # Документы ссылаются на ссылочные объекты, регистры — на документы.
-    assert save_order_key("ChartOfAccounts_X") < save_order_key("Document_X")
-    assert save_order_key("Task_X") < save_order_key("Document_X")
+def test_catalogs_are_saved_before_documents_and_registers():
+    # Документы ссылаются на справочники (по *_Key), регистры — на документы (Recorder), поэтому
+    # родителей сохраняем раньше.
+    assert save_order_key("Catalog_X") < save_order_key("Document_X")
     assert save_order_key("Document_X") < save_order_key("AccumulationRegister_X")
+    # Класс, который мы не сохраняем, в порядке не участвует — он уходит в конец как неизвестный.
+    assert save_order_key("Task_X") == save_order_key("Unknown_X")
+
+
+def test_a_packet_of_only_unsupported_objects_does_not_stall_the_plan(db, monkeypatch, caplog):
+    """
+    Второй исход того же явления, противоположный первому и куда хуже.
+
+    Раньше подтверждение слалось по числу РАЗОБРАННЫХ объектов, а пакет из одних неподдерживаемых
+    классов даёт ноль — и был неотличим от пустого. Тот же SelectChanges уходил каждые 60 секунд,
+    очередь стояла забитой, репликация ВСЕГО плана не двигалась, а в логе была одна строка.
+
+    Сохранить эти изменения нельзя ни так, ни эдак, значит остановка ничего не спасает — а стоит
+    всего плана. Подтверждаем по числу ПРОЧИТАННЫХ entry.
+    """
+    from pathlib import Path
+
+    import fake_1c
+    from onecdc import Replicator
+    from onecdc import change_reader as change_reader_module
+
+    real_parse = change_reader_module.parse_odata
+
+    def all_unsupported(body, root, context, force_list=()):
+        parsed = real_parse(body, root, context, force_list)
+        if root == 'feed' and isinstance(parsed, dict):
+            for entry in parsed.get('entry') or []:
+                entry['category']['@term'] = 'StandardODATA.Constant_KursValyuty'
+        return parsed
+
+    with fake_1c.running_server(Path(__file__).parent / "responses" / "trade_demo_8.5") as (
+            url, fake):
+        repl = Replicator(odata_url=url, odata_auth=None, exchange_name="ДляODATA",
+                          queue_guid=fake.queue_guid, engine=db.engine, db_schema=db.schema)
+        try:
+            monkeypatch.setattr(change_reader_module, 'parse_odata', all_unsupported)
+            with caplog.at_level(logging.ERROR):
+                repl.run_once()
+
+            assert fake.received_no == 1, 'пакет не подтверждён — очередь встала, план стоит'
+            assert 'CHANGES LOST' in caplog.text, 'потеря обязана быть громкой'
+        finally:
+            repl.close()
+
+
+def test_the_chart_of_characteristic_types_is_read_for_metadata_but_not_loaded(db):
+    """
+    План видов характеристик — единственный класс, который читается метаданными, но не сохраняется.
+
+    Убрать его из метаданных вместе с остальными было нельзя: по ним регистр бухгалтерии ищет, в
+    каком плане лежит вид субконто (DataReader._find_ext_dimension_chart перебирает метаданные), и
+    без этого ключом субконто остался бы голый Guid. Отсюда развилка, которую легко потерять при
+    следующей правке списка классов, — поэтому она под тестом.
+    """
+    from conftest import TEST_QUEUE_GUID
+    from onecdc import Replicator
+    from onecdc.metadata_reader import METADATA_ONLY_TYPES
+
+    chart = "ChartOfCharacteristicTypes_VidySubkonto"
+    assert chart.startswith(METADATA_ONLY_TYPES)
+
+    repl = Replicator(odata_url="http://x", odata_auth=None, exchange_name="План",
+                      queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
+    try:
+        repl.metadata[chart] = MetadataObject(chart, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
+        repl.metadata["Catalog_X"] = MetadataObject("Catalog_X", {"Ref_Key": "Guid"},
+                                                    {"Ref_Key": "Guid"})
+        repl.metadata.is_loaded = True
+
+        # Метаданные есть — регистру бухгалтерии есть где искать вид субконто.
+        assert chart in repl.metadata
+
+        # Но выгружать его мы не беремся: ни в списке объектов, ни через full_load.
+        assert chart not in repl.list_objects()
+        assert "Catalog_X" in repl.list_objects()
+        with pytest.raises(ValueError, match='metadata only'):
+            repl.full_load(chart)
+    finally:
+        repl.close()

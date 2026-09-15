@@ -58,6 +58,13 @@ VERSION_FIELDS = ('DataVersion', 'Version')
 IS_DELETED_OR_EMPTY_FIELD = 'is_deleted_or_empty'
 # Спец-поле: номер пакета обмена (message_no), проставляется во все записи при чтении изменений.
 EXCHANGE_MESSAGE_NO_FIELD = 'exchange_message_no'
+# Номер пакета, которым полная выгрузка подписывает свои строки. Ниже любого номера сообщения 1С
+# (те начинаются с 1), поэтому снимок не выглядит новее изменения.
+#
+# Это ещё и след автора записи, на котором держится guard снимка: по нему вставка отличает строку,
+# переписанную потоком изменений, от той, что записала она сама несколькими миллисекундами раньше
+# (см. DBWriter._group_not_touched_since). Менять значение нельзя, не поменяв guard.
+FULL_LOAD_MESSAGE_NO = 0
 
 # Номер строки внутри набора (табличная часть, набор движений регистратора). Входит в первичный
 # ключ обоих, и 1С нумерует строки подряд с единицы — на этом построен ключ фиктивной записи
@@ -871,14 +878,14 @@ class DataReader(UserDict):
         вызывающий логирует итог одной строкой: entry в ответе бывают тысячами, и лог на каждую
         забивает вывод (см. read_object / ChangeReader.read_changes).
 
-        Объекты неподдерживаемых классов (см. SUPPORTED_TYPES) пропускаются с предупреждением в
-        логе: пакет изменений подтверждается целиком, поэтому такие изменения 1С больше не пришлёт —
-        молчать об этом нельзя. Лог один на пакет, а не на entry.
+        Объекты неподдерживаемых классов (см. SUPPORTED_TYPES) пропускаются, и это **потеря
+        данных**: пакет подтверждается целиком, значит 1С такие изменения больше не пришлёт, а
+        дочитать их полной выгрузкой нельзя — разобрать этот класс мы не умеем вовсе.
 
-        Уровень именно WARNING, а не ERROR: неподдерживаемый класс — это состав плана обмена, а не
-        сбой прогона. Останавливать на нём репликацию нечем и незачем — пакет подтверждается, цикл
-        идёт дальше, а решение (убрать объект из плана обмена или ждать поддержки) принимает
-        человек, прочитав предупреждение.
+        Уровень ERROR, а не WARNING. Формально это действительно состав плана обмена, а не сбой
+        прогона, и раньше здесь стоял WARNING именно поэтому. Но предупреждение раз в пакет никто
+        не читает, а цена — молча исчезающие изменения; из всех строк лога эта заслуживает
+        внимания больше прочих. Лог один на пакет, а не на entry: entry бывают тысячами.
         """
         parsed: Counter = Counter()
         unsupported: Counter = Counter()
@@ -907,10 +914,13 @@ class DataReader(UserDict):
                 self._get_entity_records(object_name, properties)
 
         if unsupported:
-            logger.warning(
-                "Objects of unsupported classes were skipped and their changes are lost "
-                "(the exchange message is confirmed as a whole, 1C will not send them again): %s",
-                ', '.join(f'{name} ({n} entries)' for name, n in unsupported.items()))
+            logger.error(
+                "CHANGES LOST: objects of unsupported classes were skipped — %s. The exchange "
+                "message is confirmed as a whole, so 1C will not send them again, and a full load "
+                "cannot recover them either: these classes are not readable at all. Remove such "
+                "objects from the exchange plan (supported classes: %s)",
+                ', '.join(f'{name} ({n} entries)' for name, n in unsupported.items()),
+                ', '.join(SUPPORTED_TYPES))
 
         return parsed
 

@@ -17,7 +17,8 @@ from typing import Iterable
 from sqlalchemy import (Column, DateTime, Engine, MetaData, String, Table, delete, func, insert,
                         select, update)
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, instance_owner
+from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE,
+                                     HEARTBEAT_JOIN_TIMEOUT, instance_owner)
 from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import get_logger
 
@@ -129,6 +130,8 @@ class WriteTracker:
         # Переданное имя остаётся префиксом, чтобы в таблице было видно, кто это.
         self.owner = instance_owner(owner)
         self.table = _writes_table(MetaData(), self.schema_name)
+        # Состав колонок этой таблицы менялся (signal_source добавлен позже); create_table_if_absent
+        # доводит действующую таблицу до текущего состава сам.
         create_table_if_absent(engine, self.table)
         self._lock = threading.Lock()
         # Доставка сигнала обработчикам: вызывается с открытым соединением, чтобы удаление строки
@@ -145,9 +148,21 @@ class WriteTracker:
         self._closed = threading.Event()
 
     def close(self) -> None:
-        """Останавливает поток отметки живости. Для процесса не обязательна (поток daemon), нужна
-        тестам и тем, кто заводит реестры по ходу работы."""
+        """
+        Останавливает поток отметки живости и ДОЖИДАЕТСЯ его.
+
+        Именно дожидается: одного флага мало. Поток мог уже пройти проверку флага и стоять внутри
+        UPDATE — тогда close() возвращается, а запись ложится в таблицу ПОСЛЕ него, и строка,
+        которую вызывающий считает отпущенной, оказывается свежей. Отсюда же «relation does not
+        exist» в логе от потока, чью схему успели снести.
+
+        Ожидание ограничено HEARTBEAT_JOIN_TIMEOUT: поток стоит на ожидании флага, который close()
+        будит сразу, так что в худшем случае это один уже начатый запрос.
+        """
         self._closed.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=HEARTBEAT_JOIN_TIMEOUT)
 
     def _ensure_heartbeat(self) -> None:
         """Поднимает поток отметки живости, если он ещё не поднят. Под локом: проверка «поток есть»

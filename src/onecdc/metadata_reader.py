@@ -82,11 +82,25 @@ REGISTER_TYPES = ('InformationRegister','AccumulationRegister','AccountingRegist
 # Ссылочные классы: устроены одинаково (Ref + DeletionMark + реквизиты + табличные части),
 # поэтому разбираются общим кодом. Регистры сюда не входят — см. REGISTER_TYPES
 # (Приложение 12 руководства разработчика, разделы 12.11 и 12.12).
-ENTITY_TYPES = ('Catalog','Document','ChartOfCharacteristicTypes','ChartOfAccounts',
-                'ChartOfCalculationTypes','BusinessProcess','Task')
+ENTITY_TYPES = ('Catalog','Document')
+# Планы видов характеристик, планы счетов, планы видов расчёта, бизнес-процессы и задачи здесь
+# СОЗНАТЕЛЬНО отсутствуют. Устроены они так же, и общий код их разобрал бы, но ни одного живого
+# ответа 1С этих классов мы не видели: в тестах их метаданные собраны руками из трёх полей, в
+# записанных ответах их нет, демо-база в OData их не публикует. Обещать поддержку, которую нечем
+# подтвердить, дороже, чем её не обещать: объект такого класса в плане обмена будет громко
+# пропущен (CHANGES LOST), а не тихо сохранён неизвестно как.
+#
+# Класс возвращается сюда вместе с записанными ответами 1С и тестом на них, не раньше.
+
+# План видов характеристик: метаданные читаем, объект не сохраняем. Читаем потому, что по нему
+# регистр бухгалтерии определяет виды субконто (DataReader._find_ext_dimension_chart перебирает
+# планы в метаданных) — без этого ключом субконто остался бы голый Guid.
+METADATA_ONLY_TYPES = ('ChartOfCharacteristicTypes',)
 # Классы, которые мы умеем сохранять. Всё остальное, придя в пакете изменений, будет потеряно
 # (пакет подтверждается целиком), поэтому такие объекты логируются отдельно — см. read_data_entries.
 SUPPORTED_TYPES = REGISTER_TYPES + ENTITY_TYPES
+# Классы, для которых строятся метаданные. Шире SUPPORTED_TYPES ровно на METADATA_ONLY_TYPES.
+KNOWN_ENTITY_TYPES = ENTITY_TYPES + METADATA_ONLY_TYPES
 METADATA_POSTFIXES = ('_RecordType','_RowType','_Balance','_Turnover','_BalanceAndTurnover')
 ODATA_PREFIX = 'StandardODATA.'
 TYPE_PREFIX = 'Edm.'
@@ -434,7 +448,8 @@ class MetadataReader(UserDict):
                 self[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
                                                  dimensions, resources, attributes)
 
-            elif item_name.startswith(ENTITY_TYPES) and not item_name.endswith(METADATA_POSTFIXES):
+            elif (item_name.startswith(KNOWN_ENTITY_TYPES)
+                  and not item_name.endswith(METADATA_POSTFIXES)):
             # если документ или справочник без постфикса, то
             # читаем его описание полей и ключ
             # (также может быть табличная часть документа или справочника)

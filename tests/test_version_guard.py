@@ -155,3 +155,56 @@ def test_full_load_replaces_own_group(db):
     # «свою» группу заменили снимком: строка 1 живая, строка 2 помечена
     assert not rows[(REF2, 1)]["is_deleted_or_empty"]
     assert rows[(REF2, 2)]["is_deleted_or_empty"]
+
+
+# --- Группа, которую прогон обновляет и дополняет одной страницей ---
+#
+# Отметка здесь — настоящая (writer.db_now()), а не NEW_RUN: guard сравнивает merged_on с ней, и
+# при отметке в 2100 году он не срабатывает вовсе, то есть такие тесты проходят вхолостую. Дефект
+# жил ровно в этой слепой зоне.
+
+def test_full_load_adds_a_row_to_a_group_it_updates_on_the_same_page(db):
+    """
+    Один прогон обязан сойтись: страница [1 изменена, 2, 3 новая] даёт в таблице три строки.
+
+    dbmerge выполняет UPDATE перед INSERT и штампует обновлённой строке merged_on = now(), то есть
+    время после отметки страницы. Пока guard вставки смотрел только на merged_on, снимок принимал
+    СВОЮ же строку 1 за чужое изменение, считал группу горячей и не вставлял строку 3. Полная
+    выгрузка — заявленный способ выровнять данные, а сходилась она только за два прогона.
+    """
+    w = _writer(db)
+    w.save("Document_X_Rows", _tp([_tp_rec(REF, 1, "a", 0), _tp_rec(REF, 2, "b", 0)]))
+
+    started = w.db_now()
+    w.save("Document_X_Rows", _tp([_tp_rec(REF, 1, "a-changed", 0), _tp_rec(REF, 2, "b", 0),
+                                   _tp_rec(REF, 3, "new", 0)]),
+           full_load_started_at=started)
+
+    rows = {(r["Ref_Key"], r["LineNumber"]): r for r in _rows(w, "Document_X_Rows")}
+    assert sorted(line for _, line in rows) == [1, 2, 3], 'новая строка группы не вставлена'
+    assert rows[(REF, 1)]["Val"] == "a-changed"
+    assert not rows[(REF, 3)]["is_deleted_or_empty"]
+
+
+def test_a_real_change_still_blocks_new_rows_of_its_group(db):
+    """
+    Обратная сторона: guard обязан остаться guard'ом.
+
+    Отметка настоящая, как и выше, но группу переписал ПОТОК ИЗМЕНЕНИЙ (номер пакета >= 1) уже
+    после старта прогона. Снимок устарел, и строку, которой изменение в группе не оставило,
+    воскрешать нельзя.
+    """
+    w = _writer(db)
+    started = w.db_now()
+    # Изменение пришло ПОСЛЕ старта прогона и оставило в группе только строки 1 и 2.
+    w.save("Document_X_Rows", _tp([_tp_rec(REF2, 1, "a", 105), _tp_rec(REF2, 2, "b", 105)]))
+
+    # Снимок прогона старше: он всё ещё видит строку 3.
+    w.save("Document_X_Rows", _tp([_tp_rec(REF2, 1, "a", 0), _tp_rec(REF2, 2, "b", 0),
+                                   _tp_rec(REF2, 3, "resurrected", 0)]),
+           full_load_started_at=started)
+
+    rows = {(r["Ref_Key"], r["LineNumber"]): r for r in _rows(w, "Document_X_Rows")}
+    assert (REF2, 3) not in rows, 'снимок воскресил строку, удалённую изменением'
+    # И самой горячей группы снимок не касался.
+    assert rows[(REF2, 1)]["exchange_message_no"] == 105

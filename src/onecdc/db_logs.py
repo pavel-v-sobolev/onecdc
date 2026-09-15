@@ -14,7 +14,7 @@
 from dbmerge import mergeResult
 
 from sqlalchemy import (Column, DateTime, Engine, Index, Integer, MetaData, String,
-                        Table, func, insert, inspect, update, schema, Numeric)
+                        Table, func, insert, inspect, text, update, schema, Numeric)
 from sqlalchemy.exc import DatabaseError
 
 from onecdc.logging_config import get_logger
@@ -63,11 +63,45 @@ def _check_create_schema(engine: Engine, schema_name: str | None) -> str | None:
     return schema_name
 
 
-def create_table_if_absent(engine: Engine, table: Table) -> None:
-    """CREATE TABLE идемпотентно и без гонки на старте нескольких репликаторов (см. _create_if_absent)."""
+def create_table_if_absent(engine: Engine, table: Table) -> tuple[set[str], set[str]]:
+    """
+    CREATE TABLE идемпотентно и без гонки на старте нескольких репликаторов (см. _create_if_absent),
+    а сразу следом — переезд состава колонок. Возвращает (что было до переезда, что добавили).
+
+    Переезд именно ЗДЕСЬ, а не отдельным вызовом рядом: `create(checkfirst=True)` заводит таблицу
+    целиком, но давно созданную не трогает, поэтому колонка, добавленная в служебную таблицу
+    новой версией библиотеки, на свежей базе есть, а на действующей нет — и запрос падает с
+    «column does not exist» только у пользователя. Оффлайн-тесты это не ловят в принципе: они
+    всегда начинают со схемы с нуля. Правило «добавили колонку — не забудьте позвать переезд»
+    мы в этом же проекте забыли дважды (onecdc_writes_in_process, onecdc_replicator_log), так что
+    забывать больше нечего: кто завёл таблицу, тот её и обновил.
+    """
     _create_if_absent(engine, lambda: table.create(engine, checkfirst=True),
                       lambda: inspect(engine).has_table(table.name, schema=table.schema),
                       f'table "{table.name}"')
+    return add_missing_columns(engine, table)
+
+
+def add_missing_columns(engine: Engine, table: Table) -> tuple[set[str], set[str]]:
+    """
+    Дописывает в существующую таблицу колонки, которых в ней ещё нет. Возвращает (что было,
+    что добавили) — вызывающему это нужно, если переезд на новую колонку требует переноса данных.
+
+    Отдельно от create_table_if_absent — только чтобы звать переезд без создания. Обычному коду
+    этого не нужно: create_table_if_absent сам зовёт это последним шагом и отдаёт тот же ответ.
+    """
+    existing = {column['name'] for column in inspect(engine).get_columns(
+        table.name, schema=table.schema)}
+    missing = [column for column in table.columns if column.name not in existing]
+    if not missing:
+        return existing, set()
+    compiler = engine.dialect.ddl_compiler(engine.dialect, None)
+    with engine.begin() as conn:
+        for column in missing:
+            conn.execute(text(f'ALTER TABLE {compiler.preparer.format_table(table)} '
+                              f'ADD COLUMN {compiler.get_column_specification(column)}'))
+    logger.info("Added columns to %s: %s", table.name, ', '.join(c.name for c in missing))
+    return existing, {column.name for column in missing}
 
 
 def create_index_if_absent(engine: Engine, index: Index, table_name: str,

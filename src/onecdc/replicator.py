@@ -12,11 +12,12 @@ from dbmerge import mergeResult
 from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_, exists
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
-from onecdc.metadata_reader import ACCOUNTING_REGISTER_TYPE, MetadataReader, type_mapping
+from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
+                                    SUPPORTED_TYPES, MetadataReader, type_mapping)
 from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, format_duration,
                                      instance_owner, odata_datetime_value)
-from onecdc.data_reader import (DataReader, IS_DELETED_OR_EMPTY_FIELD, ODATA_PREFIX,
-                                RECORDER_FIELDS, _odata_literal)
+from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
+                                ODATA_PREFIX, RECORDER_FIELDS, _odata_literal)
 from onecdc.change_reader import ChangeReader
 from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
                                     OWNER_FIELD, FullLoadClaim)
@@ -24,7 +25,8 @@ from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
 from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FIELD,
                             NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog,
-                            create_table_if_absent, exchange_nodes_table)
+                            create_table_if_absent,
+                            exchange_nodes_table)
 from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
 from onecdc.lease import Lease, lease_engine
 from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
@@ -586,6 +588,8 @@ class Replicator:
         # Кого мы уже сообщили как владельца узла: лог пишется только на переходах, иначе
         # процесс, которому узел не достался, засыпал бы лог одинаковой строкой каждый цикл.
         self._node_holder_logged: str | None = None
+        # Держит ли аренду узла внешний цикл (run_forever). Одиночный run_once отпускает её сам.
+        self._keep_node_lease = False
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи,
         # когда он крутится не в главном потоке и своего перехвата сигналов не имеет.
         self._stop_signal: "StopSignal | None" = None
@@ -614,12 +618,18 @@ class Replicator:
         # Захват должен закрывать цикл целиком.
         if not self._claim_node():
             return
-        # Аренда НЕ отпускается в конце цикла: захвативший читает узел, пока жив. Отпускать
-        # каждый цикл значило бы устраивать новую гонку раз в минуту — передача между циклами
-        # безопасна (пакета в полёте нет), но пользы в ней ноль, а читатель мигал бы между
-        # процессами без причины, и по логам было бы не понять, кто работает. Отпускаем только
-        # при штатной остановке (см. close), чтобы сменщик не ждал TTL.
-        self._run_once_claimed(notify_changes)
+        try:
+            self._run_once_claimed(notify_changes)
+        finally:
+            # Внутри run_forever аренда живёт через все циклы: отпускать её каждую минуту значило
+            # бы устраивать новую гонку на ровном месте, а читатель мигал бы между процессами.
+            #
+            # А вот ОДИНОЧНЫЙ run_once обязан отпустить. Он задуман как самостоятельный режим (в
+            # том числе по расписанию снаружи), и процесс после него завершается. Оставь мы узел
+            # захваченным — следующий запуск через минуту не смог бы его взять и молча ничего бы
+            # не сделал, и так все 15 минут TTL.
+            if not self._keep_node_lease:
+                self._node_lease.release(self._queue_guid)
 
     def _claim_node(self) -> bool:
         """Захватывает узел обмена. False — читает кто-то другой, цикл пропускаем."""
@@ -671,7 +681,17 @@ class Replicator:
         if self._automatic_full_load:
             self._require_full_load_for_new_objects()
         
-        if notify_changes and len(self.changes) > 0:
+        # Подтверждаем по числу ПРОЧИТАННЫХ entry, а не разобранных объектов. Раньше условием
+        # было len(self.changes) > 0, и пакет из одних неподдерживаемых классов (константы,
+        # регистры расчёта — их кладёт в очередь в том числе дроссель) не подтверждался: тот же
+        # SelectChanges каждые 60 секунд, очередь забита, репликация ВСЕГО плана стоит, а в логе
+        # только сообщение о пропуске.
+        #
+        # Это строго хуже смешанного пакета, где те же изменения теряются, но остальное едет.
+        # Сохранить их мы всё равно не можем ни в том, ни в другом случае — значит остановка
+        # ничего не спасает, а стоит всего плана. Политика одна: пакет прочитан — пакет
+        # подтверждён, а о потере кричит ERROR из read_data_entries.
+        if notify_changes and self.changes.entries_read > 0:
             self._confirm_package()
         else:
             logger.debug("No changes — skipping confirmation")
@@ -849,9 +869,12 @@ class Replicator:
     def list_objects(self) -> list[str]:
         """
         Список имён объектов 1С, доступных для выгрузки (документы/справочники и регистры).
-        Табличные части исключаются: они приходят вложенно с владельцем и грузятся вместе с ним.
-        Отдельная сущность в OData у них есть, и full_load её примет, но выгружать табличную часть
-        отдельно не нужно — а страницей меньше её группы ещё и вредно (см. DataReader.read_object).
+
+        Табличные части исключаются: они приходят вложенно с владельцем и грузятся вместе с ним, а
+        отдельно full_load их и не примет (см. _refuse_table_part). Классы из METADATA_ONLY_TYPES
+        исключаются тоже: их метаданные читаются ради регистра бухгалтерии, но выгружать их мы не
+        беремся (см. SUPPORTED_TYPES).
+
         Метаданные при необходимости подгружаются (первый сетевой запрос). Удобно, чтобы узнать,
         что передавать в full_load.
 
@@ -861,7 +884,34 @@ class Replicator:
         """
         if not self.metadata.is_loaded:
             self.metadata.get_metadata()
-        return [name for name, obj in self.metadata.items() if not obj.is_table_part]
+        return [name for name, obj in self.metadata.items()
+                if not obj.is_table_part and name.startswith(SUPPORTED_TYPES)]
+
+    def _refuse_table_part(self, object_name: str) -> None:
+        """
+        Отказ выгружать табличную часть напрямую — с именем владельца, который её и привезёт.
+
+        Табличная часть в OData — отдельная сущность, и `full_load`, натравленный прямо на неё,
+        листал её плоскими строками. Пагинация при этом работала (ключ страницы дополняется
+        `LineNumber`, иначе строки одного владельца равны по `Ref_Key` и порядок между запросами
+        не воспроизводится), а вот ЗАПИСЬ — нет: `DBWriter.save` заменяет группу целиком, считая,
+        что страница несёт её целиком. Строки одного владельца, разложенные по двум страницам,
+        помечали друг друга выпавшими из набора — вторая страница гасила первую, и в таблице
+        оставался хвост вместо всей части. Guard по `merged_on` тут не спасает: отметка берётся на
+        каждую страницу заново, поэтому первая для второй уже «старая».
+
+        Чинить этот режим незачем — он ничего не даёт. Строки табличной части приезжают ВЛОЖЕННЫМИ
+        в entry владельца и в изменениях, и в его полной выгрузке, то есть всегда целой группой, а
+        толстый владелец и так листается подобранным под его вес размером страницы. Осиротевшие
+        строки (владельца удалили физически) помечает отдельный проход по его состоянию.
+        """
+        owner = self.metadata.owner_of(object_name)
+        if owner is None:
+            return
+        raise ValueError(
+            f'{object_name} is a table part and cannot be loaded on its own: its rows would be '
+            f'split across pages, and each page marks the rows of the previous one as missing. '
+            f'Load its owner instead — full_load({owner!r}) brings the table part with it.')
 
     @_load_mode_tag(LOAD_MODE_FULL)
     def full_load(self, object_name: str, batch_size: int = 1000,
@@ -936,6 +986,15 @@ class Replicator:
         # MetadataReader.resolve_object_name. Ровно то же делают FullLoadCron и Handler.ON:
         # настраивая выгрузку, смотрят в базу, а не в конфигуратор.
         object_name = self.metadata.resolve_object_name(object_name)
+        # Класс, метаданные которого читаются, но сохранять который мы не беремся (METADATA_ONLY_TYPES
+        # — сейчас это план видов характеристик, нужный регистру бухгалтерии для видов субконто).
+        # В метаданных он есть, поэтому имя разрешилось бы и выгрузка пошла бы — с результатом,
+        # который никто не проверял. Отказываем сразу и по делу.
+        if object_name.startswith(METADATA_ONLY_TYPES):
+            raise ValueError(
+                f'{object_name}: this class is read for metadata only and is not supported for '
+                f'loading (supported: {", ".join(SUPPORTED_TYPES)})')
+        self._refuse_table_part(object_name)
         if date_field:
             date_field = self.metadata.resolve_field_name(object_name, date_field)
 
@@ -949,8 +1008,9 @@ class Replicator:
 
         reader = DataReader(self._odata_url, self.metadata, odata_auth=self._odata_auth,
                             request_timeout=self._request_timeout)
-        # Полная выгрузка = базовая версия: emn=0 (ниже любого номера пакета изменений >=1).
-        reader.exchange_message_no = 0
+        # Полная выгрузка = базовая версия: ниже любого номера пакета изменений (>=1), и заодно
+        # след автора строки для guard'а вставки (см. FULL_LOAD_MESSAGE_NO).
+        reader.exchange_message_no = FULL_LOAD_MESSAGE_NO
 
         # Момент старта прогона по часам БД: по нему помечаются пропавшие строки в конце прогона
         # (guard'ы save берут свою отметку на каждую страницу, см. ниже).
@@ -1820,6 +1880,7 @@ class Replicator:
         """Тело run_forever: цикл run_once с backoff и фоновыми полными выгрузками."""
         iterations = 0
         delay = interval
+        self._keep_node_lease = True
         with ThreadPoolExecutor(max_workers=self._full_load_workers,
                                 thread_name_prefix='full_load') as executor:
             while not stop.requested:
@@ -1846,6 +1907,7 @@ class Replicator:
 
                 stop.wait(delay)
             logger.info("Replication loop stopping, waiting for full loads to finish")
+        self._keep_node_lease = False
         self.close()
 
     def close(self) -> None:

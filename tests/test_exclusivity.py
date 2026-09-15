@@ -311,9 +311,9 @@ def test_confirming_a_package_cannot_outlive_the_lease():
     assert max(NOTIFY_TIMEOUT) < max(DEFAULT_REQUEST_TIMEOUT), 'таймаут подтверждения не сужен'
 
 
-def test_the_node_lease_is_held_across_cycles(db):
-    # Отпускать узел каждый цикл значило бы устраивать новую гонку раз в минуту: передача между
-    # циклами безопасна, но пользы ноль, а читатель мигал бы между процессами без причины.
+def test_the_node_lease_is_held_across_cycles_inside_the_loop(db):
+    # ВНУТРИ run_forever аренда живёт через все циклы: отпускать её каждую минуту значило бы
+    # устраивать новую гонку на ровном месте, а читатель мигал бы между процессами.
     with fake_1c.running_server(Path(__file__).parent / "responses" / "trade_demo_8.5") as (
             url, fake):
         first = Replicator(odata_url=url, odata_auth=None, exchange_name="ДляODATA",
@@ -321,7 +321,9 @@ def test_the_node_lease_is_held_across_cycles(db):
         second = Replicator(odata_url=url, odata_auth=None, exchange_name="ДляODATA",
                             queue_guid=fake.queue_guid, engine=db.engine, db_schema=db.schema)
         try:
+            first._keep_node_lease = True       # так его выставляет run_forever
             first.run_once()
+
             assert first._node_lease.still_mine(fake.queue_guid), 'узел отпущен между циклами'
             assert not second._claim_node(), 'сосед перехватил узел между циклами'
 
@@ -356,3 +358,26 @@ def test_a_lost_lease_after_confirming_is_reported(db, monkeypatch, caplog):
             assert errors, 'перехват во время подтверждения остался незамеченным'
         finally:
             repl.close()
+
+
+def test_a_standalone_run_once_releases_the_node(db):
+    """
+    Одиночный run_once — самостоятельный режим (в том числе по расписанию снаружи), и процесс
+    после него завершается. Оставь он узел захваченным, следующий запуск через минуту молча
+    ничего бы не сделал, и так все 15 минут TTL.
+    """
+    with fake_1c.running_server(Path(__file__).parent / "responses" / "trade_demo_8.5") as (
+            url, fake):
+        def make():
+            return Replicator(odata_url=url, odata_auth=None, exchange_name="ДляODATA",
+                              queue_guid=fake.queue_guid, engine=db.engine, db_schema=db.schema)
+
+        first = make()
+        first.run_once()
+
+        # Другой процесс (следующий запуск по расписанию) обязан взять узел сразу.
+        second = make()
+        try:
+            assert second._claim_node(), 'узел остался захваченным завершившимся процессом'
+        finally:
+            second.close()

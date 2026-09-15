@@ -34,13 +34,20 @@ def test_run_once_against_live_1c():
         db_schema=DB_SCHEMA,
     )
 
-    # Полный цикл read → save без notify: изменения не списываются из очереди, прогон повторяемый.
-    repl.run_once(notify_changes=False)
+    try:
+        # Полный цикл read → save без notify: изменения не списываются из очереди, прогон
+        # повторяемый.
+        repl.run_once(notify_changes=False)
 
-    # Метаданные реально прочитаны; если были изменения — в целевой схеме есть таблицы.
-    assert len(repl.metadata) > 0
-    if len(repl.changes) > 0:
-        assert inspect(repl.engine).get_table_names(schema=DB_SCHEMA)
+        # Метаданные реально прочитаны; если были изменения — в целевой схеме есть таблицы.
+        assert len(repl.metadata) > 0
+        if len(repl.changes) > 0:
+            assert inspect(repl.engine).get_table_names(schema=DB_SCHEMA)
+    finally:
+        # Отпускаем аренду узла обмена явно. Без этого повторный прогон в ближайшие 15 минут
+        # пропустил бы цикл (узел числился бы за завершившимся процессом) и прошёл бы ВХОЛОСТУЮ,
+        # не проверив ничего, — а выглядел бы успешным.
+        repl.close()
 
 
 if __name__ == "__main__":

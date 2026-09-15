@@ -963,3 +963,53 @@ def test_run_without_any_window_does_not_recheck(db, monkeypatch):
 
     assert calls == [None], 'объект дочитан с первого захода'
     assert captured["recheck"] is False
+
+
+def test_a_table_part_cannot_be_loaded_on_its_own(db):
+    """
+    Прямая выгрузка табличной части запрещена — с именем владельца в сообщении.
+
+    В OData табличная часть существует отдельной сущностью, и full_load листал её плоскими
+    строками. Пагинация при этом работала, а запись — нет: DBWriter.save заменяет группу целиком,
+    считая, что страница несёт её целиком. Строки одного владельца, разложенные по двум страницам,
+    помечали друг друга выпавшими из набора — вторая страница гасила первую. Guard по merged_on не
+    помогал: отметка берётся на каждую страницу заново, поэтому первая для второй уже «старая».
+
+    Чинить режим незачем: строки части приезжают вложенными в entry владельца и в изменениях, и в
+    его полной выгрузке, то есть всегда целой группой.
+    """
+    rep = _replicator(db)
+    try:
+        part = "Catalog_X_Rows"
+        rep.metadata[part] = MetadataObject(part, {"Ref_Key": "Guid", "LineNumber": "Int64"},
+                                            {"Ref_Key": "Guid", "LineNumber": "Int64"},
+                                            object_key=["Ref_Key"], is_table_part=True)
+
+        with pytest.raises(ValueError) as err:
+            rep.full_load(part)
+
+        message = str(err.value)
+        assert "Catalog_X" in message, 'в отказе должно стоять имя владельца — им и грузят'
+        assert "table part" in message
+        # Владелец грузится как грузился: запрет ровно на прямой вызов части.
+        assert rep.metadata.owner_of(part) == "Catalog_X"
+    finally:
+        rep.close()
+
+
+def test_the_owner_of_a_table_part_is_still_loadable(db, monkeypatch):
+    # Обратная сторона запрета: сам владелец ничего не теряет.
+    rep = _replicator(db)
+    try:
+        rep.metadata["Catalog_X_Rows"] = MetadataObject(
+            "Catalog_X_Rows", {"Ref_Key": "Guid", "LineNumber": "Int64"},
+            {"Ref_Key": "Guid", "LineNumber": "Int64"}, object_key=["Ref_Key"], is_table_part=True)
+
+        def empty_read(self, object_name, top=None, key_fields=None, extra_filter=None, skip=None):
+            self.clear()
+            return 0
+
+        monkeypatch.setattr(DataReader, "read_object", empty_read)
+        assert rep.full_load("Catalog_X") == 0
+    finally:
+        rep.close()

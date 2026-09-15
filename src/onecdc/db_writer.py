@@ -6,7 +6,7 @@ from sqlalchemy import (Engine, Index, JSON, MetaData, Table, Integer, Numeric,
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge, mergeResult
 
-from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD,
+from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD, FULL_LOAD_MESSAGE_NO,
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
 from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
 from onecdc.db_logs import create_index_if_absent
@@ -27,9 +27,7 @@ INSERTED_ON_FIELD = 'inserted_on'
 # ссылаются на справочники (по *_Key), регистры — на документы (Recorder), поэтому родителей
 # сохраняем раньше. Табличные части (Catalog_X_Y / Document_X_Y) попадают в группу своего владельца
 # по префиксу. Состав ссылочных классов — см. ENTITY_TYPES в metadata_reader.
-SAVE_ORDER_PREFIXES = ('Catalog', 'ChartOfCharacteristicTypes', 'ChartOfAccounts',
-                       'ChartOfCalculationTypes', 'BusinessProcess', 'Task',
-                       'Document', 'InformationRegister', 'AccumulationRegister',
+SAVE_ORDER_PREFIXES = ('Catalog', 'Document', 'InformationRegister', 'AccumulationRegister',
                        'AccountingRegister')
 
 
@@ -94,7 +92,8 @@ class DBWriter:
           это update);
         - регистр/табличная часть: own-or-skip группы целиком (группа умещается на одной странице) —
           scoped-удаление с guard'ом, update_condition и insert_condition, чтобы «горячую» группу
-          (есть строка, переписанная после отметки) не трогать, а остальные заменить снимком.
+          (есть строка, переписанная ИЗМЕНЕНИЕМ после отметки — см. _group_not_touched_since) не
+          трогать, а остальные заменить снимком.
 
         Строки старше отметки страницы снимок перезаписывает — это и делает полную выгрузку способом
         выровнять данные, а не только добить то, что ни разу не менялось.
@@ -174,8 +173,8 @@ class DBWriter:
                     result = merge.exec(
                         delete_condition=and_(scoped, self._not_touched_since(merge.table, started_at)),
                         update_condition=self._not_touched_since(merge.table, started_at),
-                        insert_condition=self._group_not_touched_since(merge, mapped_object_key,
-                                                                       started_at))
+                        insert_condition=self._group_not_touched_since(
+                            merge, mapped_object_key, started_at, object_name))
                 else:
                     result = merge.exec(delete_condition=scoped)
 
@@ -272,16 +271,53 @@ class DBWriter:
         """
         return self.lease_guard() if self.lease_guard is not None else None
 
-    @staticmethod
-    def _group_not_touched_since(merge, mapped_object_key: list[str], started_at: datetime):
-        """insert_condition: не вставлять строку в группу (по object_key), где хоть одну строку
-        переписали после старта прогона — иначе снимок воскресил бы строку, удалённую изменением.
-        В insert-фазе строки по PK ещё нет, поэтому проверяем на уровне группы коррелированным
-        NOT EXISTS по отдельному алиасу целевой таблицы."""
+    def _group_not_touched_since(self, merge, mapped_object_key: list[str], started_at: datetime,
+                                 object_name: str):
+        """
+        insert_condition: не вставлять строку в группу (по object_key), где хоть одну строку
+        переписал ПОТОК ИЗМЕНЕНИЙ после старта прогона — иначе снимок воскресил бы строку,
+        удалённую изменением. В insert-фазе строки по PK ещё нет, поэтому проверяем на уровне
+        группы коррелированным NOT EXISTS по отдельному алиасу целевой таблицы.
+
+        «Поток изменений, а не мы сами» — по номеру пакета, и без этого уточнения guard ловил
+        собственную вставку. dbmerge выполняет фазы в порядке UPDATE → INSERT и штампует
+        обновлённым строкам merged_on = now(), то есть время ПОСЛЕ отметки страницы. Группа, в
+        которой снимок обновил хоть одну строку, становилась «горячей» для своей же вставки: новые
+        строки этой группы не вставлялись никогда, и полная выгрузка не сходилась за один прогон
+        (страница [1 изменена, 2, 3 новая] давала в таблице только 1 и 2).
+
+        Отличить своё от чужого в момент вставки больше нечем: строка с merged_on >= started_at
+        может быть и нашей, и чужой, а каким merged_on был ДО нашего UPDATE, в операторе уже не
+        видно. Сравнивать вместо этого с отметкой, взятой после своей фазы UPDATE, нельзя: тогда
+        перестают блокировать вставку изменения, пришедшие за время чтения страницы, — а это и есть
+        основное окно опасности, минуты против миллисекунд.
+
+        Номер пакета такой след даёт точно: полная выгрузка пишет FULL_LOAD_MESSAGE_NO, поток
+        изменений — номер сообщения 1С (всегда >= 1). Обе пометки полной выгрузки, поднимающие
+        merged_on в обход save (mark_missing, mark_orphaned_table_part), идут ПОСЛЕ всех страниц
+        прогона и внутрь этого окна не попадают.
+
+        NULL считаем чужим (is_distinct_from): это строка, записанная до появления колонки, и
+        толковать её в свою пользу незачем.
+        """
+        message_no_field = self.name_mapper.map_field_name(EXCHANGE_MESSAGE_NO_FIELD, object_name)
         g = merge.table.alias()
         conds = [g.c[col] == merge.temp_table.c[col] for col in mapped_object_key]
         conds.append(g.c[MERGED_ON_FIELD] >= started_at)
-        return ~exists().where(and_(*conds))
+        if message_no_field in g.c:
+            conds.append(g.c[message_no_field].is_distinct_from(FULL_LOAD_MESSAGE_NO))
+        else:
+            # Колонку ведёт библиотека (её проставляет DataReader каждой записи), и без неё автора
+            # строки не определить. Остаёмся на осторожной стороне — группу не трогаем, — но молчать
+            # об этом нельзя: снаружи это выглядит как «полная выгрузка не добирает строки».
+            logger.warning("%s has no %s column: full load cannot tell its own writes from changes, "
+                           "new rows of touched groups will be skipped",
+                           object_name, message_no_field)
+        guard = ~exists().where(and_(*conds))
+        # Фенсинг аренды: вставка — такая же запись снимка, как update и delete, и процесс,
+        # потерявший объект, не вправе делать и её (см. _still_ours).
+        ours = self._still_ours()
+        return guard if ours is None else and_(guard, ours)
 
     def target_table(self, table_name: str) -> Table:
         """Table-описание целевой таблицы по отражению из БД. Нужно тем, кто пишет в неё не через

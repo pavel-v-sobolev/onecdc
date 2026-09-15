@@ -96,7 +96,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import ModuleType
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, Engine, exists,
                         Float, func, insert, inspect, MetaData, or_, select, String, Table,
@@ -489,24 +489,11 @@ def _handlers_table(metadata: MetaData, schema_name: str | None) -> Table:
     )
 
 
-def _add_missing_columns(engine: Engine, table: Table) -> None:
-    """
-    Дописывает в существующую таблицу колонки, которых в ней ещё нет: create(checkfirst=True)
-    заводит таблицу целиком, но давно созданную не трогает, и после обновления библиотеки строки
-    состояния остались бы без новых колонок.
-    """
-    existing = {column['name'] for column in inspect(engine).get_columns(
-        table.name, schema=table.schema)}
-    missing = [column for column in table.columns if column.name not in existing]
-    if not missing:
-        return
-    compiler = engine.dialect.ddl_compiler(engine.dialect, None)
-    with engine.begin() as conn:
-        for column in missing:
-            conn.execute(text(f'ALTER TABLE {compiler.preparer.format_table(table)} '
-                              f'ADD COLUMN {compiler.get_column_specification(column)}'))
-    logger.info("Added columns to %s: %s", table.name, ', '.join(c.name for c in missing))
-    _carry_over_update_flag(engine, table, existing, {c.name for c in missing})
+def _create_table(engine: Engine, table: Table) -> None:
+    """Создание с общим переездом колонок плюс перенос данных, нужный только этой таблице."""
+    existing, added = create_table_if_absent(engine, table)
+    if added:
+        _carry_over_update_flag(engine, table, existing, added)
 
 
 def _carry_over_update_flag(engine: Engine, table: Table, existing: set, added: set) -> None:
@@ -557,8 +544,7 @@ class HandlerSignals:
         self.table = _handlers_table(MetaData(), self.schema_name)
         # Таблицу заводит и репликатор тоже: обработчиков в этом процессе может не быть вовсе, а
         # поднимать флаг всё равно надо — иначе первый же сигнал упал бы на отсутствующей таблице.
-        create_table_if_absent(engine, self.table)
-        _add_missing_columns(engine, self.table)
+        _create_table(engine, self.table)
         self._lock = threading.Lock()
         self._subscriptions: dict[str, list[tuple[str, bool]]] = {}
         self._read_at = 0.0
@@ -706,8 +692,7 @@ class HandlerLoop:
         self._writes = write_tracker
 
         self.table = _handlers_table(MetaData(), self.schema_name)
-        create_table_if_absent(engine, self.table)
-        _add_missing_columns(engine, self.table)
+        _create_table(engine, self.table)
         self._register_handler()
 
         self._lock = threading.Lock()

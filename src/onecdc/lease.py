@@ -35,7 +35,7 @@ from sqlalchemy import create_engine, func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, HEARTBEAT_JOIN_TIMEOUT
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -272,7 +272,21 @@ class Lease:
                          .values(**{self.heartbeat_field: func.now()}))
 
     def close(self) -> None:
+        """
+        Останавливает поток отметки живости и ДОЖИДАЕТСЯ его.
+
+        Именно дожидается: одного флага мало. Поток мог уже пройти проверку флага и стоять внутри
+        UPDATE — тогда close() возвращается, а запись ложится в таблицу ПОСЛЕ него, и строка,
+        которую вызывающий считает отпущенной, оказывается свежей. Отсюда же «relation does not
+        exist» в логе от потока, чью схему успели снести.
+
+        Ожидание ограничено HEARTBEAT_JOIN_TIMEOUT: поток стоит на ожидании флага, который close()
+        будит сразу, так что в худшем случае это один уже начатый запрос.
+        """
         self._closed.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=HEARTBEAT_JOIN_TIMEOUT)
 
     def _start_heartbeat(self) -> None:
         """Поднимает поток отметки живости, если его ещё нет. Зовётся под self._lock."""
