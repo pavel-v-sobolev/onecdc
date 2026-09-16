@@ -32,7 +32,7 @@ from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FI
 from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
 from onecdc.lease import Lease, lease_engine
 from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
-from onecdc.stop_signal import StopSignal, install_signal_handlers
+from onecdc.stop_signal import StopSignal, install_signal_handlers, stop_requested
 from onecdc.write_tracker import WriteTracker
 from onecdc.logging_config import _ensure_handler, get_logger, load_mode, LOAD_MODE_CHANGES, LOAD_MODE_FULL
 
@@ -398,6 +398,17 @@ class _Window:
         left = f"{self.start:{fmt}}" if self.start is not None else '-inf'
         right = f"{self.end:{fmt}}" if self.end is not None else '+inf'
         return f"[{left} .. {right})"
+
+
+class FullLoadStopped(Exception):
+    """
+    Полную выгрузку прервали остановкой процесса.
+
+    Отдельный тип, потому что это не сбой: заказ выгрузки остаётся, объект НЕ отмечается
+    выгруженным, и после перезапуска прогон начнётся заново. Прочитанные страницы при этом не
+    пропадают — данные записаны, а выгрузка идемпотентна; повторно тратится только время на их
+    перечитывание. Запоминать прогресс было бы отдельным механизмом с состоянием в БД.
+    """
 
 
 class Replicator:
@@ -1190,6 +1201,7 @@ class Replicator:
                 rows_modified += _rows_modified(result)
             total += page
             pages += 1
+            self._check_not_stopping(object_name)
             if page < page_size:
                 break
             if max_pages is not None and pages >= max_pages:
@@ -1268,6 +1280,7 @@ class Replicator:
             rows_modified += modified
             logger.debug("Full load of %s: window %s — %s records%s", object_name, window.title,
                          records, '' if exhausted else ' (hit the page limit)')
+            self._check_not_stopping(object_name)
             return records, exhausted
 
         # Сюда попадают только объекты, которые НЕ дочитались за лимит страниц, — то есть заведомо
@@ -1760,8 +1773,9 @@ class Replicator:
         iterations = 0
         delay = interval
         self._keep_node_lease = True
-        with ThreadPoolExecutor(max_workers=self._full_load_workers,
-                                thread_name_prefix='full_load') as executor:
+        executor = ThreadPoolExecutor(max_workers=self._full_load_workers,
+                                      thread_name_prefix='full_load')
+        try:
             while not stop.requested:
                 try:
                     self.run_once()
@@ -1795,7 +1809,18 @@ class Replicator:
                     break
 
                 stop.wait(delay)
-            logger.info("Replication loop stopping, waiting for full loads to finish")
+        finally:
+            # Не начатые выгрузки ОТМЕНЯЕМ, а не дорабатываем. Выход из `with ThreadPoolExecutor`
+            # — это shutdown(wait=True): пул дожидался ВСЕХ поставленных заданий, включая ещё не
+            # начатые, а ставятся они разом, по всему списку заказов. Очередь из десятка объектов
+            # первичной выгрузки — это часы, и stop_grace_period контейнера их не покрывает:
+            # дело кончалось SIGKILL посреди merge.
+            #
+            # Уже идущие выгрузки дожидаемся: они прервутся сами на границе страницы или окна
+            # (см. _check_not_stopping), и ждать остаётся одну страницу, а не весь прогон.
+            logger.info("Replication loop stopping: cancelling queued full loads and waiting for "
+                        "the running ones to reach a page boundary")
+            executor.shutdown(wait=True, cancel_futures=True)
         self._keep_node_lease = False
         self.close()
 
@@ -1841,6 +1866,20 @@ class Replicator:
             if claimed:
                 self._full_load_claim.release(object_full_name)
 
+    def _check_not_stopping(self, object_name: str) -> None:
+        """
+        Бросает FullLoadStopped, если процесс останавливают. Зовётся между страницами и окнами.
+
+        Без этой проверки выгрузка дочитывалась до конца, сколько бы часов ни заняла, — а
+        `stop_grace_period` контейнера это не покрывает, и дело кончалось SIGKILL посреди merge.
+        Смотрим и свой StopSignal (его взводит request_stop), и процессный флаг: ручной full_load
+        крутится без цикла, и своего сигнала у него нет.
+        """
+        if stop_requested() or (self._stop_signal is not None and self._stop_signal.requested):
+            raise FullLoadStopped(
+                f'Full load of {object_name} was interrupted by a stop signal; the request stays '
+                f'in place and the load will start over after restart')
+
     def _dispatch_full_loads(self, executor: ThreadPoolExecutor) -> None:
         """
         Ставит в пул полные выгрузки объектов с full_load_is_required, кроме уже выполняющихся.
@@ -1864,6 +1903,10 @@ class Replicator:
             rows_modified = self.full_load(object_full_name)
             self.metadata.mark_full_loaded(object_full_name, rows_modified=rows_modified,
                                            minutes=round((time.monotonic() - started) / 60, 3))
+        except FullLoadStopped as stopped:
+            # Не сбой: объект НЕ отмечаем выгруженным и метрик не пишем — они описывают
+            # завершённый прогон. Заказ остаётся, после перезапуска выгрузка начнётся заново.
+            logger.info("%s", stopped)
         except Exception as exc:
             _log_failure(exc, "Background full_load of %s failed, will retry", object_full_name)
         finally:

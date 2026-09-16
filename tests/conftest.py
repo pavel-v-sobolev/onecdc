@@ -78,3 +78,19 @@ class FakeResponseMixin:
 
     def __exit__(self, *exc_info):
         return False
+
+
+@pytest.fixture(autouse=True)
+def _reset_stop_request():
+    """
+    Снимает процессный флаг остановки между тестами.
+
+    Флаг липкий по замыслу — останавливающийся процесс не передумывает, — но в одном прогоне
+    pytest это один и тот же процесс. Тест, проверяющий реакцию на SIGTERM, иначе взводил бы флаг
+    всем последующим: полные выгрузки начали бы прерываться «остановкой», которой никто не просил.
+    """
+    from onecdc.stop_signal import reset_stop_request
+
+    reset_stop_request()
+    yield
+    reset_stop_request()

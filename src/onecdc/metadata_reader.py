@@ -241,6 +241,9 @@ class MetadataReader(UserDict):
         # get_metadata может вызываться лениво из фоновых потоков full_load (новый объект/поле)
         # параллельно с основным циклом — сериализуем перестроение словаря.
         self._lock = threading.Lock()
+        # Об исчезнувших объектах предупреждаем один раз на объект, а не на каждое перечитывание
+        # метаданных (см. _warn_about_absent).
+        self._absent_reported: set[str] = set()
 
         # Маппер имён — ОДИН на процесс, а не по месту вызова: он ведёт реестр заявок
         # onecdc_name_claims (см. name_mapper), и отдельные экземпляры зря перечитывали бы его
@@ -403,12 +406,31 @@ class MetadataReader(UserDict):
         в заблуждение.
         """
         with self._lock, load_mode(LOAD_MODE_METADATA):
-            self._fetch_and_parse_metadata()
-            self.is_loaded = True
+            objects = self._fetch_and_parse_metadata()
+            # ПОДМЕНА ЦЕЛИКОМ, а не пополнение на месте. Словарь читают чужие потоки — фоновая
+            # выгрузка перебирает его на КАЖДОЙ странице (Replicator._full_load_tables), — и
+            # блокировку они не берут. Пополнение под ними давало
+            # «RuntimeError: dictionary changed size during iteration», то есть обрыв полной
+            # выгрузки посреди прогона: на крупном объекте это часы работы впустую. Подмена ссылки
+            # неделима, и читатель видит либо старый словарь целиком, либо новый.
+            #
+            # Заодно из памяти уходит объект, пропавший из $metadata: раньше словарь только
+            # пополнялся, и пропавший жил до перезапуска. Это было безопасно ровно потому, что
+            # реестр синхронизировался удалением строк, — теперь он их помечает (см. _sync_objects),
+            # и состояние выгрузки исчезновение объекта переживает.
+            self.data = objects
             if self.engine is not None:
                 self._sync_objects(list(self.keys()))
+            # ПОСЛЕ синхронизации: упади она — метаданные не считаются загруженными, и следующий
+            # цикл попробует снова, а не пойдёт работать с objects_table = None.
+            self.is_loaded = True
 
-    def _fetch_and_parse_metadata(self):
+    def _fetch_and_parse_metadata(self) -> dict:
+        """Читает $metadata и собирает НОВЫЙ словарь объектов, не трогая текущий.
+
+        Отдельный словарь, а не запись в self: пока сборка идёт, читатели работают со старым, а
+        неудача на середине (сеть, неполный ответ) не оставляет словарь наполовину разобранным.
+        Публикует его вызывающий одной подменой ссылки (см. get_metadata)."""
         logger.info('Requesting metadata from 1C ODATA')
         
         url = f'{self.odata_url}/$metadata'
@@ -431,6 +453,7 @@ class MetadataReader(UserDict):
         # у регистраторного рядом лежит <Имя>_RecordType, у независимого его нет (см. ниже).
         entity_type_names = {i.get('@Name') for i in metadata_entity_types}
 
+        objects: dict[str, MetadataObject] = {}
         for item in metadata_entity_types:
 
             item_name = item.get('@Name')
@@ -448,7 +471,7 @@ class MetadataReader(UserDict):
                     # программно ими не пользуются (внутри JSON), и в dimensions им делать нечего.
                     properties.update({f: EXT_DIMENSIONS_TYPE
                                        for f in EXT_DIMENSIONS_FIELDS.values()})
-                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
+                objects[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
                                                  dimensions, resources, attributes)
 
             elif (item_name.startswith(REGISTER_TYPES)
@@ -465,7 +488,7 @@ class MetadataReader(UserDict):
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 dimensions, resources, attributes = _classify_register_fields(
                     item_name, properties, complextypes)
-                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
+                objects[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
                                                  dimensions, resources, attributes)
 
             elif (item_name.startswith(KNOWN_ENTITY_TYPES)
@@ -477,10 +500,10 @@ class MetadataReader(UserDict):
                 primary_key = self._read_metadata_item_key(item, properties, item_name)
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 is_table_part = _check_object_is_table_part(item_name, complextypes)
-                self[item_name] = MetadataObject(item_name, properties, primary_key, object_key, 
+                objects[item_name] = MetadataObject(item_name, properties, primary_key, object_key, 
                                                  is_table_part=is_table_part)
 
-
+        return objects
 
     # --- Реестр объектов и состояния полной выгрузки (onecdc_metadata_objects) ---
 
@@ -595,7 +618,21 @@ class MetadataReader(UserDict):
                 'full_load_owner': None, 'full_load_heartbeat_at': None})
             
         with dbmerge(engine=self.engine, table_name=METADATA_OBJECTS_TABLE, data=data,
-                     key=['object_full_name'], delete_mode='delete', 
+                     key=['object_full_name'],
+                     # ПОМЕЧАЕМ, а не удаляем. В строке реестра лежит не только описание объекта,
+                     # но и его состояние: захват под полную выгрузку (владелец + отметка живости),
+                     # отметка «выгружался целиком», заказ выгрузки, метрики. Удаление уносило всё
+                     # это разом — а объект пропадает из $metadata не только навсегда: состав
+                     # OData переустанавливают внешней обработкой, и на секунды публикация неполна.
+                     #
+                     # Цена была велика и молчалива. Захват держит ОДИН процесс, а удаляет строку
+                     # ДРУГОЙ — и первый об этом не узнает: его heartbeat обновит ноль строк, для
+                     # него это неотличимо от успеха. Строка вернётся с пустым владельцем, и объект
+                     # спокойно захватит кто угодно, начав выгружать его параллельно первому. То
+                     # есть исключительность снималась ИЗВНЕ, без участия обоих процессов. А
+                     # mark_full_loaded в конце прогона тоже обновлял ноль строк, и объект
+                     # выглядел ни разу не выгруженным — то есть уходил в выгрузку по новой.
+                     delete_mode='mark', delete_mark_field='absent_from_metadata',
                      merged_on_field='merged_on', schema=self.schema,
                      temp_schema=self.temp_schema,
                      data_types={'object_full_name': String(),
@@ -609,15 +646,40 @@ class MetadataReader(UserDict):
                                  'last_full_load_rows_modified': Integer(),
                                  'last_full_load_minutes': Float(),
                                  'full_load_owner': String(),
-                                 'full_load_heartbeat_at': DateTime()
+                                 'full_load_heartbeat_at': DateTime(),
+                                 'absent_from_metadata': Boolean()
                                  },
                      skip_update_fields=['full_load_is_required', 'last_full_load_dt',
                                          'last_full_load_rows_modified',
                                          'last_full_load_minutes',
                                          'full_load_owner',
                                          'full_load_heartbeat_at']) as merge:
-            merge.exec()
+            result = merge.exec()
             self.objects_table = merge.table   # Table-описание созданной/существующей таблицы
+        if result is not None and result.deleted_row_count:
+            self._warn_about_absent(result.deleted_row_count)
+
+    def _warn_about_absent(self, marked: int) -> None:
+        """
+        Сообщает об объектах, пропавших из `$metadata`. Один раз на объект: имена берём из самой
+        таблицы, потому что dbmerge отдаёт только количество.
+
+        Молчать нельзя. Исчезновение объекта из публикации — это либо ошибка настройки состава
+        OData, либо осознанное решение; в обоих случаях оно означает, что изменения по объекту
+        больше не поедут, а его таблица останется в схеме как есть.
+        """
+        table = self.objects_table
+        with self.engine.begin() as conn:
+            names = list(conn.execute(select(table.c.object_full_name)
+                                      .where(table.c.absent_from_metadata.is_(True))).scalars())
+        fresh = [name for name in names if name not in self._absent_reported]
+        self._absent_reported.update(names)
+        if fresh:
+            logger.warning(
+                "Objects are gone from $metadata and marked as absent in the registry (%s of %s "
+                "just now): %s. Their changes will no longer arrive; their tables and their state "
+                "(full load claim, history) are left untouched",
+                marked, len(names), ', '.join(sorted(fresh)))
 
     def require_full_load_if_new(self, object_full_name: str) -> None:
         """
@@ -687,12 +749,18 @@ class MetadataReader(UserDict):
         return row is not None and row.last_full_load_dt is not None
 
     def list_full_load_required(self) -> list[str]:
-        """Полные имена объектов, ожидающих полной выгрузки (full_load_is_required)."""
+        """
+        Полные имена объектов, ожидающих полной выгрузки (full_load_is_required).
+
+        Помеченные отсутствующими в `$metadata` исключаются: выгружать их негде — 1С такого объекта
+        не отдаст. Заказ при этом НЕ снимаем: вернётся объект в публикацию — вернётся и он.
+        """
         table = self.objects_table
         with self.engine.connect() as conn:
             return list(conn.execute(
                 select(table.c.object_full_name)
-                .where(table.c.full_load_is_required)).scalars())
+                .where(table.c.full_load_is_required,
+                       table.c.absent_from_metadata.is_not(True))).scalars())
 
     def mark_full_loaded(self, object_full_name: str, rows_modified: int | None = None,
                          minutes: float | None = None) -> None:

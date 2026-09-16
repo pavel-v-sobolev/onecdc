@@ -28,12 +28,62 @@ logger = get_logger(__name__)
 # WeakSet: закончившийся цикл свой сигнал больше не держит, и тот уходит вместе с ним.
 _stop_signals: "weakref.WeakSet[StopSignal]" = weakref.WeakSet()
 _handlers_installed = False
+# Остановку УЖЕ просили. Флаг процессный и живёт отдельно от списка циклов: сигнал приходит и
+# тогда, когда ни одного цикла ещё нет (конструкторы, загрузка метаданных, первый run_once, ручной
+# full_load), и цикл, созданный после сигнала, обязан родиться уже взведённым. Иначе SIGTERM,
+# пришедший за миг до run_forever, терялся совсем.
+_stop_requested = False
+# Что стояло на сигнале до нас. Библиотека не вправе молча забрать остановку у приложения-хозяина.
+_previous_handlers: dict = {}
+
+
+def stop_requested() -> bool:
+    """Просили ли остановку процесса. Нужно там, где своего StopSignal нет, — например внутри
+    полной выгрузки, запущенной руками."""
+    return _stop_requested
+
+
+def reset_stop_request() -> None:
+    """
+    Снимает процессный флаг остановки.
+
+    Останавливающийся процесс не передумывает, поэтому в норме флаг липкий и снимать его незачем.
+    Нужен он приложению-хозяину, которое останавливает циклы и поднимает новые в том же процессе:
+    без сброса новый цикл родился бы уже взведённым. Тестам — по той же причине.
+
+    Живые StopSignal не трогаем: их взводили точечно, и это решение не наше.
+    """
+    global _stop_requested
+    _stop_requested = False
 
 
 def handle_stop_signal(signum, frame) -> None:
-    logger.info("Received signal %s, stopping after current cycle", signum)
-    for stop in list(_stop_signals):
+    global _stop_requested
+    _stop_requested = True
+    live = list(_stop_signals)
+    for stop in live:
         stop.requested = True
+
+    previous = _previous_handlers.get(signum)
+    if live:
+        logger.info("Received signal %s, stopping after current cycle", signum)
+        # Цепочка: у приложения-хозяина мог быть свой обработчик, и забирать у него остановку
+        # молча нельзя. SIG_DFL/SIG_IGN не зовём — первый убил бы процесс мимо graceful-остановки.
+        if callable(previous) and previous not in (signal.SIG_DFL, signal.SIG_IGN):
+            previous(signum, frame)
+        return
+
+    # Останавливать нечего: цикла ещё нет или он уже закончился. Проглотить сигнал здесь — худшее
+    # из решений: без перехвата SIGTERM просто завершил бы процесс, а с нашим он не делает НИЧЕГО,
+    # и docker stop добивает SIGKILL по истечении grace period. Возвращаем поведение по умолчанию
+    # и отправляем сигнал себе заново — как нас и просили.
+    logger.info("Received signal %s with no running loops — terminating", signum)
+    global _handlers_installed
+    # Перехват мы только что сняли, а значит он больше не стоит. Если процесс всё же переживёт
+    # сигнал (прежним обработчиком было SIG_IGN), следующий цикл обязан поставить перехват заново.
+    _handlers_installed = False
+    signal.signal(signum, previous if previous is not None else signal.SIG_DFL)
+    signal.raise_signal(signum)
 
 
 def install_signal_handlers(*, quiet: bool = True) -> bool:
@@ -52,8 +102,15 @@ def install_signal_handlers(*, quiet: bool = True) -> bool:
     if _handlers_installed:
         return True
     try:
-        signal.signal(signal.SIGTERM, handle_stop_signal)
-        signal.signal(signal.SIGINT, handle_stop_signal)
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous = signal.getsignal(signum)
+            # Себя «прежним» не запоминаем. Установка бывает повторной — хозяин позвал явно, а
+            # до него уже сработал конструктор, — и тогда getsignal вернёт НАС. Записав это,
+            # обработчик стал бы звать сам себя до RecursionError, и остановка превращалась бы в
+            # падение. Сохраняем первоначального владельца сигнала.
+            if previous is not handle_stop_signal:
+                _previous_handlers[signum] = previous
+            signal.signal(signum, handle_stop_signal)
     except ValueError:
         if quiet:
             logger.debug("Not the main thread: signal handlers will be installed by the main one")
@@ -73,7 +130,9 @@ class StopSignal:
     останавливается разом) либо точечно через request_stop() того, кто цикл крутит."""
 
     def __init__(self):
-        self.requested = False
+        # Родиться уже взведённым, если остановку просили до нас: сигнал, пришедший за миг до
+        # запуска цикла, иначе терялся бы совсем.
+        self.requested = _stop_requested
         _stop_signals.add(self)
         install_signal_handlers()
 
