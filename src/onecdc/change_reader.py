@@ -2,9 +2,10 @@ import requests
 
 import xmltodict
 
-from onecdc.data_reader import DataReader
+from onecdc.data_reader import MAX_RESPONSE_BYTES, DataReader
 from onecdc.metadata_reader import MetadataReader, resolve_timeout
-from onecdc.common_functions import format_bytes, parse_odata, raise_for_status
+from onecdc.common_functions import (format_bytes, parse_odata, raise_for_status,
+                                     read_within_limit)
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -18,9 +19,10 @@ NOTIFY_TIMEOUT: tuple[float, float] = (30, 30)
 class ChangeReader(DataReader):
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
                  metadata: MetadataReader, odata_auth: tuple[str, str] | None = None,
-                 request_timeout: float | None = None, read_subconto: bool = False):
+                 request_timeout: float | None = None, read_subconto: bool = False,
+                 max_response_bytes: int | None = MAX_RESPONSE_BYTES):
         super().__init__(odata_url, metadata, odata_auth, request_timeout,
-                         read_subconto=read_subconto)
+                         read_subconto=read_subconto, max_response_bytes=max_response_bytes)
         self.exchange_name = exchange_name
         self.queue_guid = queue_guid
         self.message_no = 0
@@ -39,11 +41,19 @@ class ChangeReader(DataReader):
 
         url = f"{self.odata_url}/SelectChanges?DataExchangePoint='{self.odata_url}/ExchangePlan_{self.exchange_name}(guid'{self.queue_guid}')'&MessageNo={self.message_no}"
 
-        response = requests.post(url,auth=self.odata_auth,timeout=resolve_timeout(self.request_timeout))
-        raise_for_status(response, f'SelectChanges (message {self.message_no})')
-        self.last_response_bytes = len(response.content)
+        context = f'SelectChanges (message {self.message_no})'
+        # Потоково и с потолком: пакет формирует 1С, и ограничить его со стороны клиента нечем —
+        # $top/$filter она здесь игнорирует. Единственное, что в нашей власти, — не принимать
+        # ответ, который нас убьёт (см. read_within_limit и MAX_RESPONSE_BYTES).
+        with requests.post(url, auth=self.odata_auth, stream=True,
+                           timeout=resolve_timeout(self.request_timeout)) as response:
+            if not response.ok:
+                raise_for_status(response, context)
+            body = read_within_limit(response, self.max_response_bytes, context)
+            encoding = response.encoding or 'utf-8'
+        self.last_response_bytes = len(body)
 
-        feed = parse_odata(response.text, 'feed', f'SelectChanges (message {self.message_no})',
+        feed = parse_odata(body.decode(encoding, errors='replace'), 'feed', context,
                            force_list=('d:element', 'entry'))
         change_entries = (feed or {}).get('entry') or []
 

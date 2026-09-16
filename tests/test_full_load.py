@@ -18,7 +18,7 @@ from onecdc.data_reader import DataReader
 from onecdc.metadata_reader import MetadataObject, MetadataReader
 from onecdc.replicator import (FULL_LOAD_EMPTY_WINDOWS_TO_STOP,
                               FULL_LOAD_PARTITION_MAX_PAGES, Replicator)
-from conftest import TEST_QUEUE_GUID
+from conftest import FakeResponseMixin, TEST_QUEUE_GUID
 
 # Нулевой результат merge — writer.save в тестах замокан, но full_load агрегирует его результат.
 _ZERO_RESULT = mergeResult(0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -278,7 +278,7 @@ def test_read_object_page_url(db, monkeypatch):
     reader = DataReader("http://x", md)
     captured = {}
 
-    class _Resp:
+    class _Resp(FakeResponseMixin):
         ok = True
         text = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         content = text.encode()
@@ -542,7 +542,7 @@ def test_read_object_extra_filter(db, monkeypatch):
     reader = DataReader("http://x", md)
     captured = {}
 
-    class _Resp:
+    class _Resp(FakeResponseMixin):
         ok = True
         text = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         content = text.encode()
@@ -883,7 +883,7 @@ def test_orderby_is_extended_to_the_whole_primary_key(db, monkeypatch):
     reader = DataReader("http://x", md)
     captured = []
 
-    class _Resp:
+    class _Resp(FakeResponseMixin):
         ok = True
         text = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         content = text.encode()

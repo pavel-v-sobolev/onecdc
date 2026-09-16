@@ -16,6 +16,8 @@ from onecdc.data_reader import DataReader
 from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, EXT_DIMENSIONS_FIELDS,
                                     EXT_DIMENSIONS_TYPE, MetadataObject, MetadataReader)
 
+from conftest import FakeResponseMixin
+
 REG = f"{ACCOUNTING_REGISTER_TYPE}_Main"
 REC = "6a85159f-8ba8-11dd-89d9-00055dcfc5ca"
 KIND_1 = "6a6ada17-52bb-4311-b1cc-cf7913896204"
@@ -79,7 +81,7 @@ def _result(*elements: str) -> str:
             + ''.join(elements) + '</d:Result>')
 
 
-class _Response:
+class _Response(FakeResponseMixin):
     headers: dict = {}
     reason = 'Bad Request'
     url = 'http://fake'

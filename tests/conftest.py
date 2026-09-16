@@ -47,3 +47,34 @@ def db():
         with engine.begin() as conn:
             conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         engine.dispose()
+
+
+class FakeResponseMixin:
+    """
+    Дополняет самодельные заглушки ответа 1С до той части интерфейса requests, которой пользуется
+    боевой код: потоковое чтение с потолком размера (`iter_content`, `headers`) и контекстный
+    менеджер.
+
+    Заглушки писались, когда код читал только `.text`/`.content`. После появления потолка размера
+    ответа (он читает тело кусками, чтобы отказаться от гигантского, не приняв его целиком) этого
+    стало мало. Заводим одно место, а не восемь копий: интерфейс общий, и расходиться ему незачем.
+    """
+
+    headers: dict = {}
+    # Кодировку requests берёт из заголовков; у заглушек их нет, а боевой код на неё смотрит.
+    encoding = 'utf-8'
+
+    def iter_content(self, chunk_size=None):
+        body = getattr(self, 'content', None)
+        if body is None:
+            body = (getattr(self, 'text', '') or '').encode('utf-8')
+        yield body
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False

@@ -13,10 +13,10 @@ from onecdc import Replicator
 from onecdc.common_functions import MAX_ERROR_BODY_CHARS, extract_error_text, raise_for_status
 from onecdc.replicator import _log_failure
 from onecdc.replicator import DEFAULT_MAX_BACKOFF
-from conftest import TEST_QUEUE_GUID
+from conftest import FakeResponseMixin, TEST_QUEUE_GUID
 
 
-class _Resp:
+class _Resp(FakeResponseMixin):
     def __init__(self, status_code=500, text='', reason='Internal Server Error'):
         self.ok = 200 <= status_code < 300
         self.status_code = status_code

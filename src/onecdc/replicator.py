@@ -14,9 +14,11 @@ from sqlalchemy.exc import NoSuchTableError, OperationalError
 
 from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, type_mapping)
-from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, format_duration,
+from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, ResponseTooLargeError,
+                                     format_duration,
                                      instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
+                                MAX_RESPONSE_BYTES,
                                 ODATA_PREFIX, RECORDER_FIELDS)
 from onecdc.change_reader import ChangeReader
 from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
@@ -40,6 +42,13 @@ logger = get_logger(__name__)
 # interval секунд. Неудачный SelectChanges — это не бесплатная попытка: 1С успевает отработать
 # минуты на таблице регистрации изменений, и повторы начинают накладываться друг на друга,
 # порождая уже конфликты блокировок. Пауза удваивается до потолка и сбрасывается после успеха.
+# Сколько циклов подряд объект может не разобраться, прежде чем пакет подтвердят без него.
+# Не ноль — причина бывает временной (метаданные ещё не перечитались, объект вот-вот опубликуют),
+# и терять изменения с первого раза незачем. Не бесконечность — иначе один объект держит весь план
+# обмена, а backoff до получаса это ещё и маскирует (см. Replicator._package_is_blocked).
+# Три цикла при interval=60 — это три минуты, за которые временная причина успевает рассосаться.
+PARSE_FAILURE_LIMIT = 3
+
 BACKOFF_FACTOR = 2.0
 DEFAULT_MAX_BACKOFF = 1800.0
 
@@ -416,7 +425,8 @@ class Replicator:
                  request_timeout: float | None = None,
                  full_load_workers: int = 2,
                  automatic_full_load: bool = True,
-                 read_subconto: bool = False):
+                 read_subconto: bool = False,
+                 max_response_bytes: int | None = MAX_RESPONSE_BYTES):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
         # Перехват SIGTERM/SIGINT ставим здесь, а не при запуске цикла: run_forever типовая точка
@@ -477,6 +487,10 @@ class Replicator:
             owner=instance_owner(exchange_name))
         # Субконто регистра бухгалтерии: по умолчанию НЕ читаем (см. DataReader._fill_subconto).
         self._read_subconto = read_subconto
+        # {объект: сколько циклов подряд не разбирается} — см. _package_is_blocked.
+        self._parse_failures: dict[str, int] = {}
+        # Потолок размера ответа 1С (см. MAX_RESPONSE_BYTES). None — без ограничения.
+        self._max_response_bytes = max_response_bytes
         if read_subconto:
             logger.warning(
                 "read_subconto=True: ext dimensions are read from the RecordsWithExtDimensions "
@@ -488,7 +502,8 @@ class Replicator:
         self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
                                     self.metadata, odata_auth=self._odata_auth,
                                     request_timeout=self._request_timeout,
-                                    read_subconto=self._read_subconto)
+                                    read_subconto=self._read_subconto,
+                                    max_response_bytes=self._max_response_bytes)
         # lease_guard вшивает «объект всё ещё наш» прямо в условие записи снимка. Проверять до
         # записи здесь мало: страница пишется минутами, и проверка успевает устареть — а условие
         # внутри оператора проверяет СУБД в момент записи (см. DBWriter._still_ours).
@@ -634,9 +649,71 @@ class Replicator:
         # ничего не спасает, а стоит всего плана. Политика одна: пакет прочитан — пакет
         # подтверждён, а о потере кричит ERROR из read_data_entries.
         if notify_changes and self.changes.entries_read > 0:
-            self._confirm_package()
+            if not self._package_is_blocked():
+                self._confirm_package()
         else:
             logger.debug("No changes — skipping confirmation")
+
+    def _package_is_blocked(self) -> bool:
+        """
+        Есть ли в пакете объект, который не разобрался и ещё не исчерпал попытки. True — пакет не
+        подтверждаем, он придёт снова.
+
+        Зачем попытки, а не мгновенный пропуск. Причина неразбора бывает временной: метаданные
+        ещё не перечитались, объект вот-вот опубликуют в составе OData. Пропустить с первого раза
+        значило бы потерять изменения, которые прошли бы на следующем цикле.
+
+        Зачем попытки КОНЧАЮТСЯ. Причина бывает и навсегда — табличная часть, чей `_RowType` не
+        включён в состав OData, не появится сама. До этого механизма такой объект останавливал
+        репликацию ВСЕГО плана обмена: пакет не подтверждался, тот же SelectChanges уходил каждый
+        цикл, очередь копилась, а backoff разводил ошибку в логе до одной строки в полчаса — то
+        есть устойчивость цикла маскировала проблему.
+
+        Считаем в памяти процесса, а не в БД. run_forever крутится в одном процессе, так что
+        счётчик переживает все его циклы; а перезапуск — законный повод дать объекту свежий шанс,
+        и обычно именно перезапуском чинят причину.
+
+        Успешный разбор счётчик обнуляет: объект, починившийся сам, не должен нести груз прошлых
+        неудач.
+        """
+        failed = self.changes.failed_objects
+        # Сбрасываем счётчик только тем, кто разобрался ПОЛНОСТЬЮ. Объект попадает в changes
+        # раньше, чем разбор доходит до его табличных частей, поэтому упавший на части владелец
+        # числится и там, и там — и сброс по одному лишь присутствию в changes обнулял бы счётчик
+        # каждый цикл. Попытки не кончались бы никогда, то есть механизм не работал бы вовсе.
+        for object_name in self.changes.keys():
+            if object_name not in failed:
+                self._parse_failures.pop(object_name, None)
+
+        if not failed:
+            return False
+
+        retryable = {}
+        for object_name, reason in failed.items():
+            self._parse_failures[object_name] = self._parse_failures.get(object_name, 0) + 1
+            if self._parse_failures[object_name] < PARSE_FAILURE_LIMIT:
+                retryable[object_name] = (self._parse_failures[object_name], reason)
+
+        if retryable:
+            logger.warning(
+                "Package %s is NOT confirmed: %s could not be parsed — %s. It will be read again; "
+                "after %s attempts the package is confirmed without them",
+                self.changes.message_no, 'objects' if len(retryable) > 1 else 'an object',
+                '; '.join(f'{name} (attempt {n} of {PARSE_FAILURE_LIMIT}): {reason}'
+                          for name, (n, reason) in retryable.items()),
+                PARSE_FAILURE_LIMIT)
+            return True
+
+        logger.error(
+            "CHANGES LOST: %s could not be parsed %s times in a row and the package is confirmed "
+            "without them — %s. 1C will not send these changes again; a full load of the affected "
+            "objects is the only way back. Fix the cause (most often a table part whose _RowType "
+            "is not published in the OData interface) and reload them",
+            ', '.join(failed), PARSE_FAILURE_LIMIT,
+            '; '.join(f'{name}: {reason}' for name, reason in failed.items()))
+        for object_name in failed:
+            self._parse_failures.pop(object_name, None)
+        return False
 
     def _confirm_package(self) -> None:
         """
@@ -955,7 +1032,8 @@ class Replicator:
         reader = DataReader(self._odata_url, self.metadata, odata_auth=self._odata_auth,
                             request_timeout=self._request_timeout,
                             read_subconto=(self._read_subconto if read_subconto is None
-                                           else read_subconto))
+                                           else read_subconto),
+                            max_response_bytes=self._max_response_bytes)
         # Полная выгрузка = базовая версия: ниже любого номера пакета изменений (>=1), и заодно
         # след автора строки для guard'а вставки (см. FULL_LOAD_MESSAGE_NO).
         reader.exchange_message_no = FULL_LOAD_MESSAGE_NO
@@ -1692,6 +1770,16 @@ class Replicator:
                 except Exception as exc:
                     if interval <= 0:
                         _log_failure(exc, "Replication cycle failed, will retry")
+                    elif isinstance(exc, ResponseTooLargeError):
+                        # Повтор через минуту получит ровно тот же ответ, а его ФОРМИРОВАНИЕ стоит
+                        # серверу 1С минут работы на таблице регистрации изменений. Уводим паузу
+                        # на потолок сразу — как для неустранимой ошибки, потому что она и есть
+                        # неустранимая, пока не настроят дроссель.
+                        delay = max_backoff
+                        _log_failure(
+                            exc, "1C response is too large to accept — enable or tighten the "
+                            "throttle in 1C so it registers fewer objects per package (see "
+                            "README). Retry in %ss", delay)
                     elif _is_permanent_error(exc):
                         delay = max_backoff
                         _log_failure(

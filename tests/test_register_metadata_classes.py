@@ -13,6 +13,8 @@ import pytest
 
 from onecdc.metadata_reader import MetadataReader
 
+from conftest import FakeResponseMixin
+
 INDEPENDENT = """
   <EntityType Name="InformationRegister_Prices">
     <Key><PropertyRef Name="Product_Key"/><PropertyRef Name="Period"/></Key>
@@ -99,7 +101,7 @@ def _metadata(*blocks: str) -> MetadataReader:
            '<edmx:DataServices><Schema>' + ''.join(blocks) + '</Schema>'
            '</edmx:DataServices></edmx:Edmx>')
 
-    class _Response:
+    class _Response(FakeResponseMixin):
         ok = True
         status_code = 200
         text = xml

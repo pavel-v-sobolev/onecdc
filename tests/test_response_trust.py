@@ -24,6 +24,8 @@ import fake_1c
 from onecdc import Replicator
 from onecdc.common_functions import ODataFormatError, is_entity_absent, parse_odata
 
+from conftest import FakeResponseMixin
+
 GATEWAY_PAGE = ('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">'
                 '<body>Service temporarily unavailable</body></html>')
 ODATA_NOT_FOUND = ('<?xml version="1.0" encoding="UTF-8"?>'
@@ -31,7 +33,7 @@ ODATA_NOT_FOUND = ('<?xml version="1.0" encoding="UTF-8"?>'
                    '<code/><message xml:lang="ru">Экземпляр сущности не найден</message></error>')
 
 
-class _Response:
+class _Response(FakeResponseMixin):
     def __init__(self, text_body: str, status: int = 200):
         self.text = text_body
         self.content = text_body.encode()

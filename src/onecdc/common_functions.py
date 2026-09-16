@@ -18,6 +18,10 @@ from onecdc.logging_config import get_logger
 ODATA_PREFIX = 'StandardODATA.'
 
 
+# Куском какого размера принимаем тело ответа (см. read_within_limit).
+CHUNK_SIZE = 1 << 20
+
+
 def truncate_to_bytes(name: str, max_bytes: int) -> str:
     """
     Усечение по БАЙТАМ с отбрасыванием оборванной многобайтовой последовательности.
@@ -224,6 +228,54 @@ def odata_datetime_value(value: "date | datetime") -> str:
     return (f'{value.year:04d}-{value.month:02d}-{value.day:02d}'
             f'T{getattr(value, "hour", 0):02d}:{getattr(value, "minute", 0):02d}'
             f':{getattr(value, "second", 0):02d}')
+
+
+class ResponseTooLargeError(Exception):
+    """
+    Ответ 1С крупнее потолка, и мы отказались его принимать.
+
+    Отдельный тип, потому что обращаться с ним надо не как с обычным сбоем: повтор через минуту
+    получит ровно тот же ответ, а его формирование стоит серверу 1С минут работы. Цикл поэтому
+    уводит паузу на потолок сразу, как для неустранимой ошибки.
+
+    Отказ ничего не чинит — пакет остаётся в очереди 1С. Он меняет ТИХУЮ смерть по OOM на внятный
+    отказ: процесс жив, полные выгрузки и обработчики работают, а в логе стоит, сколько байт
+    пришло, каков потолок и что делать (см. README, «Требования к ресурсам»).
+    """
+
+
+def read_within_limit(response, limit: int | None, context: str) -> bytes:
+    """
+    Читает тело ответа, не принимая больше limit байт. limit=None — без ограничения.
+
+    Две проверки, и обе нужны. `Content-Length` 1С отдаёт (проверено на живой), и по нему отказ
+    бесплатный — тело не скачивается вовсе. Но заголовка может и не быть: перед 1С бывает прокси
+    со сжатием или chunked-кодированием. Тогда границу держит счётчик принятых байт, а соединение
+    обрывается на превышении.
+
+    Зачем вообще потолок. Тело загружается целиком, и дальше от него живут ещё несколько
+    представлений: текст, дерево разбора, колоночные списки. Измерено на пакете в 28 МБ — пик
+    выделений 102 МБ, то есть ×3.6. Без потолка достаточно крупный пакет убивает процесс по OOM
+    молча, а следующий цикл запрашивает его снова.
+    """
+    declared = response.headers.get('Content-Length')
+    if limit is not None and declared and declared.isdigit() and int(declared) > limit:
+        response.close()
+        raise ResponseTooLargeError(
+            f'{context}: 1C declared {int(declared)} bytes, over the {limit}-byte limit — '
+            f'the body was not downloaded at all')
+
+    chunks: list[bytes] = []
+    received = 0
+    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+        received += len(chunk)
+        if limit is not None and received > limit:
+            response.close()
+            raise ResponseTooLargeError(
+                f'{context}: the response exceeded the {limit}-byte limit (got at least '
+                f'{received} bytes) and the connection was dropped')
+        chunks.append(chunk)
+    return b''.join(chunks)
 
 
 class ODataFormatError(ValueError):

@@ -21,6 +21,8 @@ import pytest
 
 from onecdc.metadata_reader import MetadataReader
 
+from conftest import FakeResponseMixin
+
 # Тип, которого нет в type_mapping. Реальный кандидат — новый Edm.-тип будущей версии платформы
 # либо нетиповое измерение регистра.
 UNKNOWN_IN_KEY = """
@@ -56,7 +58,7 @@ def _metadata(*blocks: str) -> MetadataReader:
            '<edmx:DataServices><Schema>' + ''.join(blocks) + '</Schema>'
            '</edmx:DataServices></edmx:Edmx>')
 
-    class _Response:
+    class _Response(FakeResponseMixin):
         ok = True
         status_code = 200
         text = xml

@@ -15,6 +15,7 @@ from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_GUID_SUF
                                     SUPPORTED_TYPES, MetadataReader, resolve_timeout)
 from onecdc.name_mapper import NameMapper
 from onecdc.common_functions import (format_bytes, is_entity_absent, odata_datetime_value,
+                                     read_within_limit,
                                      parse_object_full_name, parse_odata, raise_for_status)
 from onecdc.logging_config import get_logger
 
@@ -123,6 +124,15 @@ EXT_DIMENSION_TYPE_KEY = 'type'
 # Числовые типы 1С. Нужны, чтобы согласовать два ответа платформы об одном и том же движении:
 # см. _ext_dimensions.
 NUMERIC_TYPES = ('Double', 'Int64', 'Int32', 'Int16')
+
+# Потолок размера ответа 1С. Тело загружается целиком, и дальше от него живут ещё несколько
+# представлений — текст, дерево разбора, колоночные списки: измерено ×3.6 на пике. Без потолка
+# достаточно крупный пакет убивает процесс по OOM молча, а следующий цикл запрашивает его снова.
+#
+# 512 МБ — это примерно 2 ГБ пика, то есть половина памяти, которую README просит под процесс.
+# Пакет крупнее означает, что дроссель не настроен: сформировать пакет поменьше 1С со стороны
+# клиента не заставить, $top и $filter она для SelectChanges игнорирует.
+MAX_RESPONSE_BYTES = 512 * 1024 * 1024
 # Бюджет длины СЕГМЕНТА адреса, в который сводятся периоды одного запроса за субконто
 # (см. _ext_dimensions_chunk). Параметры функции 1С лежат в пути, и режет их http.sys своим
 # UrlSegmentMaxLength (260 символов по умолчанию) — раньше, чем IIS дойдёт до maxUrl или
@@ -348,7 +358,8 @@ class DataReader(UserDict):
     def __init__(self, odata_url: str, metadata: MetadataReader,
                  odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None,
-                 read_subconto: bool = False):
+                 read_subconto: bool = False,
+                 max_response_bytes: int | None = MAX_RESPONSE_BYTES):
         super().__init__()
         self.odata_url = odata_url
         self.metadata = metadata
@@ -356,6 +367,10 @@ class DataReader(UserDict):
         self.request_timeout = request_timeout
         # Читать ли субконто регистра бухгалтерии (см. _fill_subconto). По умолчанию НЕТ.
         self.read_subconto = read_subconto
+        # {объект: причина} последнего разбора — см. read_data_entries.
+        self.failed_objects: dict[str, str] = {}
+        # Сколько байт ответа согласны принять; None — без ограничения (см. read_within_limit).
+        self.max_response_bytes = max_response_bytes
         # номер пакета обмена, проставляется в записи при чтении изменений
         self.exchange_message_no = None  
 
@@ -456,11 +471,10 @@ class DataReader(UserDict):
             params.append("$filter=" + quote(" and ".join(filters), safe="':"))
         query = '?' + '&'.join(params)
         url = f"{self.odata_url}/{object_name}{query}"
-        response = requests.get(url, auth=self.odata_auth, timeout=resolve_timeout(self.request_timeout))
-        raise_for_status(response, f'read {object_name}{query}')
-        self.last_response_bytes = len(response.content)
+        context = f'read {object_name}{query}'
+        text_body = self._get_within_limit(url, context)
 
-        feed = parse_odata(response.text, 'feed', f'read {object_name}{query}',
+        feed = parse_odata(text_body, 'feed', context,
                            force_list=('d:element', 'entry'))
         object_entries = (feed or {}).get('entry') or []
 
@@ -470,6 +484,23 @@ class DataReader(UserDict):
         logger.info('Read %s: %s entries, %s rows, %s', object_name, len(object_entries),
                     self.rows_read(), format_bytes(self.last_response_bytes))
         return len(object_entries)
+
+    def _get_within_limit(self, url: str, context: str) -> str:
+        """
+        GET с потолком размера ответа. Возвращает тело текстом и запоминает его вес.
+
+        Потоково (`stream=True`), чтобы отказаться от слишком большого ответа, не приняв его
+        целиком, — иначе защита была бы бессмысленной. Тело ошибки читаем как обычно: оно
+        небольшое, и без него не сказать, что именно не понравилось 1С.
+        """
+        with requests.get(url, auth=self.odata_auth, stream=True,
+                          timeout=resolve_timeout(self.request_timeout)) as response:
+            if not response.ok:
+                raise_for_status(response, context)
+            body = read_within_limit(response, self.max_response_bytes, context)
+            encoding = response.encoding or 'utf-8'
+        self.last_response_bytes = len(body)
+        return body.decode(encoding, errors='replace')
 
     def _fill_subconto(self) -> None:
         """
@@ -644,11 +675,8 @@ class DataReader(UserDict):
         path = quote(f"{object_name}/{self._ext_dimensions_segment(condition, top)}",
                      safe="/()=,':")
         url = f'{self.odata_url}/{path}'
-        response = requests.get(url, auth=self.odata_auth,
-                                timeout=resolve_timeout(self.request_timeout))
-        raise_for_status(response, f'read {path}')
-        self.last_response_bytes = len(response.content)
-        result = parse_odata(response.text, FUNCTION_RESULT_FIELD, f'read {path}',
+        text_body = self._get_within_limit(url, f'read {path}')
+        result = parse_odata(text_body, FUNCTION_RESULT_FIELD, f'read {path}',
                              force_list=(FUNCTION_ELEMENT_FIELD,))
         return (result or {}).get(FUNCTION_ELEMENT_FIELD) or []
 
@@ -867,6 +895,9 @@ class DataReader(UserDict):
         """
         parsed: Counter = Counter()
         unsupported: Counter = Counter()
+        # {объект: причина} — что не удалось разобрать в этом пакете. Решение о судьбе пакета
+        # принимает вызывающий: читателю неоткуда знать, временная это беда или навсегда.
+        self.failed_objects: dict[str, str] = {}
         for object_entry in object_entries:
 
             object_full_name = (object_entry.get('category') or {}).get('@term')
@@ -885,11 +916,24 @@ class DataReader(UserDict):
 
             properties = (object_entry.get('content') or {}).get('m:properties') or {}
 
-            if object_type in REGISTER_TYPES:
-                self._get_register_records(object_name, properties)
+            # Разбор ОДНОЙ entry не вправе уронить весь пакет. До этой обёртки любое неустранимое
+            # исключение на одном объекте (табличная часть, чей _RowType не включён в состав
+            # OData; объект, пропавший из $metadata; конфликт типов колонки) выбрасывало нас из
+            # всего разбора: пакет не дочитан, ничего не сохранено, подтверждение не отправлено —
+            # и так каждый цикл, с паузой до получаса. Один объект останавливал весь план обмена.
+            #
+            # Решает не обёртка сама по себе, а то, что делает с ней вызывающий: пакет с
+            # неразобранными объектами не подтверждается, пока у них не кончатся попытки
+            # (см. Replicator._run_once_claimed). Здесь мы только доносим факт и причину.
+            try:
+                if object_type in REGISTER_TYPES:
+                    self._get_register_records(object_name, properties)
 
-            if object_type in ENTITY_TYPES:
-                self._get_entity_records(object_name, properties)
+                if object_type in ENTITY_TYPES:
+                    self._get_entity_records(object_name, properties)
+            except Exception as error:
+                self.failed_objects[object_name] = f'{type(error).__name__}: {error}'
+                logger.exception('Failed to parse %s from the changes package', object_name)
 
         if unsupported:
             logger.error(

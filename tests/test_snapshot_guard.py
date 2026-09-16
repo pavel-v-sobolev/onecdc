@@ -26,6 +26,8 @@ from onecdc import DataObject, NameMapper, Replicator
 from onecdc.db_writer import DBWriter
 from onecdc.metadata_reader import MetadataObject
 
+from conftest import FakeResponseMixin
+
 OBJ = "Catalog_X"
 META = MetadataObject(OBJ, {"Ref_Key": "String", "Val": "String", "DataVersion": "String"},
                       {"Ref_Key": "String"})
@@ -157,7 +159,7 @@ EMPTY_FEED = ('<?xml version="1.0" encoding="utf-8"?>'
               '<feed xmlns="http://www.w3.org/2005/Atom"><title>gone</title></feed>')
 
 
-class _EmptyFeed:
+class _EmptyFeed(FakeResponseMixin):
     ok = True
     status_code = 200
     reason = 'OK'
