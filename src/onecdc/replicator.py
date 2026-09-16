@@ -51,6 +51,12 @@ PARSE_FAILURE_LIMIT = 3
 
 BACKOFF_FACTOR = 2.0
 DEFAULT_MAX_BACKOFF = 1800.0
+# Пауза перед ПОВТОРОМ полной выгрузки объекта, упавшей в фоне. Без неё цикл брался за тот же
+# объект каждый interval (обычно минуту) и читал его с нуля — а прогон бывает на сотни страниц.
+# Неустранимая беда (объект, который 1С не отдаёт целиком) давала так сутки непрерывной нагрузки
+# без единой полезной записи, и в логе — по строке в минуту. Удваивается до DEFAULT_MAX_BACKOFF,
+# сбрасывается успешной выгрузкой.
+FULL_LOAD_RETRY_DELAY = 60.0
 
 # HTTP-коды, при которых повтор того же запроса бессмысленен: права, адрес, состав запроса.
 # Такие ошибки сразу уводят паузу на потолок — процесс живёт (перезапуск ничего не чинит),
@@ -128,6 +134,29 @@ RECORD_SET_LAMBDA = 'r'
 # заметное время здесь означает, что процесс замирал (см. Replicator._confirm_package).
 CONFIRM_LEASE_BUDGET = 30.0
 
+
+
+def _page_too_heavy(exc: BaseException) -> bool:
+    """
+    Отказ означает «страница тяжела для 1С» — значит лечится уменьшением страницы.
+
+    Три случая. `HTTPError` — сервер приложений не собрал ответ (память, временные файлы).
+    `Timeout` на ЧТЕНИИ — собирал дольше, чем мы согласны ждать: одна толстая entry на десяток
+    мегабайт этого добивается легко. `ResponseTooLargeError` — собрал, но такой, что принимать его
+    мы не станем.
+
+    А вот `ConnectionError` о размере не говорит НИЧЕГО: 1С перезагрузили, сеть моргнула.
+    Уменьшать из-за него страницу вредно — потолок размера только опускается и живёт до конца
+    процесса, то есть сетевая икота навсегда замедлила бы объект. Сюда же `ConnectTimeout`: он
+    одновременно и Timeout, и ConnectionError, но говорит о недоступности, а не о весе.
+    """
+    if isinstance(exc, requests.ConnectionError):
+        return False
+    if isinstance(exc, ResponseTooLargeError):
+        return True
+    if isinstance(exc, requests.Timeout):
+        return True
+    return isinstance(exc, requests.HTTPError) and not _is_permanent_error(exc)
 
 
 def _is_permanent_error(exc: BaseException) -> bool:
@@ -502,6 +531,11 @@ class Replicator:
         self._parse_failures: dict[str, int] = {}
         # Потолок размера ответа 1С (см. MAX_RESPONSE_BYTES). None — без ограничения.
         self._max_response_bytes = max_response_bytes
+        # Объекты, уже стоящие в очереди фоновых выгрузок этого процесса, и паузы после неудач
+        # (см. _dispatch_full_loads, FULL_LOAD_RETRY_DELAY).
+        self._full_load_queued: set[str] = set()
+        self._full_load_retry_at: dict[str, float] = {}
+        self._full_load_delay: dict[str, float] = {}
         if read_subconto:
             logger.warning(
                 "read_subconto=True: ext dimensions are read from the RecordsWithExtDimensions "
@@ -1162,10 +1196,14 @@ class Replicator:
             try:
                 page = reader.read_object(object_name, top=page_size, key_fields=key_fields,
                                           extra_filter=extra_filter, skip=skip)
-            except requests.HTTPError as exc:
-                # Страница не по зубам серверу 1С (упирается в память/временные файлы) —
-                # уменьшаем её и повторяем с того же места. Смещение не сдвигалось.
-                if _is_permanent_error(exc) or page_size <= FULL_LOAD_MIN_BATCH:
+            except (requests.RequestException, ResponseTooLargeError) as exc:
+                # Страница не по зубам серверу 1С — уменьшаем её и повторяем с того же места.
+                # Смещение не сдвигалось. Что считается «не по зубам» — см. _page_too_heavy:
+                # раньше здесь ловился только HTTPError, и ReadTimeout пролетал мимо. А read
+                # timeout у нас 15 минут: прогон падал на сороковой странице, через минуту
+                # начинался заново с той же страницы и того же размера — сутки нагрузки на 1С без
+                # единой полезной записи.
+                if not _page_too_heavy(exc) or page_size <= FULL_LOAD_MIN_BATCH:
                     raise
                 page_size = max(FULL_LOAD_MIN_BATCH, page_size // FULL_LOAD_BATCH_DIVISOR)
                 # Потолок, а не просто новый размер. Подбор по весу (_next_page_size) считает
@@ -1882,15 +1920,25 @@ class Replicator:
 
     def _dispatch_full_loads(self, executor: ThreadPoolExecutor) -> None:
         """
-        Ставит в пул полные выгрузки объектов с full_load_is_required, кроме уже выполняющихся.
+        Ставит в пул полные выгрузки объектов с full_load_is_required, кроме уже стоящих в очереди
+        и кроме тех, кто отдыхает после неудачи.
 
-        Захват берётся ЗДЕСЬ, а не внутри задания: иначе объект сабмитился бы повторно, пока ждёт
-        своего воркера. Снимается он в _run_full_load (finally).
+        Захват берётся не здесь, а в момент фактического старта воркера. Раньше он брался при
+        постановке: при двух воркерах десяток объектов ждал очереди С АКТИВНЫМ захватом, и для
+        расписаний в других процессах они всё это время были заняты — притом что никто их не
+        читал. От повторной постановки защищает _full_load_queued: ровно для этого ранний захват
+        и служил.
         """
+        now = time.monotonic()
         for object_full_name in self.metadata.list_full_load_required():
-            if not self._full_load_claim.claim(object_full_name):
-                logger.debug("Full load of %s is already claimed, skipping", object_full_name)
+            if object_full_name in self._full_load_queued:
+                continue          # уже стоит в очереди или выполняется этим процессом
+            retry_at = self._full_load_retry_at.get(object_full_name)
+            if retry_at is not None and now < retry_at:
+                logger.debug("Full load of %s is backing off for another %.0fs",
+                             object_full_name, retry_at - now)
                 continue
+            self._full_load_queued.add(object_full_name)
             executor.submit(self._run_full_load, object_full_name)
 
     @_load_mode_tag(LOAD_MODE_FULL)
@@ -1899,15 +1947,28 @@ class Replicator:
         метриками прогона. При ошибке флаг full_load_is_required остаётся → ретрай на следующем
         цикле, а метрики не пишутся: они описывают завершённую выгрузку."""
         started = time.monotonic()
+        if not self._full_load_claim.claim(object_full_name):
+            logger.debug("Full load of %s is already claimed elsewhere, skipping",
+                         object_full_name)
+            self._full_load_queued.discard(object_full_name)
+            return
         try:
             rows_modified = self.full_load(object_full_name)
             self.metadata.mark_full_loaded(object_full_name, rows_modified=rows_modified,
                                            minutes=round((time.monotonic() - started) / 60, 3))
+            self._full_load_retry_at.pop(object_full_name, None)
+            self._full_load_delay.pop(object_full_name, None)
         except FullLoadStopped as stopped:
             # Не сбой: объект НЕ отмечаем выгруженным и метрик не пишем — они описывают
             # завершённый прогон. Заказ остаётся, после перезапуска выгрузка начнётся заново.
             logger.info("%s", stopped)
         except Exception as exc:
-            _log_failure(exc, "Background full_load of %s failed, will retry", object_full_name)
+            delay = min(self._full_load_delay.get(object_full_name, FULL_LOAD_RETRY_DELAY)
+                        * BACKOFF_FACTOR, DEFAULT_MAX_BACKOFF)
+            self._full_load_delay[object_full_name] = delay
+            self._full_load_retry_at[object_full_name] = time.monotonic() + delay
+            _log_failure(exc, "Background full_load of %s failed, retry in %ss",
+                         object_full_name, round(delay))
         finally:
             self._full_load_claim.release(object_full_name)
+            self._full_load_queued.discard(object_full_name)

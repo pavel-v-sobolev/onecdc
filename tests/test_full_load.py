@@ -16,6 +16,7 @@ from dbmerge import mergeResult
 from onecdc import DataObject
 from onecdc.data_reader import DataReader
 from onecdc.metadata_reader import MetadataObject, MetadataReader
+from onecdc.common_functions import ResponseTooLargeError
 from onecdc.replicator import (FULL_LOAD_EMPTY_WINDOWS_TO_STOP,
                               FULL_LOAD_PARTITION_MAX_PAGES, Replicator)
 from conftest import FakeResponseMixin, TEST_QUEUE_GUID
@@ -345,18 +346,89 @@ def test_dispatch_runs_full_load_and_marks_loaded(db):
     assert rep._full_load_claim.claim("Catalog_X")        # захват снят — объект снова свободен
 
 
-def test_dispatch_skips_claimed_object(db):
-    # Объект уже кто-то выгружает — повторно не сабмитим. Захват держится в БД, поэтому «кто-то» —
-    # это в том числе другой процесс, а не только соседний поток.
+def test_a_claimed_object_is_declined_by_the_worker_not_by_dispatch(db, monkeypatch):
+    """
+    Объект, который выгружает кто-то другой, отсеивается в момент СТАРТА воркера, а не при
+    постановке в очередь.
+
+    Раньше захват брался при постановке, и при двух воркерах десяток объектов ждал очереди с
+    активным захватом: для расписаний в других процессах они всё это время были заняты, хотя никто
+    их не читал. Теперь очередь никого не блокирует, а лишний сабмит стоит одного UPDATE.
+    """
     rep, other = _replicator(db), _replicator(db)
     rep.metadata._sync_objects(["Catalog_X"])
     other.metadata._sync_objects(["Catalog_X"])
     rep.metadata.require_full_load_if_new("Catalog_X")
     assert other._full_load_claim.claim("Catalog_X")
+    try:
+        ex = _RecordingExecutor()
+        rep._dispatch_full_loads(ex)
+        assert ex.submitted == [("Catalog_X",)], 'очередь не должна ходить в БД за захватом'
+
+        loaded = []
+        monkeypatch.setattr(Replicator, "full_load", lambda self, name, **kw: loaded.append(name))
+        rep._run_full_load("Catalog_X")
+
+        assert loaded == [], 'воркер взялся за объект, который держит другой процесс'
+        assert "Catalog_X" not in rep._full_load_queued, 'объект застрял в очереди навсегда'
+    finally:
+        other._full_load_claim.close()
+
+
+def test_the_same_object_is_not_queued_twice(db):
+    # От повторной постановки защищает множество «уже в очереди» — ровно для этого раньше служил
+    # ранний захват.
+    rep = _replicator(db)
+    rep.metadata._sync_objects(["Catalog_X"])
+    rep.metadata.require_full_load_if_new("Catalog_X")
 
     ex = _RecordingExecutor()
     rep._dispatch_full_loads(ex)
-    assert ex.submitted == []
+    rep._dispatch_full_loads(ex)
+
+    assert ex.submitted == [("Catalog_X",)]
+
+
+def test_a_failed_full_load_backs_off_instead_of_retrying_every_cycle(db, monkeypatch):
+    """
+    Без паузы цикл брался за упавший объект каждый interval и читал его С НУЛЯ — а прогон бывает
+    на сотни страниц. Неустранимая беда давала так сутки непрерывной нагрузки на 1С без единой
+    полезной записи, и в логе по строке в минуту.
+    """
+    from onecdc.replicator import DEFAULT_MAX_BACKOFF, FULL_LOAD_RETRY_DELAY
+
+    rep = _replicator(db)
+    rep.metadata._sync_objects(["Catalog_X"])
+    rep.metadata.require_full_load_if_new("Catalog_X")
+
+    def boom(self, name, **kwargs):
+        raise RuntimeError('1С недоступна')
+
+    monkeypatch.setattr(Replicator, "full_load", boom)
+    ex = _RecordingExecutor()
+
+    rep._dispatch_full_loads(ex)
+    rep._run_full_load("Catalog_X")
+    assert rep._full_load_delay["Catalog_X"] == FULL_LOAD_RETRY_DELAY * 2
+
+    # Следующий цикл объект не берёт: пауза ещё не вышла.
+    ex.submitted.clear()
+    rep._dispatch_full_loads(ex)
+    assert ex.submitted == [], 'упавший объект берут заново той же минутой'
+
+    # Пауза растёт, но не выше потолка.
+    for _ in range(20):
+        rep._full_load_retry_at["Catalog_X"] = 0
+        rep._dispatch_full_loads(ex)
+        rep._run_full_load("Catalog_X")
+    assert rep._full_load_delay["Catalog_X"] == DEFAULT_MAX_BACKOFF
+
+    # Удачная выгрузка паузу снимает.
+    monkeypatch.setattr(Replicator, "full_load", lambda self, name, **kw: 0)
+    rep._full_load_retry_at["Catalog_X"] = 0
+    rep._dispatch_full_loads(ex)
+    rep._run_full_load("Catalog_X")
+    assert "Catalog_X" not in rep._full_load_retry_at
 
 
 def test_build_date_filter(db):
@@ -1005,3 +1077,53 @@ def test_the_owner_of_a_table_part_is_still_loadable(db, monkeypatch):
         assert rep.full_load("Catalog_X") == 0
     finally:
         rep.close()
+
+
+# --- Отказ страницы: что лечится уменьшением, а что нет ---
+
+def _failing_once(exc, calls):
+    """Стаб read_object: первый вызов падает заданным исключением, дальше отдаёт пустую страницу."""
+    def fake_read_object(self, object_name, top=None, key_fields=None,
+                         extra_filter=None, skip=None):
+        calls.append(top)
+        if len(calls) == 1:
+            raise exc
+        self.clear()
+        return 0
+    return fake_read_object
+
+
+@pytest.mark.parametrize("exc, shrinks", [
+    (requests.HTTPError("500", response=_response(500)), True),
+    (requests.exceptions.ReadTimeout("1С собирает страницу дольше, чем мы ждём"), True),
+    (ResponseTooLargeError("страница крупнее потолка"), True),
+    (requests.exceptions.ConnectionError("сеть моргнула"), False),
+    (requests.exceptions.ConnectTimeout("1С недоступна"), False),
+])
+def test_only_a_heavy_page_is_shrunk(db, monkeypatch, exc, shrinks):
+    """
+    Уменьшение страницы — лекарство от «страница тяжела для 1С».
+
+    `ReadTimeout` об этом говорит прямо: read timeout у нас 15 минут, и одна толстая entry на
+    десяток мегабайт этого добивается. Раньше он пролетал мимо `except requests.HTTPError`, прогон
+    падал, размер страницы не менялся — и через минуту всё начиналось заново с той же страницы.
+
+    А `ConnectionError` о размере не говорит НИЧЕГО. Уменьшать из-за него вредно: потолок размера
+    только опускается и живёт до конца процесса, то есть сетевая икота навсегда замедлила бы
+    объект. `ConnectTimeout` сюда же — он и Timeout, и ConnectionError, но говорит о
+    недоступности.
+    """
+    rep = _replicator(db)
+    calls = []
+    monkeypatch.setattr(DataReader, "read_object", _failing_once(exc, calls))
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+
+    if shrinks:
+        rep.full_load("Catalog_X", batch_size=100)
+        assert len(calls) == 2, 'страницу не повторили'
+        assert calls[1] < calls[0], 'страница не уменьшилась'
+        assert rep._full_load_page_limit["Catalog_X"] == calls[1], 'потолок не опустился'
+    else:
+        with pytest.raises(type(exc)):
+            rep.full_load("Catalog_X", batch_size=100)
+        assert "Catalog_X" not in rep._full_load_page_limit, 'потолок опущен без причины'
