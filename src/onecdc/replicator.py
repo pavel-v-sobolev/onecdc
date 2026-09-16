@@ -298,13 +298,57 @@ def _check_automatic_full_load(automatic_full_load) -> bool:
     return automatic_full_load
 
 
+def _check_batch_size(batch_size):
+    """
+    Размер страницы: целое больше нуля.
+
+    Ноль зацикливал прогон намертво: `$top=0` возвращает пустую страницу, условие выхода
+    `page < page_size` превращается в `0 < 0` — ложь, а смещение растёт на ноль. Объект без оси
+    даты крутился так до остановки процесса.
+    """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError(f"batch_size must be a positive integer (got {batch_size!r})")
+    return batch_size
+
+
+def _check_period_bound(value, name: str):
+    """
+    Граница периода выгрузки: приводит к виду, одинаковому для ЧТЕНИЯ и для ПОМЕТКИ.
+
+    Две беды решаются здесь, и обе вылезают на краю окна.
+
+    Микросекунды. В OData-литерал они не попадают (1С их не принимает), а в SQL-условие области
+    пометки граница уходила как есть — то есть прогон читал от 10:30:45, а помечал от
+    10:30:45.123456. Усекаем до секунды сразу, в одном месте.
+
+    Часовой пояс. Aware-datetime в литерал уходил БЕЗ смещения (просто отбрасывалось), а в SQL —
+    вместе с ним: те же две разные границы, только разница уже в часах. Догадываться, что имел в
+    виду пользователь — отбросить пояс или перевести время, — библиотека не вправе, а 1С работает
+    без поясов вовсе. Поэтому отказываем явно.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise ValueError(
+                f"{name} must be a naive datetime: 1C stores dates without a time zone, and "
+                f"keeping the offset would make the read window and the marking window differ "
+                f"(got {value!r})")
+        return value.replace(microsecond=0)
+    return value
+
+
 def _check_request_timeout(request_timeout):
     """Таймаут requests: число секунд либо (connect, read). None — значение по умолчанию
     (DEFAULT_REQUEST_TIMEOUT). Явный 0/None внутри кортежа — вечное ожидание, это не таймаут."""
     if request_timeout is None:
         return None
     values = request_timeout if isinstance(request_timeout, (tuple, list)) else (request_timeout,)
-    if (len(values) not in (1, 2)
+    # Пара — это РОВНО два значения. Кортеж из одного мы принимали, а requests его отвергает
+    # («Invalid timeout (30,)») — то есть ошибка конфигурации всплывала не при создании
+    # репликатора, а при первом запросе, вопреки правилу «конфигурация падает сразу».
+    expected = (2,) if isinstance(request_timeout, (tuple, list)) else (1,)
+    if (len(values) not in expected
             or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
                        for v in values)):
         raise ValueError("request_timeout must be a positive number of seconds or a "
@@ -1056,6 +1100,9 @@ class Replicator:
         # (`Document_ЗаказКлиента` / `Document_ZakazKlienta`, `Дата` / `Data`), см.
         # MetadataReader.resolve_object_name. Ровно то же делают FullLoadCron и Handler.ON:
         # настраивая выгрузку, смотрят в базу, а не в конфигуратор.
+        batch_size = _check_batch_size(batch_size)
+        date_from = _check_period_bound(date_from, 'date_from')
+        date_to = _check_period_bound(date_to, 'date_to')
         object_name = self.metadata.resolve_object_name(object_name)
         # Класс, метаданные которого читаются, но сохранять который мы не беремся (METADATA_ONLY_TYPES
         # — сейчас это план видов характеристик, нужный регистру бухгалтерии для видов субконто).

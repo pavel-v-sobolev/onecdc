@@ -14,6 +14,7 @@ ONECDC_POLL_INTERVAL, ONECDC_LOG_LEVEL, ONECDC_MODE.
 обработчика, а значения при желании заменяются литералами.
 """
 import logging
+import math
 import os
 
 import requests
@@ -39,6 +40,11 @@ def _number(name: str, default: str, cast=float):
         number = cast(value)
     except ValueError:
         raise SystemExit(f"{name}={value!r} is not a number")
+    if not math.isfinite(number):
+        # nan и inf проходят проверку на положительность: сравнение с nan всегда ложно, а inf
+        # больше нуля честно. Цена — горячий цикл (nan делает паузу пустой) либо остановка опроса
+        # после первого оборота (inf).
+        raise SystemExit(f"{name}={value!r} must be a finite number")
     if number <= 0:
         raise SystemExit(f"{name}={value!r} must be positive")
     return number

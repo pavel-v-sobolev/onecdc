@@ -405,7 +405,15 @@ def as_handler(obj) -> _ResolvedHandler:
     if not callable(handle):
         raise AttributeError(f"Handler {obj!r} has no callable handle(context)")
 
-    on = frozenset(getattr(obj, 'ON', ()) or ())
+    declared_on = getattr(obj, 'ON', ()) or ()
+    if isinstance(declared_on, str):
+        # Строка — это коллекция СИМВОЛОВ, и frozenset("Catalog_X") дал бы множество букв. Такой
+        # обработчик регистрировался без единого возражения и не вызывался НИКОГДА: ни ошибки, ни
+        # предупреждения, витрина просто не обновлялась. Забыть скобки при одной таблице —
+        # самая естественная опечатка из возможных, поэтому ловим её явно.
+        raise TypeError(f"Handler {getattr(obj, 'NAME', obj)!r}: ON must be a list of table names, "
+                        f"not a string — write ON = [{declared_on!r}]")
+    on = frozenset(declared_on)
     if not on:
         raise AttributeError(f"Handler {_handler_name(obj)} has empty ON: it would never be called")
     # Подписка идёт по именам ТАБЛИЦ (транслит), а не по именам объектов 1С. Имя 1С в ON выглядит
