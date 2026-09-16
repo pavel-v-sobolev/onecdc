@@ -122,29 +122,3 @@ def test_a_gateway_page_aborts_the_run_instead_of_marking_everything(db, monkeyp
 
         assert _marked(db) == (5, 0), 'страница шлюза вычистила таблицу'
 
-
-def test_an_infrastructure_404_during_recheck_does_not_mark_rows(db, monkeypatch):
-    """
-    Перепроверка кандидатов у регистра идёт по одному прямому запросу на регистратор. Пока любой
-    404 означал «набора нет», перезапуск веб-сервера на полминуты помечал удалённым всё, что
-    успели спросить за эти полминуты.
-    """
-    from onecdc import data_reader
-    from onecdc.data_reader import DataReader
-    from onecdc.metadata_reader import MetadataObject, MetadataReader
-
-    OBJ = "AccumulationRegister_X"
-    metadata = MetadataReader(odata_url="http://fake")
-    metadata[OBJ] = MetadataObject(OBJ, {"Recorder": "Guid"}, {"Recorder": "Guid"})
-    metadata.is_loaded = True
-    reader = DataReader(odata_url="http://fake", metadata=metadata)
-
-    monkeypatch.setattr(data_reader.requests, 'get',
-                        lambda *a, **kw: _Response('<html><body>404</body></html>', 404))
-    with pytest.raises(requests.HTTPError):
-        reader.read_by_key(OBJ, {"Recorder": "x"})
-
-    # А честный ответ 1С по-прежнему означает «набора нет» и исключением не становится.
-    monkeypatch.setattr(data_reader.requests, 'get',
-                        lambda *a, **kw: _Response(ODATA_NOT_FOUND, 404))
-    assert reader.read_by_key(OBJ, {"Recorder": "x"}) == 0

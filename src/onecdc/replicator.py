@@ -17,7 +17,7 @@ from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPE
 from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, format_duration,
                                      instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
-                                ODATA_PREFIX, RECORDER_FIELDS, _odata_literal)
+                                ODATA_PREFIX, RECORDER_FIELDS)
 from onecdc.change_reader import ChangeReader
 from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
                                     OWNER_FIELD, FullLoadClaim)
@@ -126,28 +126,6 @@ def _is_permanent_error(exc: BaseException) -> bool:
     response = getattr(exc, 'response', None)
     status = getattr(response, 'status_code', None)
     return status in PERMANENT_HTTP_CODES
-
-
-def _recorder_type_for_url(field: str, value) -> str:
-    """
-    Значение поля ключа для прямого адреса (см. DataReader.read_by_key). Всё, кроме `<Имя>_Type`,
-    идёт как есть; типу возвращается пространство имён, которое разбор снял.
-
-    Снимаем мы только `StandardODATA.` (см. _get_record_fields), и в адресе его действительно надо
-    вернуть — без него 1С отвечает 400 «Недопустимое значение … для свойства составного типа». Но
-    так называются не все типы: регистратором может быть документ, НЕ опубликованный в этом
-    интерфейсе OData, и такой тип приходит уже со своим пространством имён —
-    `UnavailableEntities.UnavailableEntity_<guid>`. Ему `StandardODATA.` не нужен, и с ним 1С
-    отвечает тем же 400.
-
-    Отличаем по точке: имя объекта 1С — идентификатор, точек в нём нет, поэтому точка в значении
-    означает, что пространство имён при нём уже есть. Проверено на живой базе, где в одном регистре
-    встретились оба вида.
-    """
-    if not field.endswith('_Type'):
-        return value
-    value = str(value)
-    return value if '.' in value else f'{ODATA_PREFIX}{value}'
 
 
 # Проверка параметров конструктора: ошибка в них иначе всплывает далеко от места, где её

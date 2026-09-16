@@ -4,6 +4,7 @@ import requests
 from typing import Any
 from collections import Counter, UserDict
 from datetime import datetime, date
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 import uuid
 
@@ -21,11 +22,23 @@ logger = get_logger(__name__)
 
 
 def _json_safe(value: Any) -> Any:
-    """Приводит значение к JSON-сериализуемому виду: UUID -> str, datetime/date -> ISO."""
+    """
+    Приводит значение к JSON-сериализуемому виду: UUID -> str, datetime/date -> ISO,
+    Decimal -> float.
+
+    Про Decimal отдельно. В БД число уходит точным (колонка NUMERIC, разбор через Decimal из
+    исходной строки), а json.dumps его не умеет вовсе. Отдаём float — то же самое, что уходило в
+    приёмники до появления точного разбора, то есть форма сообщения не меняется. Цена: у величин
+    свыше 2**53 (16-17 значащих цифр) экспорт теряет младшие разряды, хотя в БД они сохранны.
+    Точный вариант — строка, но он меняет тип поля в сообщении, и это ломало бы схему у всех, кто
+    уже читает эти сообщения.
+    """
     if isinstance(value, uuid.UUID):
         return str(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 # REGISTER_TYPES / ENTITY_TYPES / SUPPORTED_TYPES импортируются из metadata_reader: список
@@ -152,6 +165,10 @@ def _odata_literal(value: Any, type_name: str) -> str:
         v = odata_datetime_value(value) if isinstance(value, (datetime, date)) else str(value)
         return f"datetime'{v}'"
     if type_name in ('Int64', 'Int32', 'Int16', 'Double'):
+        # Дробное — БЕЗ экспоненты: str() отдаёт для крайних величин '1e-07' и '1E+20', а такой
+        # литерал 1С в $filter не принимает. format(..., 'f') разворачивает их в обычную запись.
+        if isinstance(value, (Decimal, float)):
+            return format(Decimal(str(value)), 'f')
         return str(value)
     if type_name == 'Boolean':
         return 'true' if value else 'false'
@@ -786,54 +803,6 @@ class DataReader(UserDict):
             columns[field] = found
         return columns
 
-    def read_by_key(self, object_name: str, key_values: dict) -> int:
-        """
-        Читает ОДИН объект прямым адресом `Объект(Поле='значение',...)`, а не выборкой с $filter.
-        Возвращает 1, если объект есть, и 0, если его нет; прочитанное кладётся в reader, как и
-        после read_object.
-
-        Нужно там, где `$filter` по ключу не работает в принципе, — у регистра, подчинённого
-        регистратору. Проверено на живой 1С, и варианты тут такие:
-
-        | запрос | ответ |
-        |---|---|
-        | `$filter=Recorder eq guid'…'` | 500 «Нельзя сравнивать поля неограниченной длины» |
-        | `$filter=Recorder eq '…'` (строкой) | **200 и НОЛЬ строк** |
-        | `Объект(Recorder='…',Recorder_Type='StandardODATA.…')` | 200, ровно одна entry |
-
-        Средняя строка — ловушка, из-за которой этот метод и появился: строковый литерал ошибки не
-        даёт, но и не находит ничего. Перепроверка на таком «ответе» решила бы, что в 1С не осталось
-        ни одного набора, и пометила бы удалёнными ВСЕ строки регистра.
-
-        Имя типа в ключе пишется с префиксом `StandardODATA.` — в данных мы его снимаем
-        (см. _get_record_fields), а в адресе он обязателен: без него 1С отвечает 400 «Недопустимое
-        значение … для свойства составного типа».
-
-        Ответ здесь — одиночный `<entry>` без обёртки `<feed>`, а отсутствие объекта 1С сообщает
-        честным 404 «Экземпляр сущности не найден»: это ответ, а не ошибка, поэтому наружу он не
-        пробрасывается.
-        """
-        key = ','.join(f"{field}='{value}'" for field, value in key_values.items())
-        path = quote(f"{object_name}({key})", safe="()=',")
-        response = requests.get(f"{self.odata_url}/{path}", auth=self.odata_auth,
-                                timeout=resolve_timeout(self.request_timeout))
-        self.clear()
-        # 404 засчитываем как «объекта нет» ТОЛЬКО от самой 1С. Такой же код отдаёт IIS со снятой
-        # публикацией, ingress без правила во время обновления или чужой vhost — а вызывают этот
-        # метод из перепроверки кандидатов на пометку, и «нет» там означает «пометить удалённым».
-        # Полминуты инфраструктурного 404 иначе = полминуты ложных удалений подряд, с обнулением
-        # ресурсов. Рядом уже есть такая же строгость к 404 у IIS (_is_query_too_long).
-        if response.status_code == 404 and is_entity_absent(response):
-            return 0
-        raise_for_status(response, f'read {object_name}({key})')
-        self.last_response_bytes = len(response.content)
-        entry = parse_odata(response.text, 'entry', f'read {object_name}({key})',
-                            force_list=('d:element',))
-        if not entry:
-            return 0
-        self.read_data_entries([entry])
-        return 1
-
     def read_date_bound(self, object_name: str, date_field: str, *, newest: bool,
                         extra_filter: str | None = None) -> datetime | None:
         """
@@ -956,7 +925,15 @@ class DataReader(UserDict):
             if type_name in ('Int64', 'Int32', 'Int16'):
                 return int(value)
             if type_name == 'Double':
-                return float(value)
+                # Decimal из ИСХОДНОЙ строки, а не float: колонка в БД — NUMERIC, она хранит
+                # десятичное значение точно, и промежуточный float этому замыслу противоречит.
+                # Числа 1С допускают до 38 разрядов, а у float точность кончается на 2**53:
+                # проверено, '9007199254740993' превращается в 9007199254740992.0, а
+                # '12345678901234567890.12' — ещё и в экспоненциальную форму. Значение при этом
+                # искажается МОЛЧА и стабильно: и поток изменений, и полная выгрузка читают через
+                # один и тот же конвертер, поэтому согласуются друг с другом, и сверка
+                # rows_modified расхождения не покажет.
+                return Decimal(value)
             if type_name == 'DateTime':
                 return datetime.fromisoformat(value)
             if type_name == 'Guid':
@@ -964,7 +941,7 @@ class DataReader(UserDict):
                     return None
                 else:
                     return uuid.UUID(value)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, InvalidOperation) as e:
             # Раньше здесь возвращалось исходное значение — и падала вся пачка на вставке
             # (одно '6.4' в uuid-колонке останавливало загрузку объекта навсегда). Пишем NULL:
             # объект грузится, а строка с проблемой видна и в логе, и в БД.
