@@ -24,7 +24,7 @@ import uuid
 from sqlalchemy import Column, DateTime, Engine, Index, MetaData, String, Table, func, insert, select
 from sqlalchemy.exc import IntegrityError
 
-from onecdc.common_functions import truncate_to_bytes
+from onecdc.common_functions import POSTGRES_MAX_IDENTIFIER, truncate_to_bytes
 from onecdc.db_logs import (_check_create_schema, create_index_if_absent,
                             create_table_if_absent)
 from onecdc.logging_config import get_logger
@@ -53,9 +53,6 @@ def _translit(s: str) -> str:
     return s.translate(_TRANSLIT_TABLE)
 
 
-# Лимит длины идентификатора в PostgreSQL — 63 БАЙТА (не символа: буквы вне таблицы транслита
-# остаются многобайтовыми, см. truncate_to_bytes).
-POSTGRES_MAX_IDENTIFIER = 63
 HASH_LENGTH = 4
 # Длина суффикса `_хэш`: на неё укорачивается основа, чтобы итог уложился в лимит.
 _SUFFIX_LENGTH = HASH_LENGTH + 1

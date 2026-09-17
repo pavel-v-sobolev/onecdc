@@ -21,6 +21,11 @@ ODATA_PREFIX = 'StandardODATA.'
 # Куском какого размера принимаем тело ответа (см. read_within_limit).
 CHUNK_SIZE = 1 << 20
 
+# Лимит длины идентификатора в PostgreSQL — 63 БАЙТА (не символа: буквы вне таблицы транслита
+# остаются многобайтовыми, см. truncate_to_bytes). Лежит здесь, а не в name_mapper: длину меряют
+# по нему и имена таблиц, и имя схемы (см. db_logs._check_db_schema).
+POSTGRES_MAX_IDENTIFIER = 63
+
 
 def truncate_to_bytes(name: str, max_bytes: int) -> str:
     """

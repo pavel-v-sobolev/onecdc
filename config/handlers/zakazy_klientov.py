@@ -17,8 +17,16 @@ from dbmerge import dbmerge
 
 from onecdc import Handler, HandlerContext
 
-DDL = """
-CREATE OR REPLACE VIEW {schema}."ZakazyKlientov_view"
+
+def ddl(context: HandlerContext) -> str:
+    """
+    DDL витрины. Функция, а не константа: имя схемы приходит в контексте, поэтому подставляет его
+    обычная f-строка — `"{schema}"."Таблица"` в тексте и есть подстановка, никакого своего
+    механизма. Схема не задана — работаем в схеме по умолчанию.
+    """
+    schema = context.schema or 'public'
+    return f"""
+CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientov_view"
 AS
 (
 SELECT
@@ -33,11 +41,11 @@ SELECT
 	s."merged_on",
 	n."merged_on" "Nomenklatura_merged_on",
 	s."is_deleted_or_empty"
-FROM {schema}."AccumulationRegister_ZakazyKlientov" s
-LEFT JOIN {schema}."Catalog_Nomenklatura" n ON n."Ref_Key"=s."Nomenklatura_Key"
+FROM "{schema}"."AccumulationRegister_ZakazyKlientov" s
+LEFT JOIN "{schema}"."Catalog_Nomenklatura" n ON n."Ref_Key"=s."Nomenklatura_Key"
 );
 
-CREATE TABLE IF NOT EXISTS {schema}."ZakazyKlientov" (
+CREATE TABLE IF NOT EXISTS "{schema}"."ZakazyKlientov" (
 	"Recorder" uuid,
 	"Recorder_Type" varchar,
 	"LineNumber" int8,
@@ -55,31 +63,35 @@ CREATE TABLE IF NOT EXISTS {schema}."ZakazyKlientov" (
 -- будет спрашивать «что здесь изменилось». Индекса по Nomenklatura_merged_on нет намеренно: он
 -- существовал ради SELECT max(...) из самой витрины, а границу теперь приносит context.
 CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientov_merged_on" ON
-	{schema}."ZakazyKlientov" USING btree (merged_on);
+	"{schema}"."ZakazyKlientov" USING btree (merged_on);
 
 -- Индекс по колонке соединения со справочником: без него ветка UNION ALL, которую ведёт свежая
 -- номенклатура, дотягивается до регистра полным сканом. Репликатор такие индексы не создаёт — он
 -- заводит только merged_on, а что с чем соединяется, знает витрина, а не он.
 CREATE INDEX IF NOT EXISTS "ix_AccumulationRegister_ZakazyKlientov_Nomenklatura_Key" ON
-	{schema}."AccumulationRegister_ZakazyKlientov" USING btree ("Nomenklatura_Key");
+	"{schema}"."AccumulationRegister_ZakazyKlientov" USING btree ("Nomenklatura_Key");
 
 -- Индекс по периоду: по нему нарезана пересборка (см. rebuild ниже), блок = месяц.
 CREATE INDEX IF NOT EXISTS "ix_AccumulationRegister_ZakazyKlientov_Period" ON
-	{schema}."AccumulationRegister_ZakazyKlientov" USING btree ("Period");
+	"{schema}"."AccumulationRegister_ZakazyKlientov" USING btree ("Period");
 """
 
 
-# Месяцы, за которые в регистре есть движения, по возрастанию. Порядок важен: метка последнего
-# блока — это точка возобновления, и «всё, что меньше» должно быть уже сделано. Метка в формате
-# YYYY-MM именно поэтому: она сравнивается как строка, и такой формат сортируется правильно сам.
-#
-# Арифметику календаря делает БД: прибавить месяц к дате в Python — либо лишняя зависимость, либо
-# трюк вроде «28-е плюс четыре дня».
-REBUILD_BLOCKS_SQL = """
+def rebuild_blocks_sql(context: HandlerContext) -> str:
+    """
+    Месяцы, за которые в регистре есть движения, по возрастанию. Порядок важен: метка последнего
+    блока — это точка возобновления, и «всё, что меньше» должно быть уже сделано. Метка в формате
+    YYYY-MM именно поэтому: она сравнивается как строка, и такой формат сортируется правильно сам.
+
+    Арифметику календаря делает БД: прибавить месяц к дате в Python — либо лишняя зависимость,
+    либо трюк вроде «28-е плюс четыре дня».
+    """
+    schema = context.schema or 'public'
+    return f"""
 SELECT DISTINCT to_char(date_trunc('month', "Period"), 'YYYY-MM') AS label,
        date_trunc('month', "Period")::date AS begins,
        (date_trunc('month', "Period") + interval '1 month')::date AS ends
-  FROM {schema}."AccumulationRegister_ZakazyKlientov"
+  FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
  WHERE "Period" IS NOT NULL
  ORDER BY label
 """
@@ -96,7 +108,7 @@ class ZakazyKlientov(Handler):
     def setup(self, context: HandlerContext) -> None:
         # Один раз за процесс, а не на каждый вызов: полная выгрузка сигналит постранично, и
         # CREATE OR REPLACE VIEW на каждую страницу брал бы блокировки на пустом месте.
-        self.execute(context, DDL)
+        self.execute(context, ddl(context))
 
     def rebuild(self, context: HandlerContext):
         """
@@ -111,7 +123,7 @@ class ZakazyKlientov(Handler):
         остаётся. Витрине, где ключ другой, месяц пришлось бы заменять целиком: см. соседний
         zakazy_klientov_grouped.py.
         """
-        for label, begin, end in self.query(context, REBUILD_BLOCKS_SQL):
+        for label, begin, end in self.query(context, rebuild_blocks_sql(context)):
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                      # этот месяц уже посчитан до перезапуска процесса
 

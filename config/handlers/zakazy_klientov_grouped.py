@@ -42,8 +42,16 @@ from dbmerge import dbmerge
 
 from onecdc import Handler, HandlerContext
 
-DDL = """
-CREATE OR REPLACE VIEW {schema}."ZakazyKlientovGrouped_rows_view"
+
+def ddl(context: HandlerContext) -> str:
+    """
+    DDL витрины. Функция, а не константа: имя схемы приходит в контексте, поэтому подставляет его
+    обычная f-строка — `"{schema}"."Таблица"` в тексте и есть подстановка, никакого своего
+    механизма. Схема не задана — работаем в схеме по умолчанию.
+    """
+    schema = context.schema or 'public'
+    return f"""
+CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientovGrouped_rows_view"
 AS
 (
 SELECT
@@ -65,13 +73,13 @@ SELECT
 	--Регистратор и документ — один и тот же GUID, поэтому колонка одна на оба источника.
 	s."Recorder",
 	s."Nomenklatura_Key"
-FROM {schema}."AccumulationRegister_ZakazyKlientov" s
-LEFT JOIN {schema}."Document_ZakazKlienta" z ON z."Ref_Key" = s."Recorder" AND
+FROM "{schema}"."AccumulationRegister_ZakazyKlientov" s
+LEFT JOIN "{schema}"."Document_ZakazKlienta" z ON z."Ref_Key" = s."Recorder" AND
 	s."Recorder_Type"='Document_ЗаказКлиента'
-LEFT JOIN {schema}."Catalog_Nomenklatura" n ON n."Ref_Key"=s."Nomenklatura_Key"
+LEFT JOIN "{schema}"."Catalog_Nomenklatura" n ON n."Ref_Key"=s."Nomenklatura_Key"
 );
 
-CREATE OR REPLACE VIEW {schema}."ZakazyKlientovGrouped_view"
+CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientovGrouped_view"
 AS
 (
 SELECT
@@ -90,11 +98,11 @@ SELECT
 		ARRAY[]::uuid[]) "Recorder_Keys",
 	COALESCE(array_agg(DISTINCT "Nomenklatura_Key") FILTER (WHERE "Nomenklatura_Key" IS NOT NULL),
 		ARRAY[]::uuid[]) "Nomenklatura_Keys"
-FROM {schema}."ZakazyKlientovGrouped_rows_view"
+FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
 GROUP BY "Number","Year","Artikul"
 );
 
-CREATE TABLE IF NOT EXISTS {schema}."ZakazyKlientovGrouped" (
+CREATE TABLE IF NOT EXISTS "{schema}"."ZakazyKlientovGrouped" (
 	"Number" varchar,
 	"Year" int4,
 	"Artikul" varchar,
@@ -108,81 +116,92 @@ CREATE TABLE IF NOT EXISTS {schema}."ZakazyKlientovGrouped" (
 );
 
 CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientovGrouped_merged_on" ON
-	{schema}."ZakazyKlientovGrouped" USING btree (merged_on);
+	"{schema}"."ZakazyKlientovGrouped" USING btree (merged_on);
 
 -- GIN на каждый массив: под запрос «какие группы породил вот этот набор GUID-ов» (оператор &&).
 -- Btree тут не работает: ищем не по значению массива, а по вхождению элемента.
 CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientovGrouped_Recorder_Keys" ON
-	{schema}."ZakazyKlientovGrouped" USING gin ("Recorder_Keys");
+	"{schema}"."ZakazyKlientovGrouped" USING gin ("Recorder_Keys");
 
 CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientovGrouped_Nomenklatura_Keys" ON
-	{schema}."ZakazyKlientovGrouped" USING gin ("Nomenklatura_Keys");
+	"{schema}"."ZakazyKlientovGrouped" USING gin ("Nomenklatura_Keys");
 
 -- Индекс под source_condition: агрегатная вьюшка фильтруется по ключу группы, а Number приходит
 -- из документа.
 CREATE INDEX IF NOT EXISTS "ix_Document_ZakazKlienta_Number" ON
-	{schema}."Document_ZakazKlienta" USING btree ("Number");
+	"{schema}"."Document_ZakazKlienta" USING btree ("Number");
 
 -- Индекс по колонке соединения со справочником. Репликатор такие индексы не создаёт — он заводит
 -- только merged_on, а что с чем соединяется, знает витрина, а не он.
 CREATE INDEX IF NOT EXISTS "ix_AccumulationRegister_ZakazyKlientov_Nomenklatura_Key" ON
-	{schema}."AccumulationRegister_ZakazyKlientov" USING btree ("Nomenklatura_Key");
+	"{schema}"."AccumulationRegister_ZakazyKlientov" USING btree ("Nomenklatura_Key");
 
 -- Индекс по месяцу: по нему нарезана пересборка (см. rebuild ниже), блок = месяц.
 CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientovGrouped_Period" ON
-	{schema}."ZakazyKlientovGrouped" USING btree ("Period");
+	"{schema}"."ZakazyKlientovGrouped" USING btree ("Period");
 """
 
-# Группы, которые надо пересчитать за окно (:last_run_at — конец прошлого прогона):
-# PREVIOUS — что изменившиеся объекты давали раньше, CURRENT — что дают сейчас.
-#
-# Две тонкости, из-за которых половины записаны по-разному:
-#   - в PREVIOUS оба условия на одной таблице, там OR работает через индексы; в CURRENT они на
-#     разных таблицах соединения, и OR пришлось бы проверять уже после JOIN'а — поэтому UNION ALL;
-#   - набор изменившегося подставляется через ARRAY(SELECT ...), а не IN (SELECT ...): под OR
-#     IN-подзапрос не позволяет планировщику использовать индексы.
-GROUPS_TO_HANDLE_SQL = """
+
+def groups_to_handle_sql(context: HandlerContext) -> str:
+    """
+    Группы, которые надо пересчитать за окно (:last_run_at — конец прошлого прогона):
+    PREVIOUS — что изменившиеся объекты давали раньше, CURRENT — что дают сейчас.
+
+    Две тонкости, из-за которых половины записаны по-разному:
+      - в PREVIOUS оба условия на одной таблице, там OR работает через индексы; в CURRENT они на
+        разных таблицах соединения, и OR пришлось бы проверять уже после JOIN'а — поэтому UNION ALL;
+      - набор изменившегося подставляется через ARRAY(SELECT ...), а не IN (SELECT ...): под OR
+        IN-подзапрос не позволяет планировщику использовать индексы.
+
+    Окно приходит параметром `:last_run_at` — его связывает вызывающий (см. handle).
+    """
+    schema = context.schema or 'public'
+    return f"""
 WITH changed_recorders AS (
     SELECT DISTINCT "Recorder" AS id
-      FROM {schema}."AccumulationRegister_ZakazyKlientov"
+      FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
      WHERE "merged_on" > :last_run_at
     UNION
-    SELECT "Ref_Key" FROM {schema}."Document_ZakazKlienta"
+    SELECT "Ref_Key" FROM "{schema}"."Document_ZakazKlienta"
      WHERE "merged_on" > :last_run_at
 ),
 changed_nomenklatura AS (
-    SELECT "Ref_Key" AS id FROM {schema}."Catalog_Nomenklatura"
+    SELECT "Ref_Key" AS id FROM "{schema}"."Catalog_Nomenklatura"
      WHERE "merged_on" > :last_run_at
 )
 
 -- PREVIOUS: группы, которые изменившиеся объекты давали раньше
-SELECT "Number", "Year" FROM {schema}."ZakazyKlientovGrouped"
+SELECT "Number", "Year" FROM "{schema}"."ZakazyKlientovGrouped"
  WHERE "Recorder_Keys" && ARRAY(SELECT id FROM changed_recorders)
     OR "Nomenklatura_Keys" && ARRAY(SELECT id FROM changed_nomenklatura)
 
 UNION ALL
 
 -- CURRENT: группы, которые они дают сейчас
-SELECT "Number", "Year" FROM {schema}."ZakazyKlientovGrouped_rows_view"
+SELECT "Number", "Year" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
  WHERE "merged_on" > :last_run_at
 UNION ALL
-SELECT "Number", "Year" FROM {schema}."ZakazyKlientovGrouped_rows_view"
+SELECT "Number", "Year" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
  WHERE "ZakazKlienta_merged_on" > :last_run_at
 UNION ALL
-SELECT "Number", "Year" FROM {schema}."ZakazyKlientovGrouped_rows_view"
+SELECT "Number", "Year" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
  WHERE "Nomenklatura_merged_on" > :last_run_at
 """
 
 
-# Месяцы, которые надо пересобрать. Объединение двух источников не для красоты: месяц, которого в
-# источнике больше нет, а в витрине он есть, иначе не был бы очищен НИКОГДА — блок по нему просто
-# не запустился бы.
-#
-# Метка YYYY-MM сравнивается как строка, и такой формат сортируется правильно сам по себе.
-REBUILD_BLOCKS_SQL = """
-SELECT DISTINCT "Period" FROM {schema}."ZakazyKlientovGrouped_rows_view"
+def rebuild_blocks_sql(context: HandlerContext) -> str:
+    """
+    Месяцы, которые надо пересобрать. Объединение двух источников не для красоты: месяц, которого
+    в источнике больше нет, а в витрине он есть, иначе не был бы очищен НИКОГДА — блок по нему
+    просто не запустился бы.
+
+    Метка YYYY-MM сравнивается как строка, и такой формат сортируется правильно сам по себе.
+    """
+    schema = context.schema or 'public'
+    return f"""
+SELECT DISTINCT "Period" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
 UNION
-SELECT DISTINCT "Period" FROM {schema}."ZakazyKlientovGrouped"
+SELECT DISTINCT "Period" FROM "{schema}"."ZakazyKlientovGrouped"
 ORDER BY 1
 """
 
@@ -197,7 +216,7 @@ class ZakazyKlientovGrouped(Handler):
     ON = ["AccumulationRegister_ZakazyKlientov", "Document_ZakazKlienta", "Catalog_Nomenklatura"]
 
     def setup(self, context: HandlerContext) -> None:
-        self.execute(context, DDL)
+        self.execute(context, ddl(context))
 
     def rebuild(self, context: HandlerContext):
         """
@@ -209,7 +228,7 @@ class ZakazyKlientovGrouped(Handler):
         Заодно это само чинит переезд группы между месяцами (поправили дату документа): из старого
         месяца её удалит его блок, в новом создаст его собственный.
         """
-        for (period,) in self.query(context, REBUILD_BLOCKS_SQL):
+        for (period,) in self.query(context, rebuild_blocks_sql(context)):
             label = period.strftime('%Y-%m')
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                  # этот месяц уже посчитан до перезапуска процесса
@@ -227,9 +246,10 @@ class ZakazyKlientovGrouped(Handler):
             yield label
 
     def handle(self, context: HandlerContext) -> None:
-        groups_to_handle = text(
-            GROUPS_TO_HANDLE_SQL.format(schema=self.schema_prefix(context))
-        ).bindparams(last_run_at=context.last_run_at)
+        # Выборка групп уходит в запрос dbmerge дважды, поэтому её не выполняют, а готовят:
+        # text() с окном, связанным как обычный параметр.
+        groups_to_handle = text(groups_to_handle_sql(context)).bindparams(
+            last_run_at=context.last_run_at)
 
         with dbmerge(context.engine, table_name="ZakazyKlientovGrouped", schema=context.schema,
                      # Промежуточную таблицу merge кладём туда же, куда её кладёт репликатор

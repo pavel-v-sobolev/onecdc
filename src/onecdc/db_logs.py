@@ -17,6 +17,7 @@ from sqlalchemy import (Column, DateTime, Engine, Index, Integer, MetaData, Stri
                         Table, func, insert, inspect, text, update, schema, Numeric)
 from sqlalchemy.exc import DatabaseError
 
+from onecdc.common_functions import POSTGRES_MAX_IDENTIFIER
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -46,7 +47,40 @@ def _create_if_absent(engine: Engine, create, exists, what: str) -> None:
         logger.debug("%s already created concurrently, continuing (%s)", what, type(error).__name__)
 
 
+def _check_db_schema(db_schema: str | None) -> str | None:
+    """
+    Имя схемы БД либо None (схема по умолчанию). Пустая строка — почти наверняка незаполненная
+    переменная окружения, а не осознанный выбор.
+
+    Кавычки и управляющие символы отвергаем — это про написание, а не про безопасность. Значение с
+    кавычкой или переводом строки почти всегда означает неразвёрнутую переменную окружения, и
+    узнать об этом лучше на старте, чем найти потом в базе схему с таким именем. Своему SQL
+    библиотека имя схемы не подставляет нигде (кавычит SQLAlchemy), но обработчик пишет его в свой
+    запрос сам, f-строкой от context.schema, — и кавычка внутри имени сломала бы такой запрос.
+
+    Длину меряем в БАЙТАХ: Postgres режет идентификатор по 63 байтам МОЛЧА, а кириллица занимает
+    по два байта на символ (см. common_functions.truncate_to_bytes).
+    """
+    if db_schema is None:
+        return None
+    if not isinstance(db_schema, str):
+        raise ValueError(f"db_schema must be a schema name string or None (got {db_schema!r})")
+    name = db_schema.strip() or None
+    if name is None:
+        return None
+    if '"' in name or any(ord(ch) < 32 for ch in name):
+        raise ValueError(f"db_schema looks like an unexpanded value: quotes and control "
+                         f"characters are not allowed in a schema name (got {db_schema!r})")
+    if len(name.encode('utf-8')) > POSTGRES_MAX_IDENTIFIER:
+        raise ValueError(f"db_schema is longer than {POSTGRES_MAX_IDENTIFIER} bytes and Postgres "
+                         f"would truncate it silently (got {db_schema!r})")
+    return name
+
+
 def _check_create_schema(engine: Engine, schema_name: str | None) -> str | None:
+    # Проверка имени здесь, а не у вызывающего: этот хелпер зовут все, кто заводит свои таблицы
+    # (репликатор, цикл обработчиков, реестр имён), и другой точки, общей для всех, нет.
+    schema_name = _check_db_schema(schema_name)
     # schema_name=None — работаем в схеме БД по умолчанию, создавать нечего: возвращаем None,
     # не дёргая has_schema/CreateSchema с None.
     if schema_name is None:

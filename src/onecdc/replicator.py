@@ -26,7 +26,7 @@ from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
 from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
 from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FIELD,
-                            NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog,
+                            NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog, _check_db_schema,
                             create_table_if_absent,
                             exchange_nodes_table)
 from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
@@ -200,6 +200,11 @@ def _check_odata_auth(odata_auth):
                      f"anonymous access (got {odata_auth!r})")
 
 
+# Имя плана обмена: идентификатор 1С. \w в Python включает кириллицу, [^\W\d] — буква
+# или подчёркивание (то есть \w без цифр).
+_EXCHANGE_NAME = re.compile(r'^[^\W\d]\w*$')
+
+
 def _check_exchange_name(exchange_name) -> str:
     """Имя плана обмена так, как оно уходит в URL: ExchangePlan_<имя>. Префикс/точечное имя
     (ПланОбмена.Х, ExchangePlan_Х) снимаем: в URL их дописывает сам ChangeReader."""
@@ -212,8 +217,19 @@ def _check_exchange_name(exchange_name) -> str:
             logger.warning("exchange_name %r: dropping the %r prefix, the plain plan name is "
                            "expected", exchange_name, prefix)
             name = name[len(prefix):]
-    if '/' in name or ' ' in name:
-        raise ValueError(f"exchange_name must be a bare exchange plan name (got {exchange_name!r})")
+    # Белый список, а не перечень запрещённого. Имя уходит в URL внутрь ВЛОЖЕННОГО литерала:
+    #   DataExchangePoint='…/ExchangePlan_<имя>(guid'…')'&MessageNo=N
+    # Кавычка ломает этот литерал, «&» дописывает свой параметр, «#» отрезает всё после себя —
+    # включая MessageNo. Запрещать их поимённо бессмысленно: следующий особый символ снова
+    # пройдёт. А имя плана обмена в 1С — обычный идентификатор: буквы (в том числе кириллица),
+    # цифры и подчёркивание, не с цифры.
+    #
+    # Цена пропуска была не «инъекция» (имя задаёт оператор), а молчаливый простой: 1С отвечала
+    # 400, цикл считал эту ошибку неустранимой и уходил в получасовую паузу с невнятным текстом.
+    if not _EXCHANGE_NAME.match(name):
+        raise ValueError(
+            f"exchange_name must be a bare 1C identifier — letters, digits and underscores, not "
+            f"starting with a digit (got {exchange_name!r})")
     return name
 
 
@@ -267,16 +283,6 @@ def _check_db_connection(engine: Engine) -> Engine:
         # которого здесь нет, — соединение не открылось вовсе.
         raise ConnectionError(f"cannot connect to the database {url}: {reason}") from None
     return engine
-
-
-def _check_db_schema(db_schema):
-    """Имя схемы БД либо None (схема по умолчанию). Пустая строка — почти наверняка незаполненная
-    переменная окружения, а не осознанный выбор."""
-    if db_schema is None:
-        return None
-    if not isinstance(db_schema, str):
-        raise ValueError(f"db_schema must be a schema name string or None (got {db_schema!r})")
-    return db_schema.strip() or None
 
 
 def _check_full_load_workers(full_load_workers) -> int:

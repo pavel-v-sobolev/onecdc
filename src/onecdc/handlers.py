@@ -340,26 +340,27 @@ class Handler:
         return or_(*[column > context.last_run_at for column in columns])
 
     def execute(self, context: HandlerContext, sql: str, **params) -> None:
-        """Выполняет SQL, подставляя в `{schema}` целевую схему (уже в кавычках)."""
+        """
+        Выполняет SQL в своей транзакции. Параметры именованные (`:name`), значения — в **params.
+
+        Текст запроса берётся КАК ЕСТЬ: никаких подстановок в нём не делается. Имя схемы обработчик
+        пишет сам — обычной f-строкой от `context.schema` (см. config/handlers/zakazy_klientov.py),
+        и в тексте тогда видно ровно то, что выполнится. Значения в текст не пишут никогда: для них
+        есть параметры.
+        """
         with context.engine.begin() as conn:
-            conn.execute(text(sql.format(schema=self.schema_prefix(context))), params)
+            conn.execute(text(sql), params)
 
     def query(self, context: HandlerContext, sql: str, **params) -> list:
         """
-        Строки SQL-запроса; `{schema}` подставляется так же, как в execute(). Пара к нему: тот
-        выполняет и ничего не возвращает, этот читает.
+        Строки SQL-запроса. Пара к execute: тот выполняет и ничего не возвращает, этот читает.
 
         Результат материализуется списком, а не курсором: вызывать такое обычно надо ДО долгой работы
         (например, за списком блоков пересборки), и держать соединение открытым всё это время
         незачем — тем более что работа возьмёт из пула своё.
         """
         with context.engine.connect() as conn:
-            return conn.execute(text(sql.format(schema=self.schema_prefix(context))), params).all()
-
-    @staticmethod
-    def schema_prefix(context: HandlerContext) -> str:
-        """Имя схемы для подстановки в текстовый SQL; без схемы — public (схема по умолчанию)."""
-        return f'"{context.schema}"' if context.schema else 'public'
+            return conn.execute(text(sql), params).all()
 
 
 @dataclass(frozen=True)
