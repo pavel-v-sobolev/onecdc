@@ -172,6 +172,16 @@ def _is_permanent_error(exc: BaseException) -> bool:
 _UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 
 
+# Учётные данные в самом адресе: http://user:pass@host/... Держим отдельно от разбора URL —
+# по этому же выражению адрес и маскируется для сообщений.
+_URL_USERINFO = re.compile(r'^(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<userinfo>[^/@]*@)')
+
+
+def _hide_userinfo(url: str) -> str:
+    """Адрес без учётных данных — для сообщений и логов."""
+    return _URL_USERINFO.sub(lambda m: m.group('scheme') + '***@', url)
+
+
 def _check_odata_url(odata_url) -> str:
     """URL корня OData: http(s)://host/base/odata/standard.odata (без слеша на конце — к нему
     везде дописывается /<ресурс>)."""
@@ -179,8 +189,18 @@ def _check_odata_url(odata_url) -> str:
         raise ValueError("odata_url is required: URL of the 1C OData root, e.g. "
                          "http://host/base/odata/standard.odata")
     url = odata_url.strip().rstrip('/')
+    # Показывать адрес в сообщениях можно только замаскированным: пока userinfo не отвергнут,
+    # в нём может лежать пароль, а этот же текст уедет в лог и в трейсбек.
+    shown = _hide_userinfo(url)
     if not url.startswith(('http://', 'https://')):
-        raise ValueError(f"odata_url must start with http:// or https:// (got {odata_url!r})")
+        raise ValueError(f"odata_url must start with http:// or https:// (got {shown!r})")
+    # Учётные данные в адресе ЗАПРЕЩЕНЫ, а не вычищаются молча. requests их оттуда не убирает:
+    # пароль остаётся и в response.url, и в тексте любой ошибки от него, то есть протекал бы в
+    # лог каждым сообщением про этот запрос. Маскировать пришлось бы в каждой новой строке лога —
+    # проще не принимать такой адрес вовсе, тем более что параметр для этого есть.
+    if _URL_USERINFO.search(url):
+        raise ValueError(f"odata_url must not carry credentials: pass them as "
+                         f"odata_auth=(user, password) instead (got {shown!r})")
     if not url.endswith('/odata/standard.odata'):
         # Не ошибка: адрес публикации бывает нестандартным. Но чаще это забытый хвост пути.
         logger.warning("odata_url %s does not end with /odata/standard.odata — is this the OData "
@@ -190,14 +210,36 @@ def _check_odata_url(odata_url) -> str:
 
 def _check_odata_auth(odata_auth):
     """(user, password) либо None. Часто передают одну строку или один элемент — с таким requests
-    уходит в 1С без авторизации или падает не по делу."""
+    уходит в 1С без авторизации или падает не по делу.
+
+    Само значение в сообщение НЕ попадает — в нём пароль. Ошибка называет только форму: опечатка
+    в кортеже иначе уносила бы пароль в трейсбек, в лог контейнера и дальше по всем сборщикам.
+    """
     if odata_auth is None:
         return None
     if (isinstance(odata_auth, (tuple, list)) and len(odata_auth) == 2
             and all(isinstance(part, str) for part in odata_auth)):
         return tuple(odata_auth)
+    if isinstance(odata_auth, (tuple, list)):
+        shape = f'{type(odata_auth).__name__} of {len(odata_auth)} ' \
+                f'({", ".join(type(part).__name__ for part in odata_auth)})'
+    else:
+        shape = type(odata_auth).__name__
     raise ValueError("odata_auth must be a (user, password) tuple of strings, or None for "
-                     f"anonymous access (got {odata_auth!r})")
+                     f"anonymous access (got {shape}; the value is not shown — it holds "
+                     f"the password)")
+
+
+def _warn_if_credentials_go_in_clear(odata_url: str, odata_auth) -> None:
+    """
+    Basic-авторизация по открытому HTTP: пароль уходит в заголовке каждого запроса, и в сети его
+    видит любой наблюдатель. Один раз при старте, предупреждением, а не отказом: публикация 1С по
+    http во внутренней сети — обычное дело, и решает это администратор контура, а не библиотека.
+    """
+    if odata_auth and odata_auth[1] and odata_url.startswith('http://'):
+        logger.warning("odata_url is plain http:// and a password is set: Basic auth sends it "
+                       "with every request in clear text, readable by anyone on the network. "
+                       "Use https:// if the publication has it.")
 
 
 # Имя плана обмена: идентификатор 1С. \w в Python включает кириллицу, [^\W\d] — буква
@@ -537,6 +579,7 @@ class Replicator:
         self._queue_guid = _check_queue_guid(queue_guid)
         # odata_auth — кортеж (user, password) либо None, как в ридерах (передаётся им как есть).
         self._odata_auth = _check_odata_auth(odata_auth)
+        _warn_if_credentials_go_in_clear(self._odata_url, self._odata_auth)
         # None → таймаут не задан явно: ридеры подставят DEFAULT_REQUEST_TIMEOUT (metadata_reader).
         self._request_timeout = _check_request_timeout(request_timeout)
 

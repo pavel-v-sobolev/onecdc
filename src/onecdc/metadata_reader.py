@@ -10,7 +10,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge
 
 from onecdc.name_mapper import SCOPE_OBJECT, NameMapper, field_scope
-from onecdc.common_functions import format_bytes, parse_object_full_name, raise_for_status
+from onecdc.common_functions import (format_bytes, odata_auth_header,
+                                     parse_object_full_name, raise_for_status)
 from onecdc.logging_config import get_logger, load_mode, LOAD_MODE_METADATA
 
 logger = get_logger(__name__)
@@ -233,7 +234,9 @@ class MetadataReader(UserDict):
                  temp_schema: str | None = None, name_mapper: "NameMapper | None" = None):
         super().__init__()
         self.odata_url=odata_url
-        self.odata_auth=odata_auth
+        # Пара (пользователь, пароль) уходит в requests не кортежем, а своим заголовком:
+        # его Basic кодируется в latin-1 и падает на кириллице (см. odata_auth_header).
+        self.odata_auth = odata_auth_header(odata_auth)
         self.request_timeout=request_timeout
         # В конструкторе метаданные НЕ загружаются (без сетевого запроса), чтобы недоступность 1С
         # на старте не роняла процесс. Загрузка — get_metadata(), которая выставляет is_loaded=True.

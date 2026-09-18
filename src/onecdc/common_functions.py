@@ -27,6 +27,39 @@ CHUNK_SIZE = 1 << 20
 POSTGRES_MAX_IDENTIFIER = 63
 
 
+class Utf8BasicAuth(requests.auth.AuthBase):
+    """
+    Basic-авторизация с учётными данными в UTF-8.
+
+    requests кодирует их в latin-1 (историческое поведение, до RFC 7617), поэтому кириллический
+    логин или пароль роняет ЛЮБОЙ запрос ещё до отправки — `UnicodeEncodeError` из глубины
+    requests, по которому не догадаться, что дело в пароле. Для 1С это не экзотика: пользователь
+    «админ» с русским паролем заводится повсеместно.
+
+    Проверено на живой 1С (демо УТ, публикация на IIS): заголовок в UTF-8 принимается — 200,
+    в cp1251 — 401. То есть UTF-8 это не компромисс, а единственное, что работает.
+    """
+
+    def __init__(self, user: str, password: str):
+        token = base64.b64encode(f'{user}:{password}'.encode('utf-8')).decode('ascii')
+        self._header = 'Basic ' + token
+
+    def __call__(self, request):
+        request.headers['Authorization'] = self._header
+        return request
+
+
+def odata_auth_header(odata_auth):
+    """
+    Пару (пользователь, пароль) превращает в авторизацию для requests; всё остальное отдаёт как
+    есть — None, уже готовый объект авторизации или что угодно, что requests понимает сам.
+    """
+    if (isinstance(odata_auth, (tuple, list)) and len(odata_auth) == 2
+            and all(isinstance(part, str) for part in odata_auth)):
+        return Utf8BasicAuth(*odata_auth)
+    return odata_auth
+
+
 def truncate_to_bytes(name: str, max_bytes: int) -> str:
     """
     Усечение по БАЙТАМ с отбрасыванием оборванной многобайтовой последовательности.

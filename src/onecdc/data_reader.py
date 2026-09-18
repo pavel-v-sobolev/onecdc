@@ -14,8 +14,8 @@ from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_GUID_SUF
                                     ENTITY_TYPES, EXT_DIMENSIONS_FIELDS, REGISTER_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, resolve_timeout)
 from onecdc.name_mapper import NameMapper
-from onecdc.common_functions import (format_bytes, is_entity_absent, odata_datetime_value,
-                                     read_within_limit,
+from onecdc.common_functions import (format_bytes, is_entity_absent, odata_auth_header,
+                                     odata_datetime_value, read_within_limit,
                                      parse_object_full_name, parse_odata, raise_for_status)
 from onecdc.logging_config import get_logger
 
@@ -363,7 +363,9 @@ class DataReader(UserDict):
         super().__init__()
         self.odata_url = odata_url
         self.metadata = metadata
-        self.odata_auth = odata_auth
+        # Пара (пользователь, пароль) уходит в requests не кортежем, а своим заголовком:
+        # его Basic кодируется в latin-1 и падает на кириллице (см. odata_auth_header).
+        self.odata_auth = odata_auth_header(odata_auth)
         self.request_timeout = request_timeout
         # Читать ли субконто регистра бухгалтерии (см. _fill_subconto). По умолчанию НЕТ.
         self.read_subconto = read_subconto
@@ -381,6 +383,11 @@ class DataReader(UserDict):
         # Объекты, ради неизвестного поля которых метаданные уже перечитывались (см. _get_record_fields).
         # Без этого каждая запись с полем вне $metadata давала бы свой полный GET $metadata + dbmerge.
         self._metadata_refreshed_for: set[str] = set()
+
+        # Пары (объект, поле), о которых уже предупреждали. Перечитывание метаданных ограничено
+        # одним разом на объект, а сама строка лога — нет: поле вне $metadata давало запись на
+        # КАЖДУЮ запись страницы, то есть десятки тысяч одинаковых строк на прогон.
+        self._warned_unknown_fields: set[tuple[str, str]] = set()
 
         # Бюджет длины сегмента адреса для запросов за субконто. Опускается отказом сервера и
         # обратно не растёт — как потолок размера страницы у полной выгрузки
@@ -961,7 +968,10 @@ class DataReader(UserDict):
         if value is None:
             return None
         if not isinstance(value, str):
-            logger.warning(f'Expected value to be a string for conversion, got {type(value).__name__}: {value!r}')
+            # Само значение — в DEBUG: в логе оно бизнес-данные, а для разбора нужно не всегда.
+            logger.warning('Expected a string for conversion of %s to %s, got %s',
+                           context or 'field', type_name, type(value).__name__)
+            logger.debug('Value of %s was %r', context or 'field', value)
             return value
         try:
             if type_name == 'Boolean':
@@ -989,8 +999,12 @@ class DataReader(UserDict):
             # Раньше здесь возвращалось исходное значение — и падала вся пачка на вставке
             # (одно '6.4' в uuid-колонке останавливало загрузку объекта навсегда). Пишем NULL:
             # объект грузится, а строка с проблемой видна и в логе, и в БД.
-            logger.warning('Failed to convert %s value %r to type %s: %s — writing NULL',
-                           context or 'field', value, type_name, e)
+            # Значение в WARNING не пишем: в колонке 1С лежат бизнес-данные (ИНН, суммы, ФИО),
+            # а лог обычно хранится с более слабым доступом, чем сама БД. Для разбора его видно
+            # в DEBUG, который включают осознанно.
+            logger.warning('Failed to convert %s to type %s: %s — writing NULL',
+                           context or 'field', type_name, e)
+            logger.debug('Value of %s that failed conversion: %r', context or 'field', value)
             return None
         return value
 
@@ -1055,8 +1069,11 @@ class DataReader(UserDict):
                     self._metadata_refreshed_for.add(object_name)
                     self.metadata.get_metadata()
                     metadata_obj = self.metadata[object_name]
-                if field_name not in metadata_obj.keys():
-                    logger.warning(f'Metadata field {field_name} not found for object {object_name}')
+                if (field_name not in metadata_obj.keys()
+                        and (object_name, field_name) not in self._warned_unknown_fields):
+                    self._warned_unknown_fields.add((object_name, field_name))
+                    logger.warning('Metadata field %s not found for object %s — reading it as '
+                                   'String (reported once per field)', field_name, object_name)
 
 
             type_name = metadata_obj.get(field_name) or 'String'

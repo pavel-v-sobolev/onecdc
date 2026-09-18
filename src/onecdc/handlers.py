@@ -92,7 +92,6 @@ last_run_at, окно повторится. Обработчик обязан б
 import itertools
 import threading
 import time
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import ModuleType
@@ -991,9 +990,9 @@ class HandlerLoop:
             logger.info("Handler %s: update started (objects=%s, window=%s … %s)",
                         self.name, sorted(objects), window_start, boundary)
             self.handler.handle(context)
-        except Exception:
+        except Exception as error:
             logger.exception("Handler %s failed, retry in %ss", self.name, RETRY_DELAY)
-            self._save_error()
+            self._save_error(error)
             # Возвращаем отметки: окно не сдвинулось (last_run_at не записан), но без грязного
             # флага повтор случился бы только при следующем изменении — а его может и не быть.
             self._mark_dirty(objects, sources)
@@ -1115,9 +1114,9 @@ class HandlerLoop:
                 close = getattr(blocks, 'close', None)
                 if close is not None:
                     close()
-        except Exception:
+        except Exception as error:
             logger.exception("Handler %s rebuild failed, retry in %ss", self.name, RETRY_DELAY)
-            self._save_error()
+            self._save_error(error)
             self._mark_dirty(objects, sources)
             retry_delay = RETRY_DELAY
         else:
@@ -1237,7 +1236,17 @@ class HandlerLoop:
                                  last_full_rebuild_dt=func.now(),
                                  last_full_rebuild_minutes=round(elapsed / 60, 3)))
 
-    def _save_error(self) -> None:
+    def _save_error(self, error: BaseException) -> None:
+        """
+        В таблицу — тип и первая строка сообщения. Полный трейсбек остаётся в логе, он там уже
+        есть: оба вызова стоят следом за logger.exception.
+
+        Раньше сюда клали хвост трейсбека в 4000 символов, и это была утечка. Таблицу читает
+        любой, у кого есть SELECT на схему, то есть и потребители витрины, — а в трейсбеке ошибки
+        SQLAlchemy едут и сам запрос, и значения его параметров (`[SQL: …]`, `[parameters: …]`).
+        Первая строка сообщения их не содержит: SQLAlchemy печатает и то, и другое со второй.
+        """
+        first_line = (str(error).strip().splitlines() or [''])[0]
         with self.engine.begin() as conn:
             conn.execute(update(self.table).where(self.table.c.name == self.name)
-                         .values(last_error=traceback.format_exc()[-4000:]))
+                         .values(last_error=f'{type(error).__name__}: {first_line}'[:500]))

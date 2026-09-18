@@ -77,7 +77,7 @@ engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/onecdc", 
 
 rep = Replicator(
     odata_url="http://host/base/odata/standard.odata",
-    odata_auth=("odata", "secret"),        # (user, password) либо None без авторизации
+    odata_auth=("odata", "secret"),        # (user, password)
     exchange_name="ВашПланОбмена",              # имя плана обмена в 1С
     queue_guid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",  # Ref_Key узла обмена
     engine=engine,
