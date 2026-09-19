@@ -15,7 +15,7 @@ from sqlalchemy.exc import NoSuchTableError, OperationalError
 from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, type_mapping)
 from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, ResponseTooLargeError,
-                                     format_duration,
+                                     check_queue_guid, format_duration,
                                      instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
                                 MAX_RESPONSE_BYTES,
@@ -169,7 +169,6 @@ def _is_permanent_error(exc: BaseException) -> bool:
 # Проверка параметров конструктора: ошибка в них иначе всплывает далеко от места, где её
 # допустили — 404 от 1С посреди цикла, KeyError в чужом коде, а то и молча неверная работа.
 # Проверяем на месте вызова и сообщением говорим, что именно передать.
-_UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 
 
 # Учётные данные в самом адресе: http://user:pass@host/... Держим отдельно от разбора URL —
@@ -273,22 +272,6 @@ def _check_exchange_name(exchange_name) -> str:
             f"exchange_name must be a bare 1C identifier — letters, digits and underscores, not "
             f"starting with a digit (got {exchange_name!r})")
     return name
-
-
-def _check_queue_guid(queue_guid) -> str:
-    """Ref_Key узла обмена. Пустой — допустим: чтение изменений тогда выведет в лог список узлов
-    (см. ChangeReader._raise_no_queue_guid). Непустой обязан быть guid: имя или код узла в URL
-    даст ответ 1С, по которому это не угадать."""
-    if queue_guid is None:
-        return ''
-    if not isinstance(queue_guid, str):
-        raise ValueError(f"queue_guid must be a string Ref_Key of the exchange node (got {queue_guid!r})")
-    guid = queue_guid.strip().strip('{}')
-    if guid and not _UUID_RE.match(guid):
-        raise ValueError(f"queue_guid must be the Ref_Key (guid) of the exchange node, not its "
-                         f"code or name (got {queue_guid!r}). Leave it empty to log the list of "
-                         f"available nodes")
-    return guid
 
 
 def _check_engine(engine) -> Engine:
@@ -576,7 +559,7 @@ class Replicator:
         self.db_temp_schema = _check_db_schema(db_temp_schema)
         self._odata_url = _check_odata_url(odata_url)
         self._exchange_name = _check_exchange_name(exchange_name)
-        self._queue_guid = _check_queue_guid(queue_guid)
+        self._queue_guid = check_queue_guid(queue_guid)
         # odata_auth — кортеж (user, password) либо None, как в ридерах (передаётся им как есть).
         self._odata_auth = _check_odata_auth(odata_auth)
         _warn_if_credentials_go_in_clear(self._odata_url, self._odata_auth)

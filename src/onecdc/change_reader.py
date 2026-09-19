@@ -4,8 +4,8 @@ import xmltodict
 
 from onecdc.data_reader import MAX_RESPONSE_BYTES, DataReader
 from onecdc.metadata_reader import MetadataReader, resolve_timeout
-from onecdc.common_functions import (format_bytes, parse_odata, raise_for_status,
-                                     read_within_limit)
+from onecdc.common_functions import (canonical_guid, check_queue_guid, format_bytes, parse_odata,
+                                     raise_for_status, read_within_limit)
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,7 +24,9 @@ class ChangeReader(DataReader):
         super().__init__(odata_url, metadata, odata_auth, request_timeout,
                          read_subconto=read_subconto, max_response_bytes=max_response_bytes)
         self.exchange_name = exchange_name
-        self.queue_guid = queue_guid
+        # Канонизируем здесь, а не только в конструкторе репликатора: ридер создают и напрямую,
+        # и тогда guid из формы 1С (верхний регистр) не совпал бы с Ref_Key при сравнении.
+        self.queue_guid = check_queue_guid(queue_guid)
         self.message_no = 0
 
     def read_changes(self):
@@ -109,6 +111,13 @@ class ChangeReader(DataReader):
         """
         return [node for node in self.read_nodes() if not node.get('ThisNode')]
 
+    @staticmethod
+    def _nodes_listing(nodes) -> str:
+        """Узлы столбиком — из лога guid можно скопировать прямо в конфигурацию."""
+        return ''.join(f"\n    {node.get('Ref_Key')}  {node.get('Code') or ''}"
+                       f"  {node.get('Description') or ''}".rstrip()
+                       for node in nodes if not node.get('ThisNode'))
+
     def _raise_no_queue_guid(self):
         """
         queue_guid не задан: выводим в лог список узлов плана обмена, чтобы guid можно было взять
@@ -123,10 +132,7 @@ class ChangeReader(DataReader):
         else:
             if nodes:
                 logger.error("queue_guid is not set. Available nodes of exchange plan %s:%s",
-                             self.exchange_name,
-                             ''.join(f"\n    {node.get('Ref_Key')}  {node.get('Code') or ''}"
-                                     f"  {node.get('Description') or ''}".rstrip()
-                                     for node in nodes))
+                             self.exchange_name, self._nodes_listing(nodes))
             else:
                 logger.error("queue_guid is not set, and exchange plan %s has no nodes besides "
                              "ThisNode: create a node for this replication in 1C",
@@ -134,25 +140,40 @@ class ChangeReader(DataReader):
         raise ValueError(f"queue_guid is not set (exchange plan {self.exchange_name}): "
                          "specify the Ref_Key of the exchange node")
 
-    def get_last_received_no(self)->int:
+    def _raise_bad_queue_guid(self, reason: str, nodes):
+        """Узел указан, но не тот. Список печатаем так же, как для незаданного guid."""
+        logger.error("queue_guid %s %s. Available nodes of exchange plan %s:%s",
+                     self.queue_guid, reason, self.exchange_name, self._nodes_listing(nodes))
+        raise ValueError(f"queue_guid {self.queue_guid} {reason} "
+                         f"(exchange plan {self.exchange_name})")
+
+    def get_last_received_no(self) -> int:
         """
-        Получить номер последнего пакета обмена, который был получен и подтвержден
+        Номер последнего пакета обмена, который мы получили и подтвердили. Следующий цикл просит
+        этот номер плюс один, и так КАЖДЫЙ раз — значит цена ошибки здесь не разовая.
+
+        Узел не нашёлся — это ошибка, а не повод продолжить с нуля. Раньше здесь было
+        предупреждение и `0`, то есть цикл начинал просить `MessageNo=1` вечно. Молчаливым
+        простоем это не заканчивается: `SelectChanges` со старым номером 1С понимает не как
+        «повтори пакет», а как «отдай всё, что зарегистрировано с тех пор» (измерено на живой
+        1С, см. audit_status), и подтверждение снимает регистрацию. То есть обмен продолжал бы
+        идти, счётчики узла стояли бы на единице, и ошибку конфигурации не было бы видно вообще.
+
+        Сравниваем канонически: 1С отдаёт Ref_Key в нижнем регистре, а в конфигурацию его
+        копируют как придётся.
         """
-        queues = self.read_nodes()
-        receive_no = 0
-        found = False
-
-        for queue in queues:
-            if self.queue_guid == queue['Ref_Key']:
-                receive_no = int(queue['ReceivedNo'])
-                found = True
-
-        if not found:
-            # Очередь по guid не нашлась — вернём 0 (запросится пакет №1), но это почти наверняка
-            # неверный queue_guid или план обмена: без предупреждения ошибку конфигурации не видно.
-            logger.warning("Exchange queue %s not found in plan %s (check queue_guid/exchange_name)",
-                           self.queue_guid, self.exchange_name)
-
-        return receive_no
+        nodes = self.read_nodes()
+        for node in nodes:
+            if canonical_guid(node.get('Ref_Key')) != self.queue_guid:
+                continue
+            if node.get('ThisNode'):
+                # Узел самой базы-источника. Он в списке есть всегда и раньше находился наравне
+                # с остальными: номер брался, SelectChanges уходил по нему, и что ответит 1С,
+                # зависело от платформы, а не от нас.
+                self._raise_bad_queue_guid('is ThisNode, the source database itself; a receiving '
+                                           'node is needed', nodes)
+            return int(node['ReceivedNo'])
+        self._raise_bad_queue_guid('is not a node of this exchange plan (check queue_guid and '
+                                   'exchange_name)', nodes)
     
 

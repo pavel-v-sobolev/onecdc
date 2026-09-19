@@ -18,7 +18,7 @@ import requests
 
 from onecdc.common_functions import ResponseTooLargeError, read_within_limit
 
-from conftest import FakeResponseMixin
+from conftest import TEST_QUEUE_GUID, FakeResponseMixin
 
 
 class _Response(FakeResponseMixin):
@@ -97,6 +97,7 @@ def test_the_default_limit_is_documented_and_wired_in():
     assert MAX_RESPONSE_BYTES == 512 * 1024 * 1024
     md = MetadataReader('http://fake')
     assert DataReader('http://fake', md).max_response_bytes == MAX_RESPONSE_BYTES
-    assert ChangeReader('http://fake', 'E', 'q', md).max_response_bytes == MAX_RESPONSE_BYTES
+    assert ChangeReader('http://fake', 'E', TEST_QUEUE_GUID,
+                        md).max_response_bytes == MAX_RESPONSE_BYTES
     # И его можно снять совсем — например когда памяти заведомо хватает.
     assert DataReader('http://fake', md, max_response_bytes=None).max_response_bytes is None

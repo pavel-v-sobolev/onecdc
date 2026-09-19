@@ -27,6 +27,48 @@ CHUNK_SIZE = 1 << 20
 POSTGRES_MAX_IDENTIFIER = 63
 
 
+def canonical_guid(value) -> str | None:
+    """
+    GUID в каноническом виде (нижний регистр, с дефисами) либо None, если это не GUID.
+
+    Канонический вид нужен ДЛЯ СРАВНЕНИЯ: 1С отдаёт Ref_Key в нижнем регистре, а в конфигурацию
+    его копируют как придётся — из формы 1С он приходит в верхнем, из реестра в фигурных скобках.
+    Строковое сравнение такой guid не узнавало, и узел «не находился» при верной настройке.
+
+    Разбирает всё, что понимает uuid.UUID: с дефисами и без, в скобках, с префиксом urn:uuid.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value.strip()))
+    except ValueError:
+        return None
+
+
+def check_queue_guid(queue_guid) -> str:
+    """
+    Ref_Key узла обмена в каноническом виде. Пустой — допустим: чтение изменений тогда выведет в
+    лог список узлов (см. ChangeReader._raise_no_queue_guid). Непустой обязан быть guid: имя или
+    код узла в URL даст ответ 1С, по которому это не угадать.
+
+    Живёт здесь, а не в параметрах репликатора: ChangeReader создают и напрямую (см.
+    tests/debug_trade.py), и тогда значение попало бы в сравнение и в URL как написано.
+    """
+    if queue_guid is None:
+        return ''
+    if not isinstance(queue_guid, str):
+        raise ValueError(f"queue_guid must be a string Ref_Key of the exchange node "
+                         f"(got {queue_guid!r})")
+    if not queue_guid.strip():
+        return ''
+    guid = canonical_guid(queue_guid)
+    if guid is None:
+        raise ValueError(f"queue_guid must be the Ref_Key (guid) of the exchange node, not its "
+                         f"code or name (got {queue_guid!r}). Leave it empty to log the list of "
+                         f"available nodes")
+    return guid
+
+
 class Utf8BasicAuth(requests.auth.AuthBase):
     """
     Basic-авторизация с учётными данными в UTF-8.

@@ -49,7 +49,8 @@ def test_parameters_normalized(db):
                  db_schema="  ")
     assert repl._odata_url == "http://host/base/odata/standard.odata"
     assert repl._exchange_name == "ДляODATA"
-    assert repl._queue_guid == GUID.upper()
+    # Канонический вид: скобки сняты И регистр приведён — с 1С сравнивается именно он.
+    assert repl._queue_guid == GUID.lower()
     assert repl.db_schema is None
 
 
@@ -88,3 +89,69 @@ def test_unreachable_db_reports_plainly(db):
     assert "sekret" not in message
     # Причина от драйвера — ради неё всё и затевалось.
     assert "onnection refused" in message or "не удалось" in message.lower()
+
+
+# --- CDC-32: guid узла сравнивается канонически, а не найденный узел — ошибка ------------------
+
+def _config_dir() -> Path:
+    return next(p for p in (Path(__file__).parent / "responses").iterdir()
+                if (p / "manifest.json").exists())
+
+
+@pytest.mark.parametrize("in_config, from_1c", [
+    (str.upper, str.lower),   # guid скопирован из формы 1С — канонизируем ВХОД
+    (str.lower, str.upper),   # Ref_Key пришёл не в каноническом виде — канонизируем СРАВНЕНИЕ
+    (str.upper, str.upper),
+])
+def test_the_node_is_found_whatever_case_the_guid_was_copied_in(db, in_config, from_1c):
+    """
+    1С отдаёт Ref_Key в нижнем регистре, а из формы 1С его копируют в верхнем. Раньше сравнение
+    было строковым: узел «не находился», и цикл КАЖДЫЙ раз просил MessageNo=1 — с предупреждением,
+    которое в рабочем логе никто не читает.
+
+    Обе половины проверяются по отдельности: регистр меняем то в конфигурации, то в ответе 1С.
+    """
+    with fake_1c.running_server(_config_dir()) as (odata_url, fake):
+        guid = fake.queue_guid
+        fake.queue_guid = from_1c(guid)      # как узел выглядит в ответе сервера
+        fake.notify(7)                       # очередь уже подтверждена до седьмого пакета
+        repl = _make(db, odata_url=odata_url, queue_guid="{" + in_config(guid) + "}")
+
+        assert repl.changes.get_last_received_no() == 7
+        repl.close()
+
+
+def test_a_guid_that_is_not_a_node_of_this_plan_stops_the_cycle(db, caplog):
+    """
+    Раньше здесь были WARNING и 0, то есть «продолжим с первого пакета». Молчаливым простоем это
+    не кончается: SelectChanges со старым номером 1С понимает как «отдай всё, что зарегистрировано
+    с тех пор», а подтверждение снимает регистрацию — обмен идёт, счётчики стоят на единице, и
+    ошибки конфигурации не видно вовсе.
+    """
+    with fake_1c.running_server(_config_dir()) as (odata_url, fake):
+        repl = _make(db, odata_url=odata_url, queue_guid="12345678-1234-1234-1234-123456789abc")
+
+        with caplog.at_level(logging.ERROR, logger="onecdc"):
+            with pytest.raises(ValueError, match="not a node of this exchange plan"):
+                repl.changes.get_last_received_no()
+        repl.close()
+
+    # В логе — из чего выбирать, как и для незаданного узла.
+    listing = "\n".join(record.getMessage() for record in caplog.records)
+    assert fake.queue_guid in listing
+    assert fake_1c.THIS_NODE_GUID not in listing
+
+
+def test_this_node_is_refused_instead_of_being_read_from(db, caplog):
+    """
+    ЭтотУзел описывает саму базу-источник. В списке узлов он есть всегда, поэтому НАХОДИЛСЯ
+    наравне с остальными: номер брался, SelectChanges уходил по нему, и что ответит 1С, зависело
+    уже от платформы. Из подсказки-списка он исключён давно, из принимаемых значений — теперь.
+    """
+    with fake_1c.running_server(_config_dir()) as (odata_url, fake):
+        repl = _make(db, odata_url=odata_url, queue_guid=fake_1c.THIS_NODE_GUID)
+
+        with caplog.at_level(logging.ERROR, logger="onecdc"):
+            with pytest.raises(ValueError, match="ThisNode"):
+                repl.changes.get_last_received_no()
+        repl.close()
