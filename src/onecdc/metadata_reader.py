@@ -645,12 +645,15 @@ class MetadataReader(UserDict):
                                  'fields': json_type,
                                  'fields_en': json_type,
                                  'full_load_is_required': Boolean(),
-                                 'last_full_load_dt': DateTime(),
+                                 'last_full_load_dt': DateTime(timezone=True),
                                  'last_full_load_rows_modified': Integer(),
                                  'last_full_load_minutes': Float(),
                                  'full_load_owner': String(),
-                                 'full_load_heartbeat_at': DateTime(),
-                                 'absent_from_metadata': Boolean()
+                                 'full_load_heartbeat_at': DateTime(timezone=True),
+                                 'absent_from_metadata': Boolean(),
+                                 # Отметка merge — момент, а не настенное время
+                                 # (см. DB_NOW_WITH_TIMEZONE).
+                                 'merged_on': DateTime(timezone=True)
                                  },
                      skip_update_fields=['full_load_is_required', 'last_full_load_dt',
                                          'last_full_load_rows_modified',

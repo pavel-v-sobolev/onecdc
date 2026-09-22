@@ -93,7 +93,7 @@ import itertools
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import ModuleType
 from typing import Any, Callable, Iterable, Iterator
 
@@ -101,8 +101,9 @@ from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, E
                         Float, func, insert, inspect, MetaData, or_, select, String, Table,
                         text, update)
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, instance_owner
-from onecdc.db_logs import _check_create_schema, create_table_if_absent
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, instance_owner
+from onecdc.db_logs import (_check_create_schema, align_merge_timestamps,
+                            create_table_if_absent)
 from onecdc.lease import LEASE_ROLE_TTL, Lease, lease_engine
 from onecdc.logging_config import LOAD_MODE_HANDLER, get_logger, load_mode
 from onecdc.stop_signal import StopSignal, install_signal_handlers
@@ -157,7 +158,10 @@ SUBSCRIPTIONS_TTL = 30.0
 # дата для всех поддерживаемых СУБД. В колонке onecdc_handlers.last_run_at на её месте NULL — там он
 # значит «ни разу не отрабатывал», и по нему цикл выбирает пересборку; в контекст этот NULL не
 # доходит, чтобы обработчику не приходилось разбирать None у себя в WHERE.
-EPOCH = datetime(1900, 1, 1)
+#
+# С поясом, как и все служебные отметки: это значение сравнивается с ними и с merged_on. UTC здесь
+# ничего не значит сверх «очень давно» — на таком расстоянии смещение роли не играет.
+EPOCH = datetime(1900, 1, 1, tzinfo=timezone.utc)
 
 
 
@@ -457,7 +461,7 @@ def _handlers_table(metadata: MetaData, schema_name: str | None) -> Table:
         HANDLERS_TABLE, metadata,
         Column("name", String(255), primary_key=True),
         Column("enabled", Boolean, nullable=False),
-        Column("last_run_at", DateTime, nullable=True),
+        Column("last_run_at", DateTime(timezone=True), nullable=True),
         Column("last_error", String, nullable=True),
         # На что обработчик подписан. Заполняет он сам при старте, читает — репликатор: так
         # репликатору не нужны ни объекты обработчиков, ни их код, и они могут жить в другом
@@ -475,18 +479,18 @@ def _handlers_table(metadata: MetaData, schema_name: str | None) -> Table:
         # true нельзя, следа не остаётся, и прогон снимал флаг вместе с непрочитанным сигналом.
         # Метка же сдвигается вправо от границы окна, и снять её прогон уже не вправе (см.
         # _save_success): обработчик будет вызван ещё раз.
-        Column(UPDATE_REQUESTED_FIELD, DateTime, nullable=True),
+        Column(UPDATE_REQUESTED_FIELD, DateTime(timezone=True), nullable=True),
         # Заказ полной пересборки витрины — руками или автоматически (см. request_full_rebuild) —
         # и метрики последней пересборки. Названы по образцу onecdc_metadata_objects, где так же
         # устроена полная выгрузка объекта.
         Column("full_rebuild_is_required", Boolean, nullable=False, server_default=text('false')),
-        Column("last_full_rebuild_dt", DateTime, nullable=True),
+        Column("last_full_rebuild_dt", DateTime(timezone=True), nullable=True),
         # Аренда имени: витрину этого обработчика считает ровно один процесс. Поднять второй с тем
         # же NAME ничто не мешает (rolling restart, дублированный контейнер), а CAS по last_run_at
         # ловит только отметку: к моменту проверки витрина уже переписана, а у отправщика во
         # внешнюю систему письма ушли. Поэтому владение берётся ДО вызова кода обработчика.
         Column(LEASE_OWNER_FIELD, String(255), nullable=True),
-        Column(LEASE_HEARTBEAT_FIELD, DateTime, nullable=True),
+        Column(LEASE_HEARTBEAT_FIELD, DateTime(timezone=True), nullable=True),
         Column("last_full_rebuild_minutes", Float, nullable=True),
         # Метка последнего ЗАВЕРШЁННОГО блока идущей пересборки (см. Handler.rebuild). Нужна,
         # чтобы пересборка на десятки минут переживала перезапуск процесса: генератор блоков живёт
@@ -523,7 +527,7 @@ def _carry_over_update_flag(engine: Engine, table: Table, existing: set, added: 
     with engine.begin() as conn:
         result = conn.execute(update(table)
                               .where(text(f'{legacy} = true'))
-                              .values(update_requested_at=DB_NOW_WITHOUT_TIMEZONE))
+                              .values(update_requested_at=DB_NOW_WITH_TIMEZONE))
     if result.rowcount:
         logger.info("Carried over %s pending signal(s) from %s to %s",
                     result.rowcount, legacy, UPDATE_REQUESTED_FIELD)
@@ -616,7 +620,7 @@ class HandlerSignals:
             return
         statement = (update(self.table)
                      .where(self.table.c.name.in_(names))
-                     .values(update_requested_at=DB_NOW_WITHOUT_TIMEZONE))
+                     .values(update_requested_at=DB_NOW_WITH_TIMEZONE))
         if conn is not None:
             conn.execute(statement)
         else:
@@ -691,6 +695,9 @@ class HandlerLoop:
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema)
         self.schema = schema
+        # Витрина — такая же таблица с merged_on, и её отметка сравнивается с нашим курсором.
+        # Цикл обработчиков поднимают и отдельно от репликатора, поэтому миграция зовётся и здесь.
+        align_merge_timestamps(engine, schema)
         # Схема промежуточных таблиц dbmerge — обработчику она нужна затем же, зачем репликатору
         # (см. Replicator): держать их в стороне от таблиц с данными. Сам цикл её не использует,
         # он лишь передаёт её обработчику в контексте.
@@ -910,7 +917,7 @@ class HandlerLoop:
         return exists().where(
             t.c.name == self.name,
             t.c[LEASE_OWNER_FIELD] == self._lease.owner,
-            t.c[LEASE_HEARTBEAT_FIELD] >= DB_NOW_WITHOUT_TIMEZONE
+            t.c[LEASE_HEARTBEAT_FIELD] >= DB_NOW_WITH_TIMEZONE
             - timedelta(seconds=LEASE_ROLE_TTL))
 
     def _claim_name(self) -> bool:

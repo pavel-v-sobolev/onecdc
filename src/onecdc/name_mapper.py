@@ -146,7 +146,7 @@ def _claims_table(metadata: MetaData, schema_name: str | None) -> Table:
         Column("identifier", String(POSTGRES_MAX_IDENTIFIER), nullable=False),
         # Часы БД, как и у остальных служебных таблиц: время проставляет та же сторона,
         # что и сравнивает, — и поштучная вставка, и пакетная получают его одинаково.
-        Column("claimed_at", DateTime, nullable=False, default=func.now()),
+        Column("claimed_at", DateTime(timezone=True), nullable=False, default=func.now()),
         schema=schema_name,
     )
 

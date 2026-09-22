@@ -11,6 +11,9 @@
 по умолчанию (public у PostgreSQL), как это делает и dbmerge.
 """
 
+import time
+from dataclasses import dataclass
+
 from dbmerge import mergeResult
 
 from sqlalchemy import (Column, DateTime, Engine, Index, Integer, MetaData, String,
@@ -124,8 +127,11 @@ def add_missing_columns(engine: Engine, table: Table) -> tuple[set[str], set[str
     Отдельно от create_table_if_absent — только чтобы звать переезд без создания. Обычному коду
     этого не нужно: create_table_if_absent сам зовёт это последним шагом и отдаёт тот же ответ.
     """
-    existing = {column['name'] for column in inspect(engine).get_columns(
-        table.name, schema=table.schema)}
+    in_db = inspect(engine).get_columns(table.name, schema=table.schema)
+    # Тип сверяется по тому же снимку каталога, что и состав: опрашивать его дважды на каждую
+    # служебную таблицу — заметная доля стоимости старта (замерено: +5 мс на конструктор).
+    align_timestamp_columns(engine, table, in_db)
+    existing = {column['name'] for column in in_db}
     missing = [column for column in table.columns if column.name not in existing]
     if not missing:
         return existing, set()
@@ -136,6 +142,217 @@ def add_missing_columns(engine: Engine, table: Table) -> tuple[set[str], set[str
                               f'ADD COLUMN {compiler.get_column_specification(column)}'))
     logger.info("Added columns to %s: %s", table.name, ', '.join(c.name for c in missing))
     return existing, {column.name for column in missing}
+
+
+# Служебные отметки времени хранятся С ПОЯСОМ. Наивная отметка — это настенное время пояса
+# сессии, а оно немонотонно: в поясе с сезонным переводом осенние часы отступают назад, и час
+# инкремента теряется молча (CDC-25). Значение в повторяющийся час двусмысленно по существу,
+# поэтому лечится это типом, а не аккуратностью сравнений.
+#
+# Даты, приехавшие из 1С, остаются НАИВНЫМИ: в 1С поясов нет, это бизнес-значения, а не моменты.
+# Граница между двумя видами времени проходит ровно здесь.
+MERGE_TIMESTAMP_FIELDS = ('merged_on', 'inserted_on')
+
+# Схемы, по которым обход уже делался в этом процессе (см. align_merge_timestamps).
+_MERGE_TIMESTAMPS_CHECKED: set[tuple[str, str | None]] = set()
+
+
+def _timestamptz_alter(engine: Engine, qualified_table: str, columns: list[str],
+                       table_oid: int | None = None) -> None:
+    """
+    Один ALTER на все колонки таблицы, а не по одному на каждую: под не-UTC такой ALTER
+    ПЕРЕПИСЫВАЕТ таблицу целиком (≈1 с на миллион строк, ACCESS EXCLUSIVE), и делать это дважды
+    там, где хватает одного прохода, незачем.
+
+    `USING` не нужен: PostgreSQL истолковывает старое наивное значение в поясе сессии — ровно так,
+    как оно и записывалось. Момент сохраняется, разрыва в данных нет.
+
+    Зависимые вьюшки (если задан table_oid) снимаются и ставятся обратно в той же транзакции:
+    менять тип колонки под вьюшкой PostgreSQL не даёт, а витрины строятся именно так.
+    """
+    preparer = engine.dialect.identifier_preparer
+    clauses = ', '.join(f'ALTER COLUMN {preparer.quote(column)} TYPE timestamptz'
+                        for column in columns)
+    started = time.monotonic()
+    with engine.begin() as conn:
+        views = _dependent_views(conn, table_oid, preparer) if table_oid is not None else []
+        # Без CASCADE и без IF EXISTS намеренно: роняем строго то, что нашли и сохранили, в
+        # обратном порядке зависимости. Если обход что-то упустил, DROP откажется — и транзакция
+        # откатит всё. CASCADE в этом же случае снёс бы объект, восстановить который нечем.
+        for view in reversed(views):                 # сначала те, кто смотрит на других
+            conn.execute(text(f'DROP VIEW {view.qualified}'))
+        conn.execute(text(f'ALTER TABLE {qualified_table} {clauses}'))
+        _restore_views(conn, views, preparer)
+    logger.info("Migrated %s (%s) to timestamptz in %.1fs%s", qualified_table,
+                ', '.join(columns), time.monotonic() - started,
+                f'; rebuilt {len(views)} dependent view(s)' if views else '')
+
+
+def align_timestamp_columns(engine: Engine, table: Table, in_db: list | None = None) -> set[str]:
+    """
+    Приводит тип datetime-колонок существующей таблицы к объявленному: колонка, объявленная с
+    поясом, но лежащая в БД без пояса, переводится в timestamptz. Возвращает переведённые.
+
+    Зовётся из create_table_if_absent по той же причине, что и переезд состава колонок: таблица,
+    заведённая прошлой версией библиотеки, сама себя не починит, а расхождение вылезет не у нас,
+    а у пользователя — и не отказом, а молчаливой потерей часа раз в год.
+    """
+    if engine.dialect.name != 'postgresql':
+        return set()
+    aware = {column.name for column in table.columns
+             if isinstance(column.type, DateTime) and column.type.timezone}
+    if not aware:
+        return set()
+    if in_db is None:
+        in_db = inspect(engine).get_columns(table.name, schema=table.schema)
+    naive = [column['name'] for column in in_db
+             if column['name'] in aware and isinstance(column['type'], DateTime)
+             and not column['type'].timezone]
+    if not naive:
+        return set()
+    preparer = engine.dialect.identifier_preparer
+    _timestamptz_alter(engine, preparer.format_table(table), naive)
+    return set(naive)
+
+
+# Зависимые вьюшки: PostgreSQL не даёт менять тип колонки, на которую смотрит вьюшка
+# («cannot alter type of a column used by a view or rule»), а витрины у нас именно так и строятся.
+# Достаём их рекурсивно (вьюшка поверх вьюшки — наш же второй пример), вместе с тем, что теряется
+# при пересоздании: владельцем, правами и комментарием.
+_DEPENDENT_VIEWS = """
+WITH RECURSIVE deps AS (
+    SELECT r.ev_class AS oid, 1 AS depth
+      FROM pg_depend d
+      JOIN pg_rewrite r ON r.oid = d.objid
+     WHERE d.refobjid = :table_oid AND d.classid = 'pg_rewrite'::regclass
+       AND r.ev_class <> :table_oid
+    UNION ALL
+    SELECT r.ev_class, deps.depth + 1
+      FROM deps
+      JOIN pg_depend d ON d.refobjid = deps.oid AND d.classid = 'pg_rewrite'::regclass
+      JOIN pg_rewrite r ON r.oid = d.objid AND r.ev_class <> deps.oid
+     WHERE deps.depth < 32
+)
+SELECT c.oid, max(deps.depth) AS depth, c.relkind, n.nspname, c.relname,
+       pg_get_viewdef(c.oid, true), pg_get_userbyid(c.relowner),
+       obj_description(c.oid, 'pg_class')
+  FROM deps
+  JOIN pg_class c ON c.oid = deps.oid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ GROUP BY c.oid, c.relkind, n.nspname, c.relname, c.relowner
+ ORDER BY depth
+"""
+
+_VIEW_GRANTS = """
+SELECT acl.grantee::regrole::text, acl.privilege_type
+  FROM pg_class c, aclexplode(c.relacl) acl
+ WHERE c.oid = :view_oid AND acl.grantee <> c.relowner
+"""
+
+
+@dataclass(frozen=True)
+class _DependentView:
+    """Всё, что нужно, чтобы поднять вьюшку ровно такой, какой она была."""
+
+    qualified: str
+    definition: str
+    owner: str
+    comment: str | None
+    grants: list[tuple[str, str]]
+
+
+def _dependent_views(conn, table_oid: int, preparer) -> list[_DependentView]:
+    views = []
+    for oid, _depth, relkind, nsp, rel, definition, owner, comment in conn.execute(
+            text(_DEPENDENT_VIEWS), {'table_oid': table_oid}).all():
+        if relkind != 'v':
+            # Материализованное представление пересоздать нельзя дёшево: это перезаполнение и
+            # потеря собственных индексов. Такую таблицу не трогаем вовсе — решение за оператором.
+            raise _MaterializedViewInTheWay(f'{nsp}.{rel}')
+        grants = conn.execute(text(_VIEW_GRANTS), {'view_oid': oid}).all()
+        views.append(_DependentView(
+            qualified=f'{preparer.quote_schema(nsp)}.{preparer.quote(rel)}',
+            definition=definition, owner=owner, comment=comment,
+            grants=[(grantee, privilege) for grantee, privilege in grants]))
+    return views
+
+
+class _MaterializedViewInTheWay(Exception):
+    """Над таблицей стоит материализованное представление — миграцию по ней не делаем."""
+
+
+def _restore_views(conn, views: list[_DependentView], preparer) -> None:
+    """Обратно в порядке зависимости: сначала те, на кого смотрят остальные."""
+    for view in views:
+        conn.execute(text(f'CREATE VIEW {view.qualified} AS {view.definition}'))
+        conn.execute(text(f'ALTER VIEW {view.qualified} OWNER TO {preparer.quote(view.owner)}'))
+        if view.comment is not None:
+            conn.execute(text(f'COMMENT ON VIEW {view.qualified} IS :c'), {'c': view.comment})
+        for grantee, privilege in view.grants:
+            conn.execute(text(f'GRANT {privilege} ON {view.qualified} '
+                              f'TO {preparer.quote(grantee)}'))
+
+
+def align_merge_timestamps(engine: Engine, schema_name: str | None) -> dict[str, list[str]]:
+    """
+    Переводит `merged_on`/`inserted_on` таблиц СХЕМЫ в timestamptz. Возвращает {таблица: колонки}.
+
+    Эти таблицы заводит dbmerge, а не мы, поэтому объявления, по которому можно сверить тип, нет —
+    обходим схему. Остаётся в библиотеке навсегда, а не как разовый шаг: таблицы появляются
+    лениво, по мере появления объектов в 1С, и заведённая старой версией (или поднятая из бэкапа)
+    иначе осталась бы наивной. Цена проверки от объёма данных не зависит — единицы миллисекунд
+    даже на пятистах таблицах.
+
+    По pg_catalog, а не по information_schema: нужен фильтр relkind — у ВЬЮШЕК тип колонки не
+    меняют, он идёт от базовой таблицы. Их мы вместо этого снимаем и ставим обратно, потому что
+    иначе ALTER отказывается работать вовсе.
+
+    Одна таблица — одна транзакция: DDL в PostgreSQL транзакционный, поэтому сбой посередине
+    возвращает и тип колонки, и все вьюшки на место.
+    """
+    if engine.dialect.name != 'postgresql':
+        return {}
+    # Один раз на процесс и схему: за время работы процесса наивных таблиц больше не появится —
+    # новые заводятся сразу с поясом (см. DBWriter: data_types для merged_on/inserted_on). А
+    # компонентов, зовущих это на старте, несколько, и каждый платил бы своим запросом.
+    seen = (str(engine.url), schema_name)
+    if seen in _MERGE_TIMESTAMPS_CHECKED:
+        return {}
+    _MERGE_TIMESTAMPS_CHECKED.add(seen)
+    found: dict[str, list[str]] = {}
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT c.oid, c.relname, a.attname
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              JOIN pg_attribute a ON a.attrelid = c.oid
+             WHERE n.nspname = COALESCE(:schema, current_schema())
+               AND c.relkind IN ('r', 'p')
+               AND a.attnum > 0 AND NOT a.attisdropped
+               AND a.attname = ANY(:names)
+               AND a.atttypid = 'timestamp'::regtype
+             ORDER BY c.relname, a.attname"""),
+            {'schema': schema_name, 'names': list(MERGE_TIMESTAMP_FIELDS)}).all()
+    oids: dict[str, int] = {}
+    for oid, table_name, column_name in rows:
+        found.setdefault(table_name, []).append(column_name)
+        oids[table_name] = oid
+
+    preparer = engine.dialect.identifier_preparer
+    migrated: dict[str, list[str]] = {}
+    for table_name, columns in found.items():
+        qualified = preparer.quote(table_name)
+        if schema_name:
+            qualified = f'{preparer.quote_schema(schema_name)}.{qualified}'
+        try:
+            _timestamptz_alter(engine, qualified, columns, table_oid=oids[table_name])
+        except _MaterializedViewInTheWay as blocker:
+            # Не отказ всей миграции: остальные таблицы схемы это не касается.
+            logger.error("Cannot migrate %s to timestamptz: materialized view %s depends on it. "
+                         "Drop or refresh it manually, then restart", qualified, blocker)
+            continue
+        migrated[table_name] = columns
+    return migrated
 
 
 def create_index_if_absent(engine: Engine, index: Index, table_name: str,
@@ -172,7 +389,7 @@ def exchange_nodes_table(metadata: MetaData, schema_name: str | None) -> Table:
         # Только чтобы строка читалась глазами: ключ и так уникален.
         Column("exchange_name", String(255)),
         Column(NODE_OWNER_FIELD, String(255)),
-        Column(NODE_HEARTBEAT_FIELD, DateTime),
+        Column(NODE_HEARTBEAT_FIELD, DateTime(timezone=True)),
         schema=schema_name,
     )
 
@@ -185,8 +402,8 @@ def _onecdc_replicator_log_table(metadata: MetaData, schema_name: str | None) ->
         Column("object", String),
         Column("type", String),
         Column("message_no", Integer),
-        Column("started_at", DateTime),
-        Column("finished_at", DateTime, nullable=True),
+        Column("started_at", DateTime(timezone=True)),
+        Column("finished_at", DateTime(timezone=True), nullable=True),
         Column("inserted_row_count", Integer, nullable=True),
         Column("updated_row_count", Integer, nullable=True),
         Column("deleted_row_count", Integer, nullable=True),

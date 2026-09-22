@@ -35,7 +35,7 @@ from sqlalchemy import create_engine, func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, HEARTBEAT_JOIN_TIMEOUT
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, HEARTBEAT_JOIN_TIMEOUT
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -178,7 +178,7 @@ class Lease:
             return False
         try:
             with self.engine.begin() as conn:
-                now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+                now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
                 result = conn.execute(
                     update(table)
                     .where(table.c[self.key_field] == key,
@@ -236,7 +236,7 @@ class Lease:
         if table is None:
             return {}
         with self.engine.connect() as conn:
-            now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
             rows = conn.execute(
                 select(table.c[self.key_field], table.c[self.owner_field])
                 .where(table.c[self.owner_field].is_not(None),

@@ -32,12 +32,13 @@ CLAIM_HEARTBEAT_TTL — полторы минуты, после которых �
 """
 
 import threading
+from contextlib import contextmanager
 from datetime import timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import Engine
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, HEARTBEAT_JOIN_TIMEOUT
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, HEARTBEAT_JOIN_TIMEOUT
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -71,6 +72,9 @@ class FullLoadClaim:
         self.owner = owner
         self._lock = threading.Lock()
         self._held: set[str] = set()
+        # Глубина вложенного захвата, своя у каждого потока (см. hold). Процессное множество
+        # _held для этого не годится: по нему поток не отличить, а отличать надо.
+        self._nesting = threading.local()
         self._closed = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
@@ -88,14 +92,13 @@ class FullLoadClaim:
         """
         table = self.table
         if table is None:
-            # Реестра ещё нет (метаданные не синхронизированы) — захватывать негде. Не отказываем:
-            # прямой вызов full_load должен отрабатывать и на пустой базе.
-            return True
+            # Реестра нет — занимать негде, и честный ответ «не занял». Раньше возвращалось True:
+            # заслон отвечал «занял», не заняв ничего, и два процесса заходили в блок вместе
+            # (CDC-33). Отличать «нечем координироваться» от «занято» — дело вызывающего, см.
+            # is_ready и Replicator.full_load.
+            return False
         with self.engine.begin() as conn:
-            # Часы БД, приведённые к наивному времени ею же: колонка отметки — timestamp без пояса,
-            # а сырой now() драйвер отдаёт offset-aware (см. DB_NOW_WITHOUT_TIMEZONE). Значение
-            # уходит обратно в БД, но живёт в Python, и наивным ему быть безопаснее.
-            now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
             result = conn.execute(
                 update(table)
                 .where(table.c.object_full_name == object_full_name,
@@ -104,6 +107,14 @@ class FullLoadClaim:
                           < now - timedelta(seconds=CLAIM_HEARTBEAT_TTL)))
                 .values(**{OWNER_FIELD: self.owner, HEARTBEAT_FIELD: now}))
         if result.rowcount == 0:
+            with self.engine.connect() as conn:
+                known = conn.scalar(select(table.c.object_full_name)
+                                    .where(table.c.object_full_name == object_full_name))
+            if known is None:
+                # Не «занято»: объекта нет в реестре. Ошибка в имени сюда не доходит (его
+                # разрешают раньше), значит реестр не синхронизирован с метаданными.
+                logger.error("Cannot claim %s for full load: it is not in the object registry",
+                             object_full_name)
             return False
         with self._lock:
             self._held.add(object_full_name)
@@ -130,13 +141,57 @@ class FullLoadClaim:
         if table is None:
             return set()
         with self.engine.connect() as conn:
-            now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
             rows = conn.execute(
                 select(table.c.object_full_name)
                 .where(table.c[OWNER_FIELD].is_not(None),
                        table.c[HEARTBEAT_FIELD]
                        >= now - timedelta(seconds=CLAIM_HEARTBEAT_TTL))).scalars().all()
         return set(rows)
+
+    @property
+    def is_ready(self) -> bool:
+        """
+        Есть ли чем координироваться: реестр объектов существует.
+
+        Нужно затем, что «не занял» бывает по двум разным причинам. Объект держит живой владелец —
+        работу дублировать нельзя. Реестра нет вовсе — значит его нет и у остальных, захватить
+        объект не мог никто, и отказываться от выгрузки не из-за чего.
+        """
+        return self.table is not None
+
+    @contextmanager
+    def hold(self, object_full_name: str):
+        """
+        Захват на время блока: `with claim.hold(name) as claimed:`. Отпускает сам, и только если
+        сам же и занял.
+
+        Повторный вход В ТОМ ЖЕ ПОТОКЕ проходит без нового UPDATE — иначе вложенный вызов не смог
+        бы занять объект у самого себя (условие «свободен или владелец молчит» ложно, владелец —
+        мы же) и молча пропустил бы работу. Считаем именно по потоку, а не по процессу: пока один
+        поток держит объект, другой поток того же процесса обязан получить отказ, как и чужой
+        процесс, — и получает его от БД, которая тут единственный арбитр.
+        """
+        depth = getattr(self._nesting, 'held', None)
+        if depth is None:
+            depth = self._nesting.held = {}
+        if depth.get(object_full_name):
+            depth[object_full_name] += 1
+            try:
+                yield True
+            finally:
+                depth[object_full_name] -= 1
+            return
+
+        claimed = self.claim(object_full_name)
+        if claimed:
+            depth[object_full_name] = 1
+        try:
+            yield claimed
+        finally:
+            if claimed:
+                depth.pop(object_full_name, None)
+                self.release(object_full_name)
 
     def held_objects(self) -> set[str]:
         """Объекты, которые этот процесс сейчас держит. Снимок — множество меняется из потоков."""

@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS "{schema}"."ZakazyKlientov" (
 	"Period" timestamp,
 	"Zakazano" numeric,
 	"Artikul" varchar,
-	"merged_on" timestamp,
-	"Nomenklatura_merged_on" timestamp,
+	"merged_on" timestamptz,
+	"Nomenklatura_merged_on" timestamptz,
 	"is_deleted_or_empty" boolean,
 	CONSTRAINT "ZakazyKlientov_pkey"
 		PRIMARY KEY ("Recorder", "Recorder_Type", "LineNumber")

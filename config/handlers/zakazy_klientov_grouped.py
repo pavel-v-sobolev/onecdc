@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS "{schema}"."ZakazyKlientovGrouped" (
 	"Artikul" varchar,
 	"Zakazano" numeric,
 	"Period" date,
-	"merged_on" timestamp,
+	"merged_on" timestamptz,
 	"Recorder_Keys" uuid[],
 	"Nomenklatura_Keys" uuid[],
 	CONSTRAINT "ZakazyKlientovGrouped_pkey"

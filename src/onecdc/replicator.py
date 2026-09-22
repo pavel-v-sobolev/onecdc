@@ -14,7 +14,7 @@ from sqlalchemy.exc import NoSuchTableError, OperationalError
 
 from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, type_mapping)
-from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE, ResponseTooLargeError,
+from onecdc.common_functions import (DB_NOW_WITH_TIMEZONE, ResponseTooLargeError,
                                      check_queue_guid, format_duration,
                                      instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
@@ -27,6 +27,7 @@ from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
 from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FIELD,
                             NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog, _check_db_schema,
+                            align_merge_timestamps,
                             create_table_if_absent,
                             exchange_nodes_table)
 from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
@@ -504,6 +505,21 @@ class _Window:
         return f"[{left} .. {right})"
 
 
+class FullLoadBusy(Exception):
+    """
+    Объект уже выгружает кто-то другой — живой захват держит другой процесс или другой поток.
+
+    Не сбой, а нормальный исход: полная выгрузка самая дорогая операция для 1С, и делать её
+    дважды незачем. Отдельный тип нужен тем, кто ведёт учёт прогонов (фоновый воркер, расписание):
+    им нельзя отметить объект выгруженным, не выгрузив его, а по ответу `0` этот случай от
+    «выгрузили, расхождений нет» не отличить.
+    """
+
+    def __init__(self, object_full_name: str):
+        super().__init__(f'{object_full_name}: full load is already running elsewhere')
+        self.object_full_name = object_full_name
+
+
 class FullLoadStopped(Exception):
     """
     Полную выгрузку прервали остановкой процесса.
@@ -572,6 +588,10 @@ class Replicator:
         # Маппер имён создаётся ПЕРВЫМ и дальше передаётся как есть: он ведёт реестр заявок
         # onecdc_name_claims, и второй экземпляр рядом только зря читал бы ту же таблицу
         # (см. name_mapper — почему имя закрепляется в БД, а не вычисляется).
+        # Отметки merge действующих таблиц — в timestamptz. На старте, до первой записи: тип
+        # колонки менять под работающим merge нечестно, а дешевле момента не будет (проверка
+        # стоит единицы миллисекунд и от объёма данных не зависит, см. align_merge_timestamps).
+        align_merge_timestamps(self.engine, self.db_schema)
         self.name_mapper = NameMapper(self.engine, self.db_schema)
         self.metadata = MetadataReader(self._odata_url, odata_auth=self._odata_auth,
                                        request_timeout=self._request_timeout,
@@ -1059,7 +1079,8 @@ class Replicator:
                   date_from: date | datetime | str | None = None,
                   date_to: date | datetime | str | None = None,
                   mark_missing: bool = True,
-                  read_subconto: bool | None = None) -> int:
+                  read_subconto: bool | None = None,
+                  skip_if_busy: bool = True) -> int:
         """
         Полная постраничная выгрузка объекта 1С в целевую таблицу: страницами, размер которых
         подбирается по их весу (batch_size — лишь верхняя граница, см. ниже), и каждая страница
@@ -1124,6 +1145,13 @@ class Replicator:
         Возвращает число РЕАЛЬНО изменённых строк (вставлено + обновлено + удалено, по всем
         страницам и вложенным объектам). Это проверка самого CDC: если изменения доезжают исправно,
         выгрузка находит ровно то, что уже лежит в БД, и ответ должен быть 0.
+
+        Объект занимается на время выгрузки, поэтому двойной работы не будет, даже если тот же
+        объект сейчас выгружает фоновый воркер или такой же скрипт в соседнем контейнере. Занят —
+        по умолчанию пропускаем: `WARNING` в лог и 0 в ответе, потому что изменить мы ничего не
+        изменили. Кому этот случай надо отличать от «выгрузили, расхождений нет» — тот ставит
+        `skip_if_busy=False` и ловит `FullLoadBusy`; так делают наши же фоновый воркер и
+        расписание, которым нельзя отметить объект выгруженным, не выгрузив его.
         """
         if not self.metadata.is_loaded:
             self.metadata.get_metadata()
@@ -1148,6 +1176,40 @@ class Replicator:
         if date_field:
             date_field = self.metadata.resolve_field_name(object_name, date_field)
 
+        # Захват — ЗДЕСЬ, а не у вызывающего: занимать объект до того, как загружены
+        # метаданные, бессмысленно (реестра ещё нет, занимать негде — CDC-33), а после них это
+        # одно и то же место для всех, кто выгружает: и для фонового воркера, и для расписания,
+        # и для прямого вызова из пользовательского скрипта. Одна точка захвата — одна точка
+        # освобождения.
+        if not self._full_load_claim.is_ready:
+            # Реестра нет — координировать не с кем: захватить объект не мог никто. В боевом
+            # пути сюда не попасть (метаданные выше как раз его и заводят), но молча подменять
+            # заслон на его отсутствие нельзя.
+            logger.warning("Full load of %s runs without a claim: the object registry is not "
+                           "ready", object_name)
+            return self._load_object(object_name, batch_size=batch_size, date_field=date_field,
+                                     date_from=date_from, date_to=date_to,
+                                     mark_missing=mark_missing, read_subconto=read_subconto)
+        with self._full_load_claim.hold(object_name) as claimed:
+            if not claimed:
+                if not skip_if_busy:
+                    raise FullLoadBusy(object_name)
+                # Не ошибка: объект прямо сейчас выгружает кто-то другой, и делать ту же работу
+                # второй раз незачем — это самая дорогая операция для 1С.
+                logger.warning("Full load of %s is already running elsewhere, skipping",
+                               object_name)
+                return 0
+            return self._load_object(object_name, batch_size=batch_size, date_field=date_field,
+                                     date_from=date_from, date_to=date_to,
+                                     mark_missing=mark_missing, read_subconto=read_subconto)
+
+    def _load_object(self, object_name: str, *, batch_size: int, date_field: str | None,
+                     date_from, date_to, mark_missing: bool, read_subconto: bool | None) -> int:
+        """
+        Сама выгрузка: имена уже разрешены, объект уже занят (см. full_load). Отдельным методом
+        только ради этого — чтобы захват и освобождение были видны одним блоком, а не терялись
+        в сотне строк постраничного чтения.
+        """
         # Ключ сортировки: справочник/документ → [Ref_Key], регистраторный → [Recorder]/
         # [Recorder_Key], независимый регистр → весь первичный ключ (составной ключ).
         key_fields = self._full_load_key(object_name)
@@ -1792,7 +1854,7 @@ class Replicator:
         return exists().where(
             table.c.object_full_name.in_(sorted(objects)),
             table.c[OWNER_FIELD] == self._full_load_claim.owner,
-            table.c[HEARTBEAT_FIELD] >= DB_NOW_WITHOUT_TIMEZONE
+            table.c[HEARTBEAT_FIELD] >= DB_NOW_WITH_TIMEZONE
             - timedelta(seconds=CLAIM_HEARTBEAT_TTL))
 
     def _full_load_tables(self, object_name: str) -> list[str]:
@@ -2026,17 +2088,22 @@ class Replicator:
         метриками прогона. При ошибке флаг full_load_is_required остаётся → ретрай на следующем
         цикле, а метрики не пишутся: они описывают завершённую выгрузку."""
         started = time.monotonic()
-        if not self._full_load_claim.claim(object_full_name):
-            logger.debug("Full load of %s is already claimed elsewhere, skipping",
-                         object_full_name)
-            self._full_load_queued.discard(object_full_name)
-            return
         try:
-            rows_modified = self.full_load(object_full_name)
+            # skip_if_busy=False: занят объект или нет, решает сам full_load — он же и занимает.
+            # Но нам этот случай надо ОТЛИЧИТЬ от «выгрузили, расхождений нет»: отметить объект
+            # выгруженным, не выгрузив его, значит снять заказ и больше к нему не вернуться.
+            rows_modified = self.full_load(object_full_name, skip_if_busy=False)
             self.metadata.mark_full_loaded(object_full_name, rows_modified=rows_modified,
                                            minutes=round((time.monotonic() - started) / 60, 3))
             self._full_load_retry_at.pop(object_full_name, None)
             self._full_load_delay.pop(object_full_name, None)
+        except FullLoadBusy:
+            # Тот же объект выгружает другой процесс или другое расписание. Заказ не снимаем:
+            # выгрузка идёт, а отметит её тот, кто её делает.
+            logger.debug("Full load of %s is already running elsewhere, skipping",
+                         object_full_name)
+            self._full_load_queued.discard(object_full_name)
+            return
         except FullLoadStopped as stopped:
             # Не сбой: объект НЕ отмечаем выгруженным и метрик не пишем — они описывают
             # завершённый прогон. Заказ остаётся, после перезапуска выгрузка начнётся заново.
@@ -2049,5 +2116,4 @@ class Replicator:
             _log_failure(exc, "Background full_load of %s failed, retry in %ss",
                          object_full_name, round(delay))
         finally:
-            self._full_load_claim.release(object_full_name)
             self._full_load_queued.discard(object_full_name)

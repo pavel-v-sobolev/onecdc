@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from croniter import croniter
 
 from onecdc.logging_config import get_logger
+from onecdc.replicator import FullLoadBusy
 from onecdc.stop_signal import StopSignal, install_signal_handlers
 
 logger = get_logger(__name__)
@@ -158,11 +159,10 @@ class FullLoadCron:
         настройку расписания, не дожидаясь трёх часов ночи.
         """
         object_name, date_field = self._resolve()
-        with self.replicator.claim_full_load(object_name) as claimed:
-            if not claimed:
-                logger.warning("Full load of %s is already running, skipping this run",
-                               self.table_name)
-                return 0
+        # Объект занимает сам full_load — здесь только разбираем его отказ: нам нужно отличить
+        # «уже выгружает кто-то другой» от «выгрузили, расхождений нет», иначе первый прогон
+        # отметился бы выполненным, ничего не выгрузив.
+        try:
             date_from = _bound(self.date_from)
             date_to = _bound(self.date_to)
             # Первый прогон — объект целиком: границы снимаем (см. класс). Проверяем это ВНУТРИ
@@ -177,7 +177,7 @@ class FullLoadCron:
             started = time.monotonic()
             rows_modified = self.replicator.full_load(
                 object_name, batch_size=self.batch_size, date_field=date_field,
-                date_from=date_from, date_to=date_to)
+                date_from=date_from, date_to=date_to, skip_if_busy=False)
             if first_run:
                 # Прогон прочитал объект ЦЕЛИКОМ — это и есть полная выгрузка, и отметить её надо
                 # ровно так же, как её отмечает фоновый воркер репликатора. Без этого
@@ -188,6 +188,10 @@ class FullLoadCron:
                 self.replicator.metadata.mark_full_loaded(
                     object_name, rows_modified=rows_modified,
                     minutes=round((time.monotonic() - started) / 60, 3))
+        except FullLoadBusy:
+            logger.warning("Full load of %s is already running, skipping this run",
+                           self.table_name)
+            return 0
         logger.info("Scheduled full load of %s (%s..%s) modified %s rows",
                     self.table_name, date_from or '', date_to or '', rows_modified)
         return rows_modified

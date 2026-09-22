@@ -336,7 +336,7 @@ def test_dispatch_runs_full_load_and_marks_loaded(db):
     rep.metadata.require_full_load_if_new("Catalog_X")  # объект пришёл в пакете, не выгружался → нужно
 
     loaded = []
-    rep.full_load = lambda name, batch_size=1000: loaded.append(name)
+    rep._load_object = lambda name, **kw: loaded.append(name) or 0
     rep._dispatch_full_loads(_SyncExecutor())
 
     assert loaded == ["Catalog_X"]                      # выгрузка запущена
@@ -348,12 +348,15 @@ def test_dispatch_runs_full_load_and_marks_loaded(db):
 
 def test_a_claimed_object_is_declined_by_the_worker_not_by_dispatch(db, monkeypatch):
     """
-    Объект, который выгружает кто-то другой, отсеивается в момент СТАРТА воркера, а не при
+    Объект, который выгружает кто-то другой, отсеивается в момент СТАРТА выгрузки, а не при
     постановке в очередь.
 
     Раньше захват брался при постановке, и при двух воркерах десяток объектов ждал очереди с
     активным захватом: для расписаний в других процессах они всё это время были заняты, хотя никто
     их не читал. Теперь очередь никого не блокирует, а лишний сабмит стоит одного UPDATE.
+
+    Отказ приходит из самого full_load (он же и занимает объект), поэтому подменяется чтение под
+    ним: заглушка поверх full_load спрятала бы проверяемое.
     """
     rep, other = _replicator(db), _replicator(db)
     rep.metadata._sync_objects(["Catalog_X"])
@@ -366,11 +369,15 @@ def test_a_claimed_object_is_declined_by_the_worker_not_by_dispatch(db, monkeypa
         assert ex.submitted == [("Catalog_X",)], 'очередь не должна ходить в БД за захватом'
 
         loaded = []
-        monkeypatch.setattr(Replicator, "full_load", lambda self, name, **kw: loaded.append(name))
+        monkeypatch.setattr(Replicator, "_load_object",
+                            lambda self, name, **kw: loaded.append(name) or 0)
         rep._run_full_load("Catalog_X")
 
         assert loaded == [], 'воркер взялся за объект, который держит другой процесс'
         assert "Catalog_X" not in rep._full_load_queued, 'объект застрял в очереди навсегда'
+        # И заказ остался: отметить объект выгруженным, не выгрузив его, значит больше к нему
+        # не вернуться.
+        assert _flag_row(rep, "Catalog_X").full_load_is_required in (True, 1)
     finally:
         other._full_load_claim.close()
 

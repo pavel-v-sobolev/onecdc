@@ -2,14 +2,14 @@
 from datetime import datetime
 
 from sqlalchemy.exc import CompileError, DatabaseError, NoSuchTableError
-from sqlalchemy import (Engine, Index, JSON, MetaData, Table, Integer, Numeric,
+from sqlalchemy import (DateTime, Engine, Index, JSON, MetaData, Table, Integer, Numeric,
                         inspect, text, tuple_, select, or_, and_, exists)
 from sqlalchemy.dialects.postgresql import JSONB
 from dbmerge import dbmerge, mergeResult
 
 from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD, FULL_LOAD_MESSAGE_NO,
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE
 from onecdc.db_logs import create_index_if_absent
 from onecdc.name_mapper import NameMapper, _short_hash, fit_identifier_length
 from onecdc.logging_config import get_logger
@@ -188,6 +188,13 @@ class DBWriter:
             data_types = {col: JSONB() if isinstance(typ, JSON) and not isinstance(typ, JSONB)
                           else typ for col, typ in data_types.items()}
 
+        # Служебные отметки строки — С ПОЯСОМ: это моменты нашей записи, а не время 1С (см.
+        # DB_NOW_WITH_TIMEZONE). Задаём их тип явно, иначе dbmerge заведёт колонку наивной, и
+        # новая таблица снова поехала бы со старой болезнью. Действующие таблицы приводит
+        # align_merge_timestamps на старте.
+        data_types[MERGED_ON_FIELD] = DateTime(timezone=True)
+        data_types[INSERTED_ON_FIELD] = DateTime(timezone=True)
+
         # Тип поля мог поменяться в 1С — сверяем ДО merge: dbmerge заводит недостающие колонки,
         # но тип существующей не меняет, и запись упёрлась бы в несовместимость типов.
         self._retype_changed_columns(table_name, object_name, data_types, key)
@@ -288,10 +295,10 @@ class DBWriter:
         merge (WriteTracker.boundary): «сейчас» перешагнуло бы строки, уже помеченные прошедшим
         merged_on, но ещё не закоммиченные.
 
-        Отметка возвращается БЕЗ часового пояса — см. DB_NOW_WITHOUT_TIMEZONE.
+        Отметка возвращается БЕЗ часового пояса — см. DB_NOW_WITH_TIMEZONE.
         """
         with self.engine.connect() as conn:
-            return conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            return conn.scalar(select(DB_NOW_WITH_TIMEZONE))
 
     # Guard'ы полной выгрузки по merged_on. Смысл один на все три: снимок читается долго и к моменту
     # записи может устареть, поэтому он не трогает то, что переписали уже после отметки его страницы.

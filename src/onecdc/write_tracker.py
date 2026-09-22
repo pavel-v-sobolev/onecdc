@@ -17,7 +17,7 @@ from typing import Iterable
 from sqlalchemy import (Column, DateTime, Engine, MetaData, String, Table, delete, func, insert,
                         select, update)
 
-from onecdc.common_functions import (DB_NOW_WITHOUT_TIMEZONE,
+from onecdc.common_functions import (DB_NOW_WITH_TIMEZONE,
                                      HEARTBEAT_JOIN_TIMEOUT, instance_owner)
 from onecdc.db_logs import _check_create_schema, create_table_if_absent
 from onecdc.logging_config import get_logger
@@ -78,9 +78,9 @@ def _writes_table(metadata: MetaData, schema_name: str | None) -> Table:
         Column("owner", String(255), nullable=False),
         Column("object_name", String(255), nullable=False),
         # Момент старта merge по часам БД — то, к чему прижимается граница окна обработчика.
-        Column("started_at", DateTime, nullable=False),
+        Column("started_at", DateTime(timezone=True), nullable=False),
         # Отметка живости: обновляется, пока merge действительно идёт (см. MERGE_HEARTBEAT_TTL).
-        Column("heartbeat_at", DateTime, nullable=False),
+        Column("heartbeat_at", DateTime(timezone=True), nullable=False),
         # Источник изменения (changes / full_load). Нужен разбору брошенных строк: сигнал проходит
         # через фильтр on_full_load, и без источника отложенный сигнал разбудил бы обработчика,
         # который от бэкфилла отписался.
@@ -219,7 +219,7 @@ class WriteTracker:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 select(t.c.id, t.c.object_name, t.c.signal_source)
-                .where(t.c.heartbeat_at < DB_NOW_WITHOUT_TIMEZONE
+                .where(t.c.heartbeat_at < DB_NOW_WITH_TIMEZONE
                        - timedelta(seconds=MERGE_HEARTBEAT_TTL))).all()
         delivered = 0
         for row in rows:
@@ -251,7 +251,7 @@ class WriteTracker:
             self._in_flight.add(row_id)
         self._ensure_heartbeat()
         with self.engine.begin() as conn:
-            started_at = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            started_at = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
             conn.execute(insert(self.table).values(
                 id=row_id, owner=self.owner, object_name=object_name,
                 started_at=started_at, heartbeat_at=started_at, signal_source=source))
@@ -297,11 +297,11 @@ class WriteTracker:
         # started_at лежит в колонке без пояса, поэтому и читается уже offset-naive.
         earliest = (select(func.min(t.c.started_at))
                     .where(t.c.object_name.in_(list(object_names)),
-                           t.c.heartbeat_at > DB_NOW_WITHOUT_TIMEZONE
+                           t.c.heartbeat_at > DB_NOW_WITH_TIMEZONE
                            - timedelta(seconds=MERGE_HEARTBEAT_TTL))
                     .scalar_subquery())
         with self.engine.connect() as conn:
-            now, earliest = conn.execute(select(DB_NOW_WITHOUT_TIMEZONE, earliest)).one()
+            now, earliest = conn.execute(select(DB_NOW_WITH_TIMEZONE, earliest)).one()
         return min(now, earliest) if earliest is not None else now
 
     def heartbeat(self) -> None:

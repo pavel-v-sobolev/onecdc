@@ -26,7 +26,7 @@ from sqlalchemy import (Column, Index, MetaData, Table, and_, exists, func, inse
                         select, tuple_, update)
 from sqlalchemy.engine import Engine
 
-from onecdc.common_functions import DB_NOW_WITHOUT_TIMEZONE, truncate_to_bytes
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, truncate_to_bytes
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -114,7 +114,7 @@ class FullLoadKeys:
         with self.engine.connect() as conn:
             # Часы БД, а не процесса: имя сравнивают со строками в базе и с таблицами других
             # процессов, а общие часы у всех — только базы.
-            now = conn.scalar(select(DB_NOW_WITHOUT_TIMEZONE))
+            now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
         prefix = f'{KEYS_TABLE_PREFIX}{now.strftime(KEYS_TABLE_TIMESTAMP_FORMAT)}_'
         suffix = f'_{uuid.uuid4().hex[:UNIQUE_ID_LENGTH]}'
         budget = MAX_KEYS_TABLE_NAME_LEN - len(prefix) - len(suffix)

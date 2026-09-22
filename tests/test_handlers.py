@@ -179,11 +179,10 @@ def test_handlers_are_signalled_by_table_name(db, monkeypatch):
     assert spy.calls[0].objects == frozenset({"Catalog_Nomenklatura"})
 
 
-def test_db_now_drops_the_time_zone(db):
-    # PostgreSQL now() отдаёт timestamptz, драйвер — offset-aware datetime. А merged_on, started_at
-    # и onecdc_handlers.last_run_at лежат в колонках без пояса и читаются offset-naive. Сравнить их в
-    # Python нельзя, и HandlerLoop падал на boundary <= last_run_at с «can't compare offset-naive
-    # and offset-aware datetimes». Приведение делает сама БД (DB_NOW_WITHOUT_TIMEZONE).
+def test_db_now_keeps_the_time_zone(db):
+    # Служебные отметки — МОМЕНТЫ, а не показания настенных часов: наивное время в поясе с
+    # сезонным переводом немонотонно, и час инкремента терялся молча (CDC-25). Раньше здесь
+    # приведение пояс отбрасывало; теперь оно не нужно — отметки лежат в timestamptz.
     from onecdc.db_writer import DBWriter
 
     with db.engine.connect() as conn:
@@ -191,11 +190,10 @@ def test_db_now_drops_the_time_zone(db):
     assert aware.tzinfo is not None, 'иначе тест ничего не проверяет'
 
     now = DBWriter(engine=db.engine, name_mapper=NameMapper(), schema=db.schema).db_now()
-    assert now.tzinfo is None
-    assert now == aware.replace(tzinfo=None).replace(microsecond=now.microsecond), \
-        'смещение отбрасываем, а не переводим в UTC'
+    assert now.tzinfo is not None, 'пояс должен сохраняться'
+    assert now.utcoffset() == aware.utcoffset()
 
-    # И граница окна сравнивается с отметкой из колонки без пояса, ничего не роняя.
+    # И граница окна сравнивается с отметкой из колонки, ничего не роняя.
     tracker = WriteTracker(db.engine, db.schema, 'План1')
     try:
         assert tracker.boundary(["Catalog_X"]) > EPOCH

@@ -36,14 +36,13 @@ def _replicator(db, calls, rows_modified=0, fully_loaded=True):
     # захват объекта под выгрузку (см. full_load_claim).
     rep.metadata._sync_objects([OBJECT_1C])
 
-    def fake_full_load(object_name, batch_size=1000, date_field=None,
-                       date_from=None, date_to=None, **kwargs):
-        calls.append({"object_name": object_name, "batch_size": batch_size,
-                      "date_field": date_field, "date_from": date_from, "date_to": date_to,
-                      **kwargs})
+    # Подменяем не full_load, а чтение под ним: захват объекта теперь берёт сам full_load, и
+    # заглушка поверх него спрятала бы ровно то, что здесь и проверяется.
+    def fake_load_object(object_name, **kwargs):
+        calls.append({"object_name": object_name, **kwargs})
         return rows_modified
 
-    rep.full_load = fake_full_load
+    rep._load_object = fake_load_object
     return rep
 
 

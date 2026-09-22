@@ -35,6 +35,19 @@ class TestDB:
     schema: str
 
 
+@pytest.fixture(autouse=True)
+def _reset_migration_cache():
+    """
+    Обход схемы на переезд отметок делается раз на процесс (см. align_merge_timestamps), а в
+    тестах процесс один на весь прогон. Без сброса тест, заведший наивную таблицу после первого
+    компонента, молча проверял бы кэш вместо самой миграции.
+    """
+    from onecdc.db_logs import _MERGE_TIMESTAMPS_CHECKED
+    _MERGE_TIMESTAMPS_CHECKED.clear()
+    yield
+    _MERGE_TIMESTAMPS_CHECKED.clear()
+
+
 @pytest.fixture
 def db():
     schema = f"onecdc_test_{uuid.uuid4().hex[:8]}"
