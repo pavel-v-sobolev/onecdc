@@ -24,14 +24,15 @@ object_name = sys.argv[1] if len(sys.argv) > 1 else 'Catalog_Контраген�
 
 engine = create_engine(os.environ['ONECDC_DB_URL'], pool_size=5)
 
+user = os.environ.get('ONECDC_ODATA_USER')
 rep = Replicator(
     odata_url=os.environ['ONECDC_ODATA_URL'],
-    odata_auth=(os.environ['ONECDC_ODATA_USER'], os.environ['ONECDC_ODATA_PASSWORD']),
-    exchange_name=os.environ['ONECDC_EXCHANGE_NAME'],
-    queue_guid=os.environ.get('ONECDC_QUEUE_GUID', ''),
+    # Нет пользователя — 1С опубликована без авторизации.
+    odata_auth=(user, os.environ.get('ONECDC_ODATA_PASSWORD', '')) if user else None,
+    # Плана обмена и узла у разовой выгрузки нет: она читает объект прямо из OData. Такой
+    # репликатор умеет только выгружать — читать изменения он откажется.
     engine=engine,
     db_schema=os.environ.get('ONECDC_DB_SCHEMA'),
-    db_temp_schema=os.environ.get('ONECDC_DB_TEMP_SCHEMA'),
 )
 
 try:

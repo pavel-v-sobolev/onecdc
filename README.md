@@ -77,12 +77,11 @@ engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/onecdc", 
 
 rep = Replicator(
     odata_url="http://host/base/odata/standard.odata",
-    odata_auth=("odata", "secret"),        # (user, password)
-    exchange_name="ВашПланОбмена",              # имя плана обмена в 1С
-    queue_guid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",  # Ref_Key узла обмена
+    odata_auth=("odata", "secret"),        # (user, password); None — 1С без авторизации
     engine=engine,
+    exchange_name="ВашПланОбмена",         # имя плана обмена в 1С
+    queue_guid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",  # Ref_Key узла обмена
     db_schema="onecdc",                    # None → схема БД по умолчанию (public у Postgres)
-    db_temp_schema="onecdc_tmp",           # схема промежуточных таблиц merge; None → схема данных
     request_timeout=60,                    # таймаут HTTP-запросов к 1С, сек (по умолчанию 60 на коннект, 900 на ответ)
     full_load_workers=2,                   # число фоновых потоков полной выгрузки
     automatic_full_load=True,              # ставить новые объекты на полную выгрузку самому
@@ -91,8 +90,17 @@ rep = Replicator(
 rep.run_forever(interval=60)               # цикл опроса раз в 60 секунд
 ```
 
-Вариант многопоточного запуска, дающий возможность добавления нескольких обработчиков (Handler) и 
-дополнительных репликаторов (Replicator) для других планов обмена, можно посмотреть в этом файле: [runner.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/runner.py)
+План обмена и узел нужны только для чтения изменений. Репликатору, который собран ради **полной
+выгрузки** (разовой или по расписанию), их можно не задавать вовсе — `full_load` читает объект
+прямо из OData; `run_forever`/`run_once` у такого репликатора откажутся стартовать.
+
+### Примеры целиком
+
+| файл | о чём |
+|---|---|
+| [examples/replicate_forever.py](examples/replicate_forever.py) | непрерывная репликация: один процесс, один цикл, без докера и потоков — то же, что выше, но готовое к запуску |
+| [examples/full_load_once.py](examples/full_load_once.py) | разовая полная выгрузка одного объекта: первая загрузка, добор истории, пересборка после нового реквизита |
+| [config/runner.py](config/runner.py) | многопоточный запуск: несколько обработчиков витрин, полные выгрузки по расписанию, несколько планов обмена в одном процессе |
 
 
 

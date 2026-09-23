@@ -234,9 +234,6 @@ class ZakazyKlientovGrouped(Handler):
                 continue                  # этот месяц уже посчитан до перезапуска процесса
 
             with dbmerge(context.engine, table_name="ZakazyKlientovGrouped", schema=context.schema,
-                         # Промежуточную таблицу merge кладём туда же, куда её кладёт репликатор
-                         # (см. runner.py): не задана — схема данных.
-                         temp_schema=context.temp_schema,
                          source_table_name="ZakazyKlientovGrouped_view",
                          source_schema=context.schema, delete_mode='delete') as merge:
                 merge.exec(source_condition=merge.source_table.c["Period"] == period,
@@ -254,7 +251,6 @@ class ZakazyKlientovGrouped(Handler):
         with dbmerge(context.engine, table_name="ZakazyKlientovGrouped", schema=context.schema,
                      # Промежуточную таблицу merge кладём туда же, куда её кладёт репликатор
                      # (см. runner.py): не задана — схема данных.
-                     temp_schema=context.temp_schema,
                      source_table_name="ZakazyKlientovGrouped_view", source_schema=context.schema,
                      delete_mode='delete') as merge:
             # Ключ группы составной, поэтому сравнение row-value: (Number, Year) IN (SELECT

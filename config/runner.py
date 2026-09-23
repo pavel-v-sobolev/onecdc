@@ -109,10 +109,10 @@ engine = create_engine(
 )
 
 DB_SCHEMA = os.environ.get("ONECDC_DB_SCHEMA")
-# Схема промежуточных таблиц dbmerge — своя, отдельно от данных. Не обязательна (не задана — та же,
-# что у данных), но так таблицы с данными и рабочие таблицы merge не перемешиваются: в этой схеме по
-# определению нет ничего ценного, поэтому таблицу, оставшуюся после падения процесса, там видно и не
-# жалко удалить. Схему создаёт сам dbmerge.
+# Куда класть одноразовые таблицы ключей полной выгрузки. Не обязательна (не задана — схема
+# данных), но в отдельной схеме по определению нет ничего ценного: таблицу, оставшуюся после
+# падения процесса, там видно и не жалко удалить. Промежуточную таблицу merge dbmerge заводит
+# сам, настоящей TEMPORARY, и эта схема к ней отношения не имеет.
 DB_TEMP_SCHEMA = os.environ.get("ONECDC_DB_TEMP_SCHEMA")
 
 # Пользователь не задан — работаем без авторизации, как и образ без runner.py. Требовать здесь обе
@@ -143,9 +143,7 @@ logging.getLogger("onecdc").setLevel(LOG_LEVEL)
 # занятый репликатором навсегда, оставил бы задания обработчиков в очереди пула — витрины не
 # обновлялись бы, и ни одной ошибки при этом не появилось бы.
 RUNNABLES = [partial(replicator.run_forever, interval=POLL_INTERVAL)]
-RUNNABLES += [HandlerLoop(engine=engine, schema=DB_SCHEMA,
-                          # Обработчик получит её в context.temp_schema и передаст в свой dbmerge.
-                          temp_schema=DB_TEMP_SCHEMA, handler=handler).run_forever
+RUNNABLES += [HandlerLoop(engine=engine, schema=DB_SCHEMA, handler=handler).run_forever
               for handler in HANDLERS]
 RUNNABLES += [FullLoadCron(replicator, **job).run_forever for job in CRON_JOBS]
 

@@ -1,7 +1,9 @@
 
+import random
+import time
 from datetime import datetime
 
-from sqlalchemy.exc import CompileError, DatabaseError, NoSuchTableError
+from sqlalchemy.exc import CompileError, DatabaseError, IntegrityError, NoSuchTableError
 from sqlalchemy import (DateTime, Engine, Index, JSON, MetaData, Table, Integer, Numeric,
                         inspect, text, tuple_, select, or_, and_, exists)
 from sqlalchemy.dialects.postgresql import JSONB
@@ -30,6 +32,18 @@ INSERTED_ON_FIELD = 'inserted_on'
 # по префиксу. Состав ссылочных классов — см. ENTITY_TYPES в metadata_reader.
 SAVE_ORDER_PREFIXES = ('Catalog', 'Document', 'InformationRegister', 'AccumulationRegister',
                        'AccountingRegister')
+
+
+def _is_unique_violation(error: IntegrityError) -> bool:
+    """
+    Нарушение уникальности (SQLSTATE 23505) — то, что бывает от гонки. Прочие IntegrityError
+    (NOT NULL, внешний ключ) постоянны: повторять их значит трижды сделать одну и ту же работу
+    впустую и на столько же отложить понятную ошибку.
+
+    Код берём у драйвера: psycopg2 держит его в pgcode, psycopg3 — в sqlstate.
+    """
+    orig = getattr(error, 'orig', None)
+    return (getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)) == '23505'
 
 
 def save_order_key(object_name: str) -> int:
@@ -115,6 +129,9 @@ class DBWriter:
         # Схема промежуточных таблиц dbmerge. None — та же, что у данных (умолчание dbmerge).
         # Отдельная схема удобна тем, что в ней по определению нет ничего ценного: временную
         # таблицу, оставшуюся после падения процесса, там видно и не жалко удалить.
+        # Промежуточную таблицу merge dbmerge на PostgreSQL заводит настоящей TEMPORARY, в
+        # сессионной схеме, и переданную схему обнуляет сам. Поле оставлено как было принято
+        # (его читают снаружи), но в dbmerge больше не уходит.
         self.temp_schema = temp_schema
         # Таблицы, для которых индекс по merged_on уже обеспечен в этом процессе (чтобы не рефлексить
         # и не дёргать checkfirst на каждом save).
@@ -204,18 +221,20 @@ class DBWriter:
         # Под снимком шум перестаёт быть шумом: см. always_touch.
         skip_compare = [] if always_touch else self._noisy_fields(records, object_name)
 
-        if not object_key:
-            # Документ/справочник (одна запись по ключу): чистый upsert без удаления.
-            with dbmerge(engine=self.engine, table_name=table_name, data=records,
-                         key=key, data_types=data_types,
-                         merged_on_field=MERGED_ON_FIELD, inserted_on_field=INSERTED_ON_FIELD,
-                         skip_compare_fields=skip_compare,
-                         delete_mode='no', schema=self.schema,
-                         temp_schema=self.temp_schema) as merge:
-                result = merge.exec(
-                    update_condition=self._not_touched_since(merge.table, started_at)
-                                     if started_at is not None else None)
-        else:
+        # Оба ветвления — в замыкании: merge одной таблицы могут идти одновременно из разных
+        # потоков (страница полной выгрузки и пакет изменений), и такой merge повторяют целиком.
+        def run_merge() -> mergeResult:
+            if not object_key:
+                # Документ/справочник (одна запись по ключу): чистый upsert без удаления.
+                with dbmerge(engine=self.engine, table_name=table_name, data=records,
+                             key=key, data_types=data_types,
+                             merged_on_field=MERGED_ON_FIELD, inserted_on_field=INSERTED_ON_FIELD,
+                             skip_compare_fields=skip_compare,
+                             delete_mode='no', schema=self.schema) as merge:
+                    return merge.exec(
+                        update_condition=self._not_touched_since(merge.table, started_at)
+                                         if started_at is not None else None)
+
             # Регистр/табличная часть: набор по object_key целиком заменяет существующий.
             # Выпавшие из набора строки помечаем, а не удаляем: исчезновение строки — такое же
             # событие, как изменение, и без следа его не увидит ни обработчик (нечему поднять
@@ -230,21 +249,59 @@ class DBWriter:
                          delete_mark_field=self.name_mapper.map_field_name(
                              IS_DELETED_OR_EMPTY_FIELD, object_name),
                          delete_mark_values=self._resource_reset_values(metadata_obj, records,
-                                                                       object_name),
-                         schema=self.schema, temp_schema=self.temp_schema) as merge:
-                scoped = self._scoped_delete_condition(merge.table, merge.temp_table, mapped_object_key)
-                if started_at is not None:
-                    # own-or-skip группы: не трогаем то, что переписано после старта прогона.
-                    result = merge.exec(
-                        delete_condition=and_(scoped, self._not_touched_since(merge.table, started_at)),
-                        update_condition=self._not_touched_since(merge.table, started_at),
-                        insert_condition=self._group_not_touched_since(
-                            merge, mapped_object_key, started_at, object_name))
-                else:
-                    result = merge.exec(delete_condition=scoped)
+                                                                        object_name),
+                         schema=self.schema) as merge:
+                scoped = self._scoped_delete_condition(merge.table, merge.temp_table,
+                                                       mapped_object_key)
+                if started_at is None:
+                    return merge.exec(delete_condition=scoped)
+                # own-or-skip группы: не трогаем то, что переписано после старта прогона.
+                return merge.exec(
+                    delete_condition=and_(scoped, self._not_touched_since(merge.table, started_at)),
+                    update_condition=self._not_touched_since(merge.table, started_at),
+                    insert_condition=self._group_not_touched_since(
+                        merge, mapped_object_key, started_at, object_name))
 
+        result = self._merge_with_retry(run_merge, table_name)
         self._ensure_merged_on_index(table_name)
         return result
+
+    # Сколько раз повторяем merge, упёршийся в уникальный ключ, и с какой паузой (секунды,
+    # с разбросом). Разброс важен: два писателя, столкнувшиеся синхронно, без него так же
+    # синхронно и повторились бы.
+    MERGE_ATTEMPTS = 3
+    MERGE_RETRY_DELAY = (0.05, 0.3)
+
+    def _merge_with_retry(self, run_merge, table_name: str) -> mergeResult | None:
+        """
+        Повторяет merge, упавший на нарушении уникальности.
+
+        Одну таблицу пишут одновременно: страница полной выгрузки и пакет изменений — разные
+        потоки, а то и разные процессы. Фаза вставки dbmerge ищет недостающие строки анти-джойном
+        (`WHERE target.pk IS NULL`), и при READ COMMITTED обе конкурентные вставки одного ключа
+        через него проходят — проигравшая упирается в первичный ключ. Измерено: два потока на один
+        ключ дают столкновение примерно в 40% случаев.
+
+        Цена несимметрична, поэтому повтор здесь и нужен: пакет изменений повторится сам и
+        идемпотентно, а страница валит весь прогон полной выгрузки, и он уходит в паузу до
+        получаса (см. _page_too_heavy).
+
+        Повтор, а не `ON CONFLICT DO NOTHING` в самой вставке, по одной причине: дубль ключа
+        ВНУТРИ пачки — это ошибка вычисления ключа (так вскрывались CDC-13 и CDC-14), и падать
+        она обязана громко. На уровне SQL эти два случая неразличимы, а повтор их разделяет сам:
+        гонка на второй попытке исчезает (строку уже вставил сосед, её подхватывает фаза UPDATE),
+        а наш дубль воспроизводится и после последней попытки падает, как падал.
+        """
+        for attempt in range(1, self.MERGE_ATTEMPTS + 1):
+            try:
+                return run_merge()
+            except IntegrityError as error:
+                if not _is_unique_violation(error) or attempt == self.MERGE_ATTEMPTS:
+                    raise
+                logger.warning("Merge of %s hit a unique key (attempt %s of %s): another writer "
+                               "inserted the same row — retrying", table_name, attempt,
+                               self.MERGE_ATTEMPTS)
+                time.sleep(random.uniform(*self.MERGE_RETRY_DELAY))
 
     def _noisy_fields(self, records: list[dict], object_name: str) -> list[str]:
         """

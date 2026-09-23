@@ -10,6 +10,8 @@ import logging
 import pytest
 from pathlib import Path
 
+from sqlalchemy import text
+
 import fake_1c  # соседний модуль в tests/ (pytest добавляет каталог теста в sys.path)
 from onecdc import Replicator
 
@@ -29,7 +31,6 @@ def _make(db, **overrides):
     ({"odata_url": "host/base/odata/standard.odata"}, "http://"),
     ({"odata_auth": "user:password"}, "odata_auth"),
     ({"odata_auth": ("user",)}, "odata_auth"),
-    ({"exchange_name": " "}, "exchange_name is required"),
     ({"queue_guid": "ДляВитрины"}, "Ref_Key"),
     ({"engine": "postgresql://localhost/db"}, "create_engine"),
     ({"db_schema": 5}, "db_schema"),
@@ -155,3 +156,30 @@ def test_this_node_is_refused_instead_of_being_read_from(db, caplog):
             with pytest.raises(ValueError, match="ThisNode"):
                 repl.changes.get_last_received_no()
         repl.close()
+
+
+# --- репликатор только под полные выгрузки -------------------------------------------------------
+
+def test_a_replicator_without_an_exchange_plan_is_allowed(db):
+    """
+    Полная выгрузка читает объект прямо из OData и план обмена не использует вовсе. Требовать его
+    в конструкторе значило бы заставлять выдумывать план ради разовой загрузки — а выдуманный
+    оседал в журнале и в onecdc_exchange_nodes.
+    """
+    repl = _make(db, exchange_name=None, queue_guid="")
+
+    assert repl._exchange_name == ''
+    with repl.engine.connect() as conn:
+        nodes = conn.execute(text(f'SELECT count(*) FROM "{db.schema}".onecdc_exchange_nodes'))
+        assert nodes.scalar() == 0, 'строка узла без узла — мусор'
+    repl.close()
+
+
+@pytest.mark.parametrize("call", [lambda r: r.run_once(), lambda r: r.run_forever()])
+def test_reading_changes_without_a_plan_refuses_to_start(db, call):
+    """Отказ здесь, а не в конструкторе: молча крутить цикл, которому нечего читать, нельзя."""
+    repl = _make(db, exchange_name=None, queue_guid="")
+
+    with pytest.raises(ValueError, match="only run full loads"):
+        call(repl)
+    repl.close()

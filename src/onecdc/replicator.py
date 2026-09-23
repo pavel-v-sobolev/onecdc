@@ -248,11 +248,21 @@ _EXCHANGE_NAME = re.compile(r'^[^\W\d]\w*$')
 
 
 def _check_exchange_name(exchange_name) -> str:
-    """Имя плана обмена так, как оно уходит в URL: ExchangePlan_<имя>. Префикс/точечное имя
-    (ПланОбмена.Х, ExchangePlan_Х) снимаем: в URL их дописывает сам ChangeReader."""
-    if not isinstance(exchange_name, str) or not exchange_name.strip():
-        raise ValueError("exchange_name is required: name of the 1C exchange plan "
-                         "(as in the configuration, e.g. ДляВитрины)")
+    """
+    Имя плана обмена так, как оно уходит в URL: ExchangePlan_<имя>. Префикс/точечное имя
+    (ПланОбмена.Х, ExchangePlan_Х) снимаем: в URL их дописывает сам ChangeReader.
+
+    Не задано — пустая строка: репликатор собирается БЕЗ чтения изменений, только под полные
+    выгрузки. Полной выгрузке план обмена не нужен вовсе (она читает объект прямо из OData), а
+    требовать его значило бы заставлять выдумывать план ради разовой загрузки. Чтение изменений
+    в таком репликаторе отказывается стартовать — см. Replicator._check_changes_are_configured.
+    """
+    if exchange_name is None or (isinstance(exchange_name, str) and not exchange_name.strip()):
+        return ''
+    if not isinstance(exchange_name, str):
+        raise ValueError("exchange_name must be the name of the 1C exchange plan "
+                         "(as in the configuration, e.g. ДляВитрины), or None for a replicator "
+                         "that only runs full loads")
     name = exchange_name.strip()
     for prefix in ('ExchangePlan_', 'ПланОбмена.', 'ExchangePlan.'):
         if name.startswith(prefix):
@@ -550,8 +560,12 @@ class Replicator:
     """
 
     def __init__(self, odata_url: str, odata_auth: tuple[str, str] | None,
-                 exchange_name: str, queue_guid: str,
-                 engine: Engine, db_schema: str | None = None,
+                 engine: Engine,
+                 # Чтение изменений: план обмена и узел-очередь. Не заданы — репликатор умеет
+                 # только полные выгрузки (им план обмена не нужен), а run_once/run_forever
+                 # откажутся стартовать.
+                 exchange_name: str | None = None, queue_guid: str | None = None,
+                 db_schema: str | None = None,
                  db_temp_schema: str | None = None,
                  request_timeout: float | None = None,
                  full_load_workers: int = 2,
@@ -569,12 +583,20 @@ class Replicator:
         # иначе оборачиваются ошибкой 1С посреди первого цикла, где уже не видно, что не так.
         self.engine = _check_db_connection(_check_engine(engine))
         self.db_schema = _check_db_schema(db_schema)
-        # Схема промежуточных таблиц dbmerge. Не задана — та же, что у данных. Отдельная схема
-        # (например onecdc_tmp) держит их в стороне от таблиц с данными: в ней по определению нет
-        # ничего ценного, поэтому таблицу, оставшуюся после падения процесса, там видно и не жалко.
+        # Куда класть ОДНОРАЗОВЫЕ таблицы ключей полной выгрузки (см. full_load_keys). Не задана —
+        # туда же, где данные. Отдельная схема удобна тем, что в ней по определению нет ничего
+        # ценного: таблицу, оставшуюся после падения процесса, там видно и не жалко удалить.
+        #
+        # Промежуточная таблица merge сюда больше не относится: dbmerge на PostgreSQL заводит её
+        # настоящей TEMPORARY, в сессионной схеме, и переданную схему обнуляет сам. Наша таблица
+        # ключей так не может — её пишут страницы из разных соединений пула, а читает конец
+        # прогона, тогда как TEMPORARY видна только своей сессии.
         self.db_temp_schema = _check_db_schema(db_temp_schema)
         self._odata_url = _check_odata_url(odata_url)
         self._exchange_name = _check_exchange_name(exchange_name)
+        # Ярлык для журнала загрузок и имени владельца в служебных таблицах. Без плана обмена
+        # это «full-load»: пустая строка там выглядела бы потерянным значением, а не решением.
+        self._owner_label = self._exchange_name or 'full-load'
         self._queue_guid = check_queue_guid(queue_guid)
         # odata_auth — кортеж (user, password) либо None, как в ридерах (передаётся им как есть).
         self._odata_auth = _check_odata_auth(odata_auth)
@@ -666,7 +688,7 @@ class Replicator:
         # процессе, и границу своего окна он обязан прижимать к НАШИМ незавершённым merge.
         # Он же отвечает за доставку сигнала: строка снимается одной транзакцией с сигналом,
         # а брошенная строка — единственный след того, что сигнал не дошёл (см. _deliver_signal).
-        self.writes = WriteTracker(self.engine, self.db_schema, self._exchange_name,
+        self.writes = WriteTracker(self.engine, self.db_schema, self._owner_label,
                                    deliver_signal=self._deliver_signal)
         # Аренда узла обмена: читать изменения одного узла вправе ровно один процесс. Без неё
         # два репликатора читают и подтверждают параллельно, а подтверждение удаляет регистрации
@@ -679,10 +701,13 @@ class Replicator:
         # живости не достаётся, и живой процесс теряет аренду (см. lease_engine).
         self._lease_engine = lease_engine(self.engine)
         self._node_lease = Lease(self._lease_engine, lambda: self._nodes_table,
-                                 instance_owner(exchange_name), subject='exchange-node',
+                                 instance_owner(self._owner_label), subject='exchange-node',
                                  key_field=NODE_KEY_FIELD, owner_field=NODE_OWNER_FIELD,
                                  heartbeat_field=NODE_HEARTBEAT_FIELD)
-        self._node_lease.ensure_row(self._queue_guid, exchange_name=exchange_name)
+        # Строку узла заводим, только когда узел задан: иначе репликатор «только для выгрузок»
+        # оставлял в onecdc_exchange_nodes строку с пустым ключом и выдуманным планом обмена.
+        if self._queue_guid:
+            self._node_lease.ensure_row(self._queue_guid, exchange_name=self._exchange_name)
         # Кого мы уже сообщили как владельца узла: лог пишется только на переходах, иначе
         # процесс, которому узел не достался, засыпал бы лог одинаковой строкой каждый цикл.
         self._node_holder_logged: str | None = None
@@ -694,6 +719,21 @@ class Replicator:
 
 
     @_load_mode_tag(LOAD_MODE_CHANGES)
+    def _check_changes_are_configured(self) -> None:
+        """
+        Чтение изменений требует плана обмена — в отличие от полной выгрузки, которая читает
+        объект прямо из OData.
+
+        Репликатор собирают и только под выгрузки: расписанием, разовым скриптом или своим
+        кодом. Такому плана обмена взять негде, и выдумывать его ради конструктора он не должен.
+        Но и молча крутить цикл, которому нечего читать, нельзя — отсюда отказ здесь, а не в
+        конструкторе.
+        """
+        if not self._exchange_name:
+            raise ValueError(
+                "this Replicator was built without an exchange plan and can only run full loads: "
+                "pass exchange_name=... (and queue_guid=...) to read changes")
+
     def run_once(self, notify_changes: bool = True) -> None:
         """
         Один цикл: (load metadata при первом вызове) → read → save → notify. Подтверждение
@@ -710,6 +750,7 @@ class Replicator:
         1С (полезно для отладки/тестов — цикл становится повторяемым).
 
         """
+        self._check_changes_are_configured()
         # Узел обмена берём ПЕРЕД чтением, а не перед подтверждением. Проверки перед
         # подтверждением мало: вред наносит уже сам SelectChanges второго процесса — он помечает
         # свежие изменения номером сообщения, который потом удалит первый своим подтверждением.
@@ -1231,7 +1272,8 @@ class Replicator:
         # Поле, по которому объект можно порезать на периоды, если он окажется глубоким.
         partition_field = self._partition_date_field(object_name, date_field)
 
-        log_id = self.onecdc_replicator_log.start(self._exchange_name, object_name, None, LOAD_TYPE_FULL)
+        log_id = self.onecdc_replicator_log.start(self._owner_label, object_name,
+                                                  None, LOAD_TYPE_FULL)
         logger.info("Full load of %s started (batch_size=%s, key=%s, date_filter=%s, "
                     "partition_field=%s)", object_name, batch_size, key_fields,
                     date_filter, partition_field)
@@ -1927,6 +1969,9 @@ class Replicator:
         соединения дольше своего TTL, неотличима от мёртвого процесса: её захват достанется
         чужому расписанию, а границу окна обработчика перестанет держать реестр merge.
         """
+        # До пулов и потоков: цикл без плана обмена читать нечего, и узнать об этом лучше здесь,
+        # чем по пустому логу через сутки.
+        self._check_changes_are_configured()
         stop = StopSignal()
         self._stop_signal = stop
         logger.info("Starting replication loop (interval=%ss, max_iterations=%s, timeout=%ss)",

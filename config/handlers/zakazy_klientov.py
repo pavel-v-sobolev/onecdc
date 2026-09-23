@@ -128,7 +128,6 @@ class ZakazyKlientov(Handler):
                 continue                      # этот месяц уже посчитан до перезапуска процесса
 
             with dbmerge(context.engine, table_name="ZakazyKlientov", schema=context.schema,
-                         temp_schema=context.temp_schema,
                          source_table_name="ZakazyKlientov_view",
                          source_schema=context.schema) as merge:
                 period = merge.source_table.c["Period"]
@@ -145,7 +144,6 @@ class ZakazyKlientov(Handler):
         with dbmerge(context.engine, table_name="ZakazyKlientov", schema=context.schema,
                      # Промежуточную таблицу merge кладём туда же, куда её кладёт репликатор
                      # (см. runner.py): не задана — схема данных.
-                     temp_schema=context.temp_schema,
                      source_table_name="ZakazyKlientov_view",
                      source_schema=context.schema) as merge:
 

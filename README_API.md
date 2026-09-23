@@ -41,7 +41,7 @@ Replicator(
     queue_guid: str,                      # Ref_Key узла обмена; пустой — список узлов в лог
     engine: Engine,                       # готовый SQLAlchemy Engine, не строка подключения
     db_schema: str | None = None,         # None — схема БД по умолчанию
-    db_temp_schema: str | None = None,    # схема промежуточных таблиц merge; None — схема данных
+    db_temp_schema: str | None = None,    # куда класть таблицы ключей полной выгрузки; None — схема данных
     request_timeout: float | None = None, # таймаут HTTP к 1С, сек
     full_load_workers: int = 2,           # фоновых потоков полной выгрузки
     automatic_full_load: bool = True,     # новый объект пакета сам встаёт на полную выгрузку
@@ -163,7 +163,7 @@ HandlerLoop(
     engine: Engine,
     schema: str | None,
     handler,                              # экземпляр Handler, модуль или функция
-    temp_schema: str | None = None,       # уедет в context.temp_schema
+    temp_schema: str | None = None,       # больше ни на что не влияет, оставлен для совместимости
 )
 ```
 

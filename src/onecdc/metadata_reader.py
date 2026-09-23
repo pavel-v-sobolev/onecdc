@@ -637,7 +637,6 @@ class MetadataReader(UserDict):
                      # выглядел ни разу не выгруженным — то есть уходил в выгрузку по новой.
                      delete_mode='mark', delete_mark_field='absent_from_metadata',
                      merged_on_field='merged_on', schema=self.schema,
-                     temp_schema=self.temp_schema,
                      data_types={'object_full_name': String(),
                                  'object_name': String(),
                                  'object_type': String(),

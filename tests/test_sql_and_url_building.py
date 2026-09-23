@@ -112,7 +112,7 @@ def test_every_path_to_the_database_checks_the_schema_name(db):
 
 # --- CDC-31: имя плана обмена в URL ---
 
-@pytest.mark.parametrize("name", ["A'B", 'A&B', 'A#B', 'A/B', 'A B', '1A', 'A-B', ''])
+@pytest.mark.parametrize("name", ["A'B", 'A&B', 'A#B', 'A/B', 'A B', '1A', 'A-B'])
 def test_a_plan_name_that_would_break_the_url_is_refused(name):
     """
     Имя уходит в URL внутрь ВЛОЖЕННОГО литерала:
@@ -127,6 +127,13 @@ def test_a_plan_name_that_would_break_the_url_is_refused(name):
 @pytest.mark.parametrize("name", ['ДляODATA', 'План_1', 'A1', '_X'])
 def test_a_normal_plan_name_passes(name):
     assert _check_exchange_name(name) == name
+
+
+@pytest.mark.parametrize("name", [None, '', '   '])
+def test_no_plan_name_means_full_loads_only(name):
+    # Пустое имя больше не ошибка: так собирают репликатор, который только выгружает. Читать
+    # изменения он откажется (см. test_config_validation), а конструктор не мешает.
+    assert _check_exchange_name(name) == ''
 
 
 def test_a_prefixed_plan_name_is_still_accepted():
