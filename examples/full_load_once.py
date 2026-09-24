@@ -22,7 +22,10 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(messag
 
 object_name = sys.argv[1] if len(sys.argv) > 1 else 'Catalog_Контрагенты'
 
-engine = create_engine(os.environ['ONECDC_DB_URL'], pool_size=5)
+# Непрерывно работают две отметки живости и сама выгрузка — это pool_size. Остальное (таблица
+# ключей, страницы) идёт через overflow: такие соединения закрываются сразу, как отработали.
+engine = create_engine(os.environ['ONECDC_DB_URL'],
+                       pool_size=3, max_overflow=2, pool_pre_ping=True)
 
 user = os.environ.get('ONECDC_ODATA_USER')
 rep = Replicator(

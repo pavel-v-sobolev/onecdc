@@ -87,3 +87,15 @@ def test_examples_do_not_mention_the_temp_schema(name):
     только сбивает с толку: настраивать там нечего.
     """
     assert "temp_schema" not in (EXAMPLES / name).read_text()
+
+
+@pytest.mark.parametrize("name", ["full_load_once.py", "replicate_forever.py"])
+def test_examples_set_their_connection_ceiling_themselves(name):
+    """
+    Потолок — сумма pool_size и max_overflow, и по умолчанию она на десять больше, чем кажется.
+    Оставить max_overflow неявным значит показать читателю неверное число.
+    """
+    source = (EXAMPLES / name).read_text()
+
+    assert "max_overflow=2" in source
+    assert "pool_pre_ping=True" in source

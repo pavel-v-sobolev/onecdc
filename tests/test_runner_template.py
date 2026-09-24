@@ -60,7 +60,8 @@ def test_the_template_as_shipped_runs_one_loop(db, monkeypatch):
     namespace, pool = _run(RUNNER.read_text(), monkeypatch)
 
     assert pool.call_args.kwargs["max_workers"] == 1, 'как есть в пуле только репликатор'
-    assert namespace["engine"].pool.size() == 2 + 3, 'воркеры выгрузки + соединения репликатора'
+    engine_pool = namespace["engine"].pool
+    assert engine_pool.size() + engine_pool._max_overflow == 2 + 3, 'воркеры выгрузки + постоянные'
     namespace["replicator"].close()
 
 
@@ -75,7 +76,9 @@ def test_uncommenting_the_examples_is_enough(db, monkeypatch):
 
     assert len(namespace["HANDLERS"]) == 2 and len(namespace["CRON_JOBS"]) == 2
     assert pool.call_args.kwargs["max_workers"] == 5, 'репликатор + два обработчика + два расписания'
-    assert namespace["engine"].pool.size() == 2 + 3 + 4, 'и по соединению на каждый свой поток'
+    engine_pool = namespace["engine"].pool
+    assert engine_pool.size() + engine_pool._max_overflow == 2 + 3 + 4, \
+        'и по соединению на каждый свой поток'
     for runnable in namespace["RUNNABLES"]:
         owner = getattr(runnable, "__self__", None)
         if owner is not None and hasattr(owner, "close"):
@@ -109,7 +112,8 @@ def test_the_environment_variables_compose_offers_are_honoured(db, monkeypatch):
 
     import logging
     assert namespace["replicator"]._full_load_workers == 4
-    assert namespace["engine"].pool.size() == 4 + 3
+    engine_pool = namespace["engine"].pool
+    assert engine_pool.size() + engine_pool._max_overflow == 4 + 3
     assert namespace["RUNNABLES"][0].keywords == {"interval": 15.0}
     assert logging.getLogger("onecdc").level == logging.WARNING
     assert namespace["replicator"]._odata_auth is not None
@@ -134,3 +138,23 @@ def test_the_template_does_not_pretend_to_read_the_mode():
     source = RUNNER.read_text()
     assert not re.search(r'environ.*ONECDC_MODE', source)
     assert "ONECDC_MODE этот файл НЕ читает" in source
+
+
+def test_the_connection_ceiling_is_set_by_us_and_not_inherited(db, monkeypatch):
+    """
+    Потолок — это СУММА pool_size и max_overflow, и по умолчанию он на десять больше, чем
+    кажется: pool_size=5 на деле удерживает 15 (измерено). Три контейнера дают 45 соединений
+    против лимита сервера, и ни одной ошибки до самого упора (CDC-40).
+
+    Деление между частями тоже не случайно: постоянно держим только то, что работает непрерывно,
+    остальное берём через overflow — такие соединения закрываются сразу, как отработали.
+    """
+    _env(monkeypatch, db)
+
+    namespace, _ = _run(RUNNER.read_text(), monkeypatch)
+
+    pool = namespace["engine"].pool
+    assert pool.size() == 3, 'постоянная часть — цикл изменений и две отметки живости'
+    assert pool.size() + pool._max_overflow == 2 + 3, 'потолок: воркеры выгрузки сверх постоянных'
+    assert pool._pre_ping is True, 'соединение после простоя уже закрыто сервером'
+    namespace["replicator"].close()

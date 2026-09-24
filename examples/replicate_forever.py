@@ -32,9 +32,10 @@ from onecdc import Replicator
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 
-# Соединения одновременно держат цикл изменений, страницы фоновых полных выгрузок (их два потока)
-# и две отметки живости — отсюда пять.
-engine = create_engine(os.environ['ONECDC_DB_URL'], pool_size=5)
+# Непрерывно работают цикл изменений и две отметки живости — это pool_size. Страницы фоновых
+# полных выгрузок (два потока) идут через overflow: нужны редко, и висеть простаивая им незачем.
+engine = create_engine(os.environ['ONECDC_DB_URL'],
+                       pool_size=3, max_overflow=2, pool_pre_ping=True)
 
 user = os.environ.get('ONECDC_ODATA_USER')
 rep = Replicator(

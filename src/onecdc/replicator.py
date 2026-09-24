@@ -642,7 +642,7 @@ class Replicator:
         # заслон только один и только в БД — множество в памяти их бы не развело.
         self._full_load_claim = FullLoadClaim(
             engine, lambda: self.metadata.objects_table,
-            owner=instance_owner(exchange_name))
+            owner=instance_owner(self._owner_label))
         # Субконто регистра бухгалтерии: по умолчанию НЕ читаем (см. DataReader._fill_subconto).
         self._read_subconto = read_subconto
         # {объект: сколько циклов подряд не разбирается} — см. _package_is_blocked.
