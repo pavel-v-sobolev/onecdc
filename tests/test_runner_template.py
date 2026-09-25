@@ -154,7 +154,7 @@ def test_the_connection_ceiling_is_set_by_us_and_not_inherited(db, monkeypatch):
     namespace, _ = _run(RUNNER.read_text(), monkeypatch)
 
     pool = namespace["engine"].pool
-    assert pool.size() == 3, 'постоянная часть — цикл изменений и две отметки живости'
+    assert pool.size() == 3, 'постоянная часть — цикл изменений и запас на его запросы'
     assert pool.size() + pool._max_overflow == 2 + 3, 'потолок: воркеры выгрузки сверх постоянных'
     assert pool._pre_ping is True, 'соединение после простоя уже закрыто сервером'
     namespace["replicator"].close()

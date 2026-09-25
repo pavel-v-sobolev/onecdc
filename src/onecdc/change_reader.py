@@ -1,3 +1,11 @@
+"""
+Чтение изменений узла обмена 1С: SelectChanges и NotifyChangesReceived.
+
+Наследник DataReader: страницы разбираются тем же кодом, добавлены очередь (узел плана обмена) и
+подтверждение пакета. Подтверждение необратимо — оно удаляет регистрации изменений в самой 1С,
+поэтому зовётся только после успешной записи в БД.
+"""
+
 import requests
 
 import xmltodict
@@ -17,6 +25,14 @@ NOTIFY_TIMEOUT: tuple[float, float] = (30, 30)
 
 
 class ChangeReader(DataReader):
+    """
+    Очередь изменений одного узла плана обмена.
+
+    read_changes() забирает пакет, notify_changes_received() его подтверждает — и это
+    единственный необратимый шаг во всей библиотеке: регистрации изменений после него в 1С
+    больше нет. Поэтому подтверждение отделено от чтения и зовётся только после записи в БД.
+    """
+
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
                  metadata: MetadataReader, odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None, read_subconto: bool = False,

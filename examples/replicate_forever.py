@@ -32,8 +32,9 @@ from onecdc import Replicator
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 
-# Непрерывно работают цикл изменений и две отметки живости — это pool_size. Страницы фоновых
-# полных выгрузок (два потока) идут через overflow: нужны редко, и висеть простаивая им незачем.
+# Непрерывно работает цикл изменений, остальное в pool_size — запас на его попутные запросы.
+# Страницы фоновых полных выгрузок (два потока) идут через overflow: нужны редко, и висеть
+# простаивая им незачем. Отметки живости не отсюда — у них свой маленький пул.
 engine = create_engine(os.environ['ONECDC_DB_URL'],
                        pool_size=3, max_overflow=2, pool_pre_ping=True)
 

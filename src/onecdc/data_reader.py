@@ -1,3 +1,12 @@
+"""
+Чтение данных объекта 1С через OData: DataReader и DataObject.
+
+DataReader ходит в 1С за страницами и разбирает ответ; DataObject — прочитанное, колонками, вместе
+с табличными частями. Отсюда же читаются субконто регистра бухгалтерии и границы периода.
+
+Чтение ИЗМЕНЕНИЙ — это наследник, ChangeReader.
+"""
+
 from __future__ import annotations
 
 import requests
@@ -162,10 +171,10 @@ EMPTY_UUID = uuid.UUID(int=0)
 
 def _odata_literal(value: Any, type_name: str) -> str:
     """
-    OData-литерал значения по типу поля (курсор по периоду, перепроверка кандидатов на пометку,
-    фильтр по дате): Guid → guid'…', DateTime → datetime'…',
-    числа — как есть, Boolean → true/false, остальное (String и пр.) — строка в кавычках (кавычка
-    внутри экранируется удвоением). value приходит уже сконвертированным (_convert_value): UUID/datetime.
+    OData-литерал значения по типу поля (курсор по периоду, фильтр по дате): Guid → guid'…',
+    DateTime → datetime'…', числа — как есть, Boolean → true/false, остальное (String и пр.) —
+    строка в кавычках, кавычка внутри удваивается. value приходит уже сконвертированным
+    (_convert_value): UUID/datetime.
     """
     if type_name == 'Guid':
         return f"guid'{value}'"
@@ -195,6 +204,13 @@ def _odata_string_literal(value: str) -> str:
 
 
 class DataObject(UserDict):
+    """
+    Прочитанное из 1С, разложенное по колонкам: {поле: [значения]} плюс табличные части.
+
+    Колонками, а не записями, потому что так это и уходит в dbmerge, и потому что поле,
+    встретившееся в середине страницы, дописывается всем предыдущим записям одним NULL-списком.
+    """
+
     def __init__(self, metadata_obj=None, records: list = []):
         super().__init__()
         self.metadata_obj = metadata_obj  # MetadataObject
@@ -355,6 +371,14 @@ def _composite_reference_fields(raw: dict, metadata_obj) -> set:
 
 
 class DataReader(UserDict):
+    """
+    Читает объект 1С через OData: страницами, с отбором по периоду и по ключам.
+
+    Прочитанное складывается в DataObject — и в сам ридер по имени объекта, поэтому он UserDict.
+    Экземпляр живёт столько же, сколько прогон: в нём копятся карта видов субконто и пометки
+    «об этом уже предупреждали», и за границы прогона им незачем.
+    """
+
     def __init__(self, odata_url: str, metadata: MetadataReader,
                  odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None,

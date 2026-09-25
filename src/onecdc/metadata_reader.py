@@ -1,3 +1,14 @@
+"""
+Метаданные 1С ($metadata) и реестр объектов в БД.
+
+MetadataReader читает состав объектов и их полей, раздаёт имена колонок через NameMapper и ведёт
+таблицу onecdc_metadata_objects: что за объект, когда выгружался целиком, кто выгружает его
+сейчас, заказана ли выгрузка. MetadataObject — описание одного объекта: поля, первичный ключ,
+измерения/ресурсы/реквизиты регистра.
+
+В конструкторе сеть не трогается: недоступная на старте 1С не должна ронять процесс.
+"""
+
 import requests
 import threading
 from typing import Any
@@ -204,6 +215,8 @@ def _classify_register_fields(base_name: str, properties: dict, complextypes: di
 
 
 class MetadataObject(UserDict):
+    """Описание одного объекта 1С: поля и их типы, первичный ключ, состав полей регистра."""
+
     def __init__(self, name, properties, primary_key, object_key=None,
                  dimensions=None, resources=None, attributes=None, is_table_part = False):
         super().__init__(properties)
@@ -228,6 +241,14 @@ class MetadataObject(UserDict):
 
 
 class MetadataReader(UserDict):
+    """
+    Состав опубликованных объектов 1С и их состояние в БД.
+
+    Читает $metadata, раздаёт имена колонок через NameMapper и ведёт таблицу
+    onecdc_metadata_objects: когда объект выгружался целиком, кто выгружает его сейчас, заказана
+    ли выгрузка. Объекты лежат в самом ридере по полному имени, поэтому он UserDict.
+    """
+
     def __init__(self, odata_url:str, odata_auth: tuple[str, str] | None = None,
                  request_timeout: float | None = None,
                  engine: Engine | None = None, schema: str | None = None,

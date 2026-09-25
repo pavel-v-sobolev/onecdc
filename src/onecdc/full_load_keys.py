@@ -232,7 +232,7 @@ class FullLoadKeys:
 
     def _conditions(self, target: Table, started_at, mark_field: str, scope) -> list:
         """Условия отбора кандидатов — одни и те же у missing_rows и mark_missing: разойдись они,
-        перепроверенный список и то, что реально помечается, описывали бы разные множества."""
+        показанный список и то, что реально помечается, описывали бы разные множества."""
         conditions = [self._older_than_run(target, started_at),
                       not_(target.c[mark_field].is_(True)),
                       self._not_seen(target)]

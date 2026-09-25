@@ -48,6 +48,9 @@ services:
       ONECDC_MODE: "loop"
       # DEBUG / INFO (по умолчанию) / WARNING / ERROR / CRITICAL.
       ONECDC_LOG_LEVEL: "INFO"
+      # Сколько суток держать журнал загрузок onecdc_replicator_log (по умолчанию 30). Строка на
+      # объект на пакет — это миллионы строк в год. 0 — хранить всё, уборка тогда ваша.
+      ONECDC_LOG_RETENTION_DAYS: "30"
       # Путь к своему runner.py, если он назван иначе (по умолчанию /config/runner.py).
       # ONECDC_RUNNER: "/config/runner_cron.py"
       # Часовой пояс: расписания FullLoadCron считаются в локальном времени, а в контейнере это UTC.

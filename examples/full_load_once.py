@@ -22,8 +22,9 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(messag
 
 object_name = sys.argv[1] if len(sys.argv) > 1 else 'Catalog_Контрагенты'
 
-# Непрерывно работают две отметки живости и сама выгрузка — это pool_size. Остальное (таблица
-# ключей, страницы) идёт через overflow: такие соединения закрываются сразу, как отработали.
+# pool_size — то, что работает всё время выгрузки; страницы и таблица ключей идут через overflow:
+# такие соединения закрываются сразу, как отработали. Отметки живости сюда не входят — у них свой
+# маленький пул, чтобы страницы их не обесточили.
 engine = create_engine(os.environ['ONECDC_DB_URL'],
                        pool_size=3, max_overflow=2, pool_pre_ping=True)
 

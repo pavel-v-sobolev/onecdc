@@ -11,10 +11,10 @@
   </picture>
 </p>
 
-**OneCDC** is a docker container and a Python library, that provides **1C** system data loading to data warehouse using Change Data Capture apporach. \
+**OneCDC** is a docker container and a Python library, that provides **1C** system data loading to data warehouse using Change Data Capture approach. \
 It engages standard ODATA mechanism and standard 1C exchange plan mechanism to extract data from 1C system and upsert changes to the target DB.
 
-**OneCDC** — это докер контейнер и python-библиотека, предназначенные для получения данных из **1С**, использующий подход CDC (загрузка изменений данных). \
+**OneCDC** — это докер контейнер и python-библиотека, предназначенные для получения данных из **1С** подходом CDC (загрузка изменений данных). \
 Продукт использует стандартный интерфейс **ODATA** и механизм **планов обмена** для выгрузки изменений данных из системы 1С и обновления данных в целевой БД.
 
 # Общий принцип действия
@@ -71,9 +71,15 @@ pip install onecdc
 from sqlalchemy import create_engine
 from onecdc import Replicator
 
-# pool_size >= full_load_workers + 3 (+1 на каждого обработчика и каждое расписание) —
-# почему столько, см. README_DB.md, «Сколько нужно соединений к БД»
-engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/onecdc", pool_size=5)
+# Потолок соединений — это СУММА pool_size и max_overflow, и задавать надо обе части: по
+# умолчанию max_overflow=10, то есть один pool_size=5 на деле удерживает 15 соединений.
+# В pool_size — то, что работает непрерывно (цикл изменений); страницы полной выгрузки,
+# обработчики и расписания идут через overflow — такое соединение закрывается сразу, как
+# отработало. См. README_DB.md, «Сколько нужно соединений к БД».
+engine = create_engine("postgresql+psycopg2://user:pass@localhost:5432/onecdc",
+                       pool_size=3,
+                       max_overflow=2,          # + по одному на обработчика и на расписание
+                       pool_pre_ping=True)      # соединение после ночного простоя сервер уже закрыл
 
 rep = Replicator(
     odata_url="http://host/base/odata/standard.odata",
@@ -85,6 +91,7 @@ rep = Replicator(
     request_timeout=60,                    # таймаут HTTP-запросов к 1С, сек (по умолчанию 60 на коннект, 900 на ответ)
     full_load_workers=2,                   # число фоновых потоков полной выгрузки
     automatic_full_load=True,              # ставить новые объекты на полную выгрузку самому
+    log_retention_days=30,                 # срок хранения журнала загрузок; 0 — хранить всё
 )
 
 rep.run_forever(interval=60)               # цикл опроса раз в 60 секунд
@@ -126,7 +133,7 @@ docker run --rm --network host \
 ## Запуск из окружения
 
 Если хочется не писать код вовсе, есть готовый entrypoint — `python -m onecdc` (он же команда
-`onecdc`). Он читает те же параметры из переменных окружения, см описание: [README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md)
+`onecdc`). Он читает те же параметры из переменных окружения, см. описание: [README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md)
 
 
 
@@ -200,11 +207,15 @@ rep.run_forever(interval=60)   # основной режим работы. бе�
 (`merged_on`, `inserted_on`, `is_deleted_or_empty`, `exchange_message_no`). Схемы, таблицы и новые
 колонки библиотека создаёт сама. Рядом появляются служебные таблицы, по которым видно состояние
 загрузки: журнал `onecdc_replicator_log`, реестр объектов `onecdc_metadata_objects`, состояние обработчиков
-`onecdc_handlers`, реестр незавершённых записей `onecdc_writes_in_process` и закреплённые имена
-таблиц и колонок `onecdc_name_claims`.
+`onecdc_handlers`, реестр незавершённых записей `onecdc_writes_in_process`, закреплённые имена
+таблиц и колонок `onecdc_name_claims` и читателей узлов обмена `onecdc_exchange_nodes`.
+
+Журнал загрузок растёт быстро — строка на объект на пакет, то есть миллионы строк в год, — поэтому
+у него есть срок хранения: `log_retention_days` (по умолчанию 30 суток, `0` — хранить всё). Уборка
+идёт сама, раз в сутки на процесс.
 
 Подробно — [README_DB.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_DB.md): состав полей, что означает `is_deleted_or_empty`, зачем
-отдельная схема промежуточных таблиц и что лежит в каждой служебной таблице.
+отдельная схема под таблицы ключей полной выгрузки и что лежит в каждой служебной таблице.
 
 ## Если в 1С поменяли тип поля
 
@@ -326,8 +337,9 @@ DDL можно прописать прямо в обработчике (`setup`)
   [dbmerge](https://github.com/pavel-v-sobolev/dbmerge): `source_condition` говорит, какие ключи
   взять из источника, `delete_condition` — в каком множестве ключей чистить строки, если что-то
   удалилось. `delete_condition` нужен не всегда: строки, выпавшие из набора движений или
-  табличной части, репликатор не удаляет, а помечает (см. «Шум со стороны 1С» и `is_deleted_or_empty`),
-  поэтому витрине с тем же ключом, что у источника, достаточно обычного обновления. Удаление
+  табличной части, репликатор не удаляет, а помечает флагом `is_deleted_or_empty` (см.
+  [README_DB.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_DB.md)), поэтому
+  витрине с тем же ключом, что у источника, достаточно обычного обновления. Удаление
   нужно там, где ключ витрины свой, — например, у агрегата по `GROUP BY`.
 
 В примерах разобраны два варианта — с кодом и подробными пояснениями:

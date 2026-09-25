@@ -67,14 +67,12 @@ python -m onecdc     # то же самое
 `dbmerge` заводит её настоящей `TEMPORARY` (подробнее в [README_DB.md](README_DB.md)).
 
 `ONECDC_FULL_LOAD_WORKERS` влияет и на пул соединений: entrypoint заводит `create_engine` с
-`pool_size = ONECDC_FULL_LOAD_WORKERS + 3` — соединение одновременно держат цикл изменений, два
-потока отметки живости (незавершённых merge и захвата полной выгрузки) и страницы полной выгрузки
-(подробнее — [README_DB.md](README_DB.md), раздел «Сколько нужно соединений к БД»).
+`pool_size=3, max_overflow=ONECDC_FULL_LOAD_WORKERS` — соединение держат цикл изменений и страницы
+полной выгрузки (подробнее — [README_DB.md](README_DB.md), «Сколько нужно соединений к БД»).
 
-Смонтированный `runner.py` читает те же `ONECDC_FULL_LOAD_WORKERS`, `ONECDC_POLL_INTERVAL`,
-`ONECDC_LOG_LEVEL`, `ONECDC_LOG_RETENTION_DAYS` и `ONECDC_AUTOMATIC_FULL_LOAD`, а пул считает от числа своих обработчиков и
-расписаний. Не читает он только `ONECDC_MODE`: что и как запускать, решает он сам — он и есть
-режим.
+Смонтированный `runner.py` читает те же переменные, кроме `ONECDC_MODE`: что и как запускать,
+решает он сам — он и есть режим. (`ONECDC_RUNNER` читает тоже не он, а контейнер — чтобы его
+найти.) Пул он считает от числа своих обработчиков и расписаний.
 
 `ONECDC_AUTOMATIC_FULL_LOAD=false` отключает только ЗАКАЗ выгрузки — привычку помечать новый
 объект пакета как требующий полной. Объект, помеченный руками в `onecdc_metadata_objects`,
