@@ -89,6 +89,9 @@ CRON_JOBS = [
 FULL_LOAD_WORKERS = int(os.environ.get("ONECDC_FULL_LOAD_WORKERS", "2"))
 POLL_INTERVAL = float(os.environ.get("ONECDC_POLL_INTERVAL", "60"))
 LOG_LEVEL = os.environ.get("ONECDC_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+# Сколько суток держать журнал загрузок (строка на объект на пакет — это миллионы строк в год).
+# 0 — хранить всё, уборка тогда ваша.
+LOG_RETENTION_DAYS = int(os.environ.get("ONECDC_LOG_RETENTION_DAYS", "30"))
 # Объект, впервые пришедший в пакете изменений, репликатор сам ставит на полную выгрузку — иначе в
 # БД попадёт только то, что менялось после подключения. Выключают, если первую загрузку вы
 # инициируете сами: регистрацией всех изменений на стороне 1С (обработка onecdc.epf) или
@@ -145,6 +148,7 @@ replicator = Replicator(
     db_temp_schema=DB_TEMP_SCHEMA,
     full_load_workers=FULL_LOAD_WORKERS,
     automatic_full_load=AUTOMATIC_FULL_LOAD,
+    log_retention_days=LOG_RETENTION_DAYS,
 )
 
 # Уровень — после конструктора: он вешает обработчик на логгер onecdc (по умолчанию INFO), а тут

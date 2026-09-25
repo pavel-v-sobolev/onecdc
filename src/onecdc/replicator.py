@@ -25,7 +25,8 @@ from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
                                     OWNER_FIELD, FullLoadClaim)
 from onecdc.name_mapper import NameMapper
 from onecdc.db_writer import DBWriter, save_order_key
-from onecdc.db_logs import (LOAD_TYPE_CHANGES, LOAD_TYPE_FULL, NODE_HEARTBEAT_FIELD,
+from onecdc.db_logs import (DEFAULT_LOG_RETENTION_DAYS, LOAD_TYPE_CHANGES, LOAD_TYPE_FULL,
+                            NODE_HEARTBEAT_FIELD,
                             NODE_KEY_FIELD, NODE_OWNER_FIELD, ReplicatorLog, _check_db_schema,
                             align_merge_timestamps,
                             create_table_if_absent,
@@ -321,6 +322,21 @@ def _check_db_connection(engine: Engine) -> Engine:
     return engine
 
 
+def _check_log_retention_days(days) -> int:
+    """
+    Сколько суток держать журнал загрузок. 0 — не убирать вовсе.
+
+    Отрицательное значение молча снесло бы журнал целиком (cutoff уехал бы в будущее), а дробное
+    выглядит как попытка задать часы — и то, и другое лучше поймать на старте.
+    """
+    if isinstance(days, bool) or not isinstance(days, int):
+        raise ValueError(f"log_retention_days must be a whole number of days, 0 to keep "
+                         f"everything (got {days!r})")
+    if days < 0:
+        raise ValueError(f"log_retention_days must not be negative (got {days})")
+    return days
+
+
 def _check_full_load_workers(full_load_workers) -> int:
     """Число потоков полной выгрузки: >= 1 (0 остановил бы выгрузку молча)."""
     if isinstance(full_load_workers, bool) or not isinstance(full_load_workers, int):
@@ -569,6 +585,8 @@ class Replicator:
                  db_temp_schema: str | None = None,
                  request_timeout: float | None = None,
                  full_load_workers: int = 2,
+                 # Сколько дней держать журнал загрузок. 0 — хранить всё (тогда уборка ваша).
+                 log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
                  automatic_full_load: bool = True,
                  read_subconto: bool = False,
                  max_response_bytes: int | None = MAX_RESPONSE_BYTES):
@@ -679,7 +697,9 @@ class Replicator:
                                request_full_load=self._request_full_load)
         # Лог загрузки (строка на объект) пишет оркестратор: только здесь есть контекст обмена
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
-        self.onecdc_replicator_log = ReplicatorLog(self.engine, self.db_schema)
+        self.onecdc_replicator_log = ReplicatorLog(
+            self.engine, self.db_schema,
+            retention_days=_check_log_retention_days(log_retention_days))
 
         # Сигналы обработчикам идут через handlers, а не через объекты: репликатору не нужны
         # ни их код, ни общий с ними процесс (см. HandlerSignals).

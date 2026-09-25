@@ -14,7 +14,7 @@ from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, COMPOSITE_GUID_SUF
                                     ENTITY_TYPES, EXT_DIMENSIONS_FIELDS, REGISTER_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, resolve_timeout)
 from onecdc.name_mapper import NameMapper
-from onecdc.common_functions import (format_bytes, is_entity_absent, odata_auth_header,
+from onecdc.common_functions import (format_bytes, odata_auth_header,
                                      odata_datetime_value, read_within_limit,
                                      parse_object_full_name, parse_odata, raise_for_status)
 from onecdc.logging_config import get_logger
@@ -763,21 +763,37 @@ class DataReader(UserDict):
         self._ext_dimension_kinds[object_name] = names
 
     def _find_ext_dimension_chart(self, kind_key: str) -> str | None:
-        """Какой план видов характеристик содержит этот вид субконто. None — ни один."""
+        """
+        Какой план видов характеристик содержит этот вид субконто. None — ни один.
+
+        Спрашиваем ОТБОРОМ, а не прямым адресом. Прямой адрес отвечает на «нет такого» кодом 404,
+        и это была ловушка: тот же 404 отдаёт веб-сервер перед 1С, а отличить их можно только
+        по телу — которое IIS подменяет. Измерено на демо бухгалтерии: 404 от
+        прямого адреса приходит с html-страницей IIS, распознать его как ответ 1С нельзя, и поиск
+        падал на первом же плане, который ответил «нет». Работало это лишь по случайности —
+        нужный план стоял в алфавитном порядке первым из двенадцати.
+
+        У отбора такого вопроса не возникает вовсе: 200 и пустая коллекция (проверено там же).
+
+        План, ответивший ошибкой (403 — нет прав на чужой план учёта), пропускаем с
+        предупреждением. Отказ в правах на один план не повод ронять чтение всего регистра: не
+        найдём нужный — останемся с GUID-ключами, а это описанный штатный режим.
+        """
         for chart_name in self.metadata:
             if not chart_name.startswith(CHART_OF_CHARACTERISTIC_TYPES):
                 continue
-            path = quote(f"{chart_name}(guid'{kind_key}')", safe="/()='")
-            response = requests.get(f'{self.odata_url}/{path}?$select=Ref_Key',
-                                    auth=self.odata_auth,
+            query = f"?$filter=Ref_Key eq guid'{kind_key}'&$select=Ref_Key&$top=1"
+            url = f'{self.odata_url}/{quote(chart_name)}{query}'
+            response = requests.get(url, auth=self.odata_auth,
                                     timeout=resolve_timeout(self.request_timeout))
-            # Отсутствие элемента 1С сообщает честным 404 — это ответ, а не ошибка. Но только
-            # если отвечала 1С: такой же 404 отдаёт веб-сервер перед ней (см. is_entity_absent),
-            # и тогда мы молча пропустили бы все планы и остались без видов субконто.
-            if response.status_code == 404 and is_entity_absent(response):
+            if not response.ok:
+                logger.warning('Cannot look for ext dimension kinds in %s: %s %s — skipping this '
+                               'chart', chart_name, response.status_code, response.reason)
                 continue
-            raise_for_status(response, f'read {path}')
-            return chart_name
+            entries = (parse_odata(response.text, 'feed', f'read {chart_name}{query}',
+                                   force_list=('entry',)) or {}).get('entry') or []
+            if entries:
+                return chart_name
         return None
 
     def _read_ext_dimension_kinds(self, chart_name: str) -> dict[str, str]:

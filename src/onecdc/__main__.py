@@ -21,6 +21,7 @@ import requests
 from sqlalchemy import create_engine
 
 from onecdc.replicator import Replicator
+from onecdc.db_logs import DEFAULT_LOG_RETENTION_DAYS
 
 
 def _required(name: str) -> str:
@@ -71,6 +72,8 @@ def main() -> None:
     odata_user = os.environ.get("ONECDC_ODATA_USER")
     odata_url = _required("ONECDC_ODATA_URL")
     full_load_workers = _number("ONECDC_FULL_LOAD_WORKERS", "2", int)
+    # Сколько суток держать журнал загрузок; 0 — хранить всё.
+    log_retention_days = _number("ONECDC_LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS), int)
     automatic_full_load = _flag("ONECDC_AUTOMATIC_FULL_LOAD", True)
 
     mode = os.environ.get("ONECDC_MODE", "loop")
@@ -108,6 +111,7 @@ def main() -> None:
             # Схема промежуточных таблиц dbmerge; не задана — та же, что у данных.
             db_temp_schema=os.environ.get("ONECDC_DB_TEMP_SCHEMA"),
             full_load_workers=full_load_workers,
+            log_retention_days=log_retention_days,
             # Новый объект в пакете сам встаёт на полную выгрузку. Выключают тем, кто инициирует
             # первую загрузку на стороне 1С или назначает её расписанием.
             automatic_full_load=automatic_full_load,

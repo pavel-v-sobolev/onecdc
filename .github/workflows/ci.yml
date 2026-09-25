@@ -35,7 +35,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --extra dev
+      # --locked: расхождение с uv.lock — отказ сборки, а не тихий пересчёт зависимостей.
+      # Без него lock-файл лежит в репозитории, ничего не гарантируя: матрица тестов собиралась
+      # бы каждый раз из «последних» версий.
+      - run: uv sync --extra dev --locked
       # Тесты, которым нужна живая 1С, помечены integration и отсеиваются addopts из pyproject.
       # Postgres нужен всем остальным — его и поднимает services выше.
       - run: uv run pytest -q

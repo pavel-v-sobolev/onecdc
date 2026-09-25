@@ -112,18 +112,21 @@ def reader(monkeypatch):
 
     import onecdc.data_reader as module
 
-    # Ответы плана видов характеристик: None — плана нет вовсе (прямой адрес отдаёт 404,
-    # как это делает 1С для отсутствующего элемента), иначе {Ref_Key: PredefinedDataName}.
+    # Ответы плана видов характеристик: None — вида субконто в этом плане нет, иначе
+    # {Ref_Key: PredefinedDataName}.
     obj.chart_names = None
+    # Код ответа плана, если он отвечает не данными: 403 — нет прав на чужой план учёта.
+    obj.chart_error = None
 
     def fake_get(url, **kwargs):
         obj.requested_urls.append(url)
         if CHART in unquote(url):
-            if obj.chart_names is None:
-                return _Response('Экземпляр сущности не найден', 404)
-            if '$select' in url and 'guid' not in url:
-                return _Response(_chart_feed(obj.chart_names))
-            return _Response('<entry/>')          # проба прямым адресом: элемент есть
+            # Поиск плана идёт ОТБОРОМ, а не прямым адресом: и на поиск ($filter), и на чтение
+            # плана ответ — feed. «Вида здесь нет» — это 200 и пустая коллекция, а не 404,
+            # неотличимый от отказа веб-сервера (CDC-42).
+            if obj.chart_error is not None:
+                return _Response('<html>403</html>', obj.chart_error)
+            return _Response(_chart_feed(obj.chart_names or {}))
         if obj.response_queue:
             status, text = obj.response_queue.pop(0)
             return _Response(text, status)
@@ -299,7 +302,7 @@ def test_chart_is_read_once_per_process(reader):
     _read_with_subconto(reader, times=2)
 
     chart_calls = [u for u in reader.requested_urls if CHART in unquote(u)]
-    assert len(chart_calls) == 2, 'проба адресом + чтение плана, и только на первом чтении'
+    assert len(chart_calls) == 2, 'поиск отбором + чтение плана, и только на первом чтении'
 
 
 # --- Субконто как опция ---
@@ -377,3 +380,36 @@ def test_an_empty_numeric_of_a_record_set_becomes_zero(reader):
     reader.read_object(REG, key_fields=["Recorder"])
 
     assert reader[REG].data["KolichestvoDr"] == [0]
+
+
+def test_a_chart_that_refuses_is_skipped_instead_of_killing_the_read(reader, caplog):
+    """
+    Прав на чужой план учёта может не быть, и его 403 — не повод ронять чтение всего регистра:
+    не найдём нужный план, останемся с GUID-ключами, а это описанный штатный режим.
+
+    Раньше любой код, кроме 404, уходил в raise_for_status и валил страницу или пакет — причём
+    на каждом прогоне, пока карта не построена.
+    """
+    reader.chart_error = 403
+
+    with caplog.at_level(logging.WARNING):
+        _read_with_subconto(reader)
+
+    assert list(reader[REG].data[EXT_DIMENSIONS_FIELDS['Dr']][0]) == [KIND_1], 'данные прочитаны'
+    assert 'skipping this chart' in caplog.text
+    assert 'JSON keys stay GUIDs' in caplog.text
+
+
+def test_the_chart_is_looked_up_by_filter_not_by_direct_address(reader):
+    """
+    Прямой адрес отвечает на «нет такого» кодом 404, и отличить его от 404 веб-сервера можно
+    только по телу — которое IIS подменяет (измерено на демо бухгалтерии). У отбора такого
+    вопроса нет: 200 и пустая коллекция.
+    """
+    reader.chart_names = {KIND_1: "StatiZatrat"}
+
+    _read_with_subconto(reader)
+
+    lookup = next(unquote(u) for u in reader.requested_urls if CHART in unquote(u))
+    assert "$filter=Ref_Key eq guid'" in lookup
+    assert f"{CHART}(guid'" not in lookup, 'прямой адрес больше не используется'

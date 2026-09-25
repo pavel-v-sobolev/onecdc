@@ -9,12 +9,16 @@ description = "Change data capture (CDC) from 1C:Enterprise to your data warehou
 readme = "README.md"
 requires-python = ">=3.10"
 
+# Верхние границы — по мажорной версии. Не перестраховка: onecdc держится на возможностях
+# dbmerge, которых у обычного merge нет (insert_condition, delete_mark_values, added_fields,
+# data_types для служебных колонок), и на поведении SQLAlchemy при разборе типов и пулов.
+# Мажорное обновление любого из них должно приезжать через наши тесты, а не в собранный образ.
 dependencies = [
-    "croniter>=6.0.0",
-    "dbmerge>=1.0.22",
-    "requests>=2.33.0",
-    "sqlalchemy>=2.0.49",
-    "xmltodict>=1.0.4",
+    "croniter>=6.0.0,<7",
+    "dbmerge>=1.0.22,<2",
+    "requests>=2.33.0,<3",
+    "sqlalchemy>=2.0.49,<3",
+    "xmltodict>=1.0.4,<2",
 ]
 
 keywords = [
@@ -49,7 +53,7 @@ classifiers = [
 
 [project.optional-dependencies]
 postgres = [
-    "psycopg2-binary>=2.9.12",
+    "psycopg2-binary>=2.9.12,<3",
 ]
 dev = [
     "pytest>=8",

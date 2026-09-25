@@ -372,39 +372,6 @@ class ODataFormatError(ValueError):
     """
 
 
-# Корень ошибки OData: <error> или <m:error>, с любым префиксом пространства имён.
-_ODATA_ERROR_ROOT = re.compile(r'<\s*(?:[\w.-]+:)?error[\s/>]', re.I)
-# Приметы ответа «такого объекта нет» в теле. Нужны потому, что тело 1С отдаёт не всегда одинаково,
-# а по одному коду 404 её ответ от ответа веб-сервера не отличить. Тот же приём уже применён
-# к 404.15 от IIS (см. replicator._is_query_too_long).
-ENTITY_ABSENT_MARKERS = ('экземпляр сущности не найден', 'entity instance not found')
-
-
-def is_entity_absent(response: requests.Response) -> bool:
-    """
-    404 пришёл ОТ 1С и означает «экземпляра сущности нет», а не отказ инфраструктуры.
-
-    Проверять обязательно. Такой же 404 отдаёт IIS со снятой публикацией, ingress без нужного
-    правила во время обновления, чужой vhost. А вызывают эту проверку там, где «нет» трактуется
-    как ответ: в перепроверке кандидатов на пометку удалёнными. Принять отказ веб-сервера за
-    ответ 1С — значит объявить живые строки удалёнными и погасить их ресурсы; полминуты такого
-    404 дают полминуты ложных удалений подряд.
-
-    Признаётся ответ 1С двумя приметами: корень тела — ошибка OData (<error>/<m:error>, либо
-    JSON-исключение сервера приложений с odata.error), либо в теле есть сама формулировка
-    «экземпляр сущности не найден». Страница веб-сервера не содержит ни того, ни другого.
-    """
-    body = (getattr(response, 'text', '') or '').lstrip('\ufeff').strip()
-    if not body:
-        return False
-    lowered = body.lower()
-    if any(marker in lowered for marker in ENTITY_ABSENT_MARKERS):
-        return True
-    if body.startswith('{'):
-        return 'odata.error' in body
-    return bool(_ODATA_ERROR_ROOT.search(body[:512]))
-
-
 def parse_odata(body: str, root: str, context: str, force_list: tuple = ()) -> Any:
     """
     Разбирает ответ 1С и отдаёт содержимое ожидаемого корня (feed, entry, d:Result).

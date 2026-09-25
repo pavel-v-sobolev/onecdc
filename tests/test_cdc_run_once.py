@@ -7,8 +7,8 @@ dev-Postgres. Параметры подключения берутся из debu
 не списывать изменения из очереди обмена 1С и оставить прогон повторяемым. Проверяет, что
 метаданные читаются с живой 1С и изменения сохраняются в БД без ошибок.
 
-Требует доступной 1С и Postgres (помечен маркером integration — отдельной обработки оффлайна нет,
-без доступа тест упадёт). Запуск:
+Требует доступной 1С и Postgres (помечен маркером integration). Не настроен контур — тест
+пропускается; недоступен сам стенд — падает, и это разные вещи. Запуск:
   - через pytest: `uv run pytest tests/test_cdc_run_once.py`;
   - напрямую, без pytest: `uv run python tests/test_cdc_run_once.py`.
 """
@@ -19,11 +19,15 @@ from sqlalchemy import create_engine, inspect
 from onecdc import Replicator
 
 # Тестовый/dev-контур, не боевой (debug_trade.py лежит рядом и импортируется как обычный модуль).
-from debug_trade import DB_SCHEMA, DB_URL, EXCHANGE_NAME, ODATA_AUTH, ODATA_URL, QUEUE_GUID
+from debug_trade import CONTOUR, DB_SCHEMA, DB_URL, EXCHANGE_NAME, ODATA_AUTH, ODATA_URL, QUEUE_GUID
 
 
 @pytest.mark.integration
 def test_run_once_against_live_1c():
+    # Не настроен контур — пропускаем, а не падаем: маркер integration отсеивает тест ПОСЛЕ
+    # сбора, и «нет настроек» — это не провал проверки, а её отсутствие.
+    if not CONTOUR.is_configured:
+        pytest.skip(CONTOUR.why_not)
 
     repl = Replicator(
         odata_url=ODATA_URL,

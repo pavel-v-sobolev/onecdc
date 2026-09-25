@@ -5,8 +5,8 @@
 Запускается целиком (`python tests/debug.py`) или построчно из-под отладчика: до `main()` идут
 только присваивания, поэтому любой блок можно выполнить отдельно, оставив остальные закомментированными.
 
-Параметры подключения дублируются в live-тестах (test_cdc_run_once.py, test_run_forever_live.py) —
-меняя их здесь, поменяйте и там.
+Параметры стенда лежат в tests/<контур>.env рядом и берутся оттуда же живыми тестами — менять их
+в одном месте достаточно.
 """
 
 import logging
@@ -14,17 +14,23 @@ import logging
 from sqlalchemy import create_engine
 
 from onecdc import ChangeReader, DBWriter, MetadataReader, NameMapper, Replicator
+from debug_config import contour
 
-ODATA_URL = "http://192.168.56.101/trade_demo/odata/standard.odata"
-ODATA_AUTH = ('odata_user', 'secret')
-EXCHANGE_NAME = 'ДляODATA'
-QUEUE_GUID = 'a9bc23c5-3689-11f1-926c-0800270bc6cb'
-DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc"
-DB_SCHEMA = 'onecdc_trade_demo'
+# Настройки стенда — в tests/trade_demo1.env рядом (в репозитории; своё — в
+# tests/trade_demo1.local.env или в переменных окружения, см. debug_config).
+CONTOUR = contour('trade_demo1')
+ODATA_URL = CONTOUR.odata_url
+ODATA_AUTH = CONTOUR.odata_auth
+EXCHANGE_NAME = CONTOUR.exchange_name
+QUEUE_GUID = CONTOUR.queue_guid
+DB_URL = CONTOUR.db_url
+DB_SCHEMA = CONTOUR.db_schema
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    if not CONTOUR.is_configured:
+        raise SystemExit(CONTOUR.why_not)
     engine = create_engine(DB_URL)
 
     # Компоненты по отдельности — чтобы смотреть промежуточный результат каждого.

@@ -7,9 +7,13 @@ Recorder ответов реальной 1С для оффлайн-тестов 
 
 Использование:
     # один раз — метаданные:
-    uv run python tests/record_1c.py --metadata
+    uv run python tests/record_1c.py --metadata --yes
     # затем на каждый тест-кейс (между запусками руками кидаешь изменения в 1С):
-    uv run python tests/record_1c.py --name data_load_tovary
+    uv run python tests/record_1c.py --name data_load_tovary --yes
+
+Стенд берётся из tests/<контур>.env (по умолчанию trade_demo1), ключ --contour выбирает другой.
+Ключ --yes обязателен: скрипт перезаписывает записанные ответы В РЕПОЗИТОРИИ тем, что отдаст
+указанная 1С.
 
 По умолчанию после записи пакета подтверждает его (NotifyChangesReceived), чтобы очередь обмена
 продвинулась и следующий запуск поймал новый пакет. Флаг --no-notify отключает подтверждение
@@ -22,12 +26,12 @@ from pathlib import Path
 
 import requests
 
-# Дефолты dev-контура (как в tests/test_cdc_run_once.py).
-DEFAULT_ODATA_URL = "http://192.168.56.101/trade_demo/odata/standard.odata"
-DEFAULT_USER = "admin"
-DEFAULT_PASSWORD = "admin"
-DEFAULT_EXCHANGE = "ДляODATA"
-DEFAULT_QUEUE = "a9bc23c5-3689-11f1-926c-0800270bc6cb"
+from debug_config import contour
+
+# Стенд берём из файла контура (tests/<контур>.env, см. debug_config) — здесь литералов нет
+# намеренно: этот скрипт ходит в 1С и ПИШЕТ РЕЗУЛЬТАТ В РЕПОЗИТОРИЙ. Указали не тот контур —
+# и в коммит приезжают куски чужих данных, а вычищать их придётся переписыванием истории.
+DEFAULT_CONTOUR = "trade_demo1"
 DEFAULT_CONFIG_DIR = "tests/responses/trade_demo_8.5"
 METADATA_FILE = "msg001_metadata.xml"
 
@@ -107,21 +111,32 @@ def record_batch(args, config_dir: Path, odata_auth) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Запись ответов 1С для replay-тестов")
     parser.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
-    parser.add_argument("--odata-url", default=DEFAULT_ODATA_URL)
-    parser.add_argument("--user", default=DEFAULT_USER)
-    parser.add_argument("--password", default=DEFAULT_PASSWORD)
-    parser.add_argument("--exchange", default=DEFAULT_EXCHANGE)
-    parser.add_argument("--queue", default=DEFAULT_QUEUE)
+    parser.add_argument("--contour", default=DEFAULT_CONTOUR,
+                        help="имя файла стенда: tests/<контур>.env")
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--metadata", action="store_true", help="записать $metadata (один раз)")
     parser.add_argument("--name", help="описание кейса для записи пакета SelectChanges")
     parser.add_argument("--no-notify", action="store_true",
                         help="не подтверждать пакет (очередь не продвигается)")
+    parser.add_argument("--yes", action="store_true",
+                        help="подтвердить запись в репозиторий из указанного контура")
     args = parser.parse_args()
+
+    settings = contour(args.contour)
+    if not settings.is_configured:
+        parser.error(settings.why_not)
+    # Запускать «на посмотреть» этот скрипт не должно получаться: он перезаписывает записанные
+    # ответы в репозитории тем, что отдаст УКАЗАННАЯ 1С.
+    if not args.yes:
+        parser.error(f"перезапишет {args.config_dir} ответами из {settings.odata_url} — "
+                     f"подтвердите ключом --yes")
+    args.odata_url = settings.odata_url
+    args.exchange = settings.exchange_name
+    args.queue = settings.queue_guid
 
     config_dir = Path(args.config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
-    odata_auth = (args.user, args.password)
+    odata_auth = settings.odata_auth
 
     if args.metadata:
         record_metadata(args, config_dir, odata_auth)

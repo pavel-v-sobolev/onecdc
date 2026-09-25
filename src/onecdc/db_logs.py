@@ -13,14 +13,15 @@
 
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 
 from dbmerge import mergeResult
 
 from sqlalchemy import (Column, DateTime, Engine, Index, Integer, MetaData, String,
-                        Table, func, insert, inspect, text, update, schema, Numeric)
+                        Table, func, insert, inspect, select, text, update, schema, Numeric)
 from sqlalchemy.exc import DatabaseError
 
-from onecdc.common_functions import POSTGRES_MAX_IDENTIFIER
+from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, POSTGRES_MAX_IDENTIFIER
 from onecdc.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -412,17 +413,91 @@ def _onecdc_replicator_log_table(metadata: MetaData, schema_name: str | None) ->
     )
 
 
+# Сколько дней журнала храним по умолчанию. Строка пишется на КАЖДЫЙ объект КАЖДОГО пакета:
+# при опросе раз в минуту и двух десятках объектов это миллион строк в месяц, а миллион строк —
+# 95 МБ (измерено). Журнал нужен для разбора недавнего, а не для истории за годы.
+DEFAULT_LOG_RETENTION_DAYS = 30
+
+# Партия удаления. Целиком такой DELETE держал бы длинную транзакцию и раздувал таблицу; партиями
+# по десять тысяч выходит 254 тысячи строк в секунду (измерено), то есть даже первая уборка на
+# запущенной базе — это десятки секунд.
+_LOG_CLEANUP_BATCH = 10_000
+
+# Как часто процесс возвращается к уборке. Чаще незачем: удалять сутки строк раз в сутки дешевле,
+# чем щупать таблицу каждую минуту.
+_LOG_CLEANUP_PERIOD = 24 * 60 * 60.0
+
+
 class ReplicatorLog:
     """Лог загрузки (onecdc_replicator_log): start() при начале, write_result() накапливает счётчики
     и/или завершает строку (finish=True)."""
 
-    def __init__(self, engine: Engine, schema_name: str | None = None):
+    def __init__(self, engine: Engine, schema_name: str | None = None,
+                 retention_days: int = DEFAULT_LOG_RETENTION_DAYS):
         self.engine = engine
         self.schema_name = _check_create_schema(engine, schema_name)
         self.table = _onecdc_replicator_log_table(MetaData(), self.schema_name)
         create_table_if_absent(engine, self.table)
+        self.retention_days = retention_days
+        # Индекс по времени старта нужен и уборке (по нему она находит старое), и мониторингу:
+        # «что грузилось ночью» на таблице в миллионы строк иначе полный скан.
+        create_index_if_absent(engine, Index(f'ix_{REPLICATOR_LOG}_started_at',
+                                             self.table.c.started_at),
+                               REPLICATOR_LOG, self.schema_name)
+        # Частичный индекс под главный вопрос мониторинга — «что идёт прямо сейчас». Он крошечный:
+        # незавершённых строк в норме единицы, а сканировать ради них миллионы завершённых незачем.
+        create_index_if_absent(engine, Index(f'ix_{REPLICATOR_LOG}_unfinished',
+                                             self.table.c.started_at,
+                                             postgresql_where=self.table.c.finished_at.is_(None)),
+                               REPLICATOR_LOG, self.schema_name)
+        # Уборка сразу: процесс, который ничего не грузит (нет изменений), иначе не убрался бы
+        # никогда. Нечего удалять — это индексный поиск, который ничего не находит.
+        self._next_cleanup_at = 0.0
+        self.cleanup_if_due()
+
+    def cleanup_if_due(self) -> int:
+        """
+        Уборка не чаще раза в сутки на процесс. Зовётся из start(), то есть из того места, где
+        журналом и пользуются: отдельного планировщика ради одного DELETE в сутки заводить незачем,
+        а цикл про уборку знать не обязан.
+
+        Отметку следующего раза ставим ДО работы: упавшая уборка (нет прав, заблокирована таблица)
+        не должна повторяться на каждой записи журнала. И она не вправе уронить саму загрузку —
+        поэтому ошибка только в лог.
+        """
+        if not self.retention_days or time.monotonic() < self._next_cleanup_at:
+            return 0
+        self._next_cleanup_at = time.monotonic() + _LOG_CLEANUP_PERIOD
+        try:
+            return self.cleanup()
+        except DatabaseError:
+            logger.warning("Could not clean up %s, will retry later", REPLICATOR_LOG,
+                           exc_info=True)
+            return 0
+
+    def cleanup(self) -> int:
+        """
+        Удаляет строки старше retention_days. Партиями: целиком такой DELETE держал бы длинную
+        транзакцию и раздувал таблицу, а на запущенной базе это миллионы строк.
+        """
+        cutoff = DB_NOW_WITH_TIMEZONE - timedelta(days=self.retention_days)
+        old_ids = (select(self.table.c.id).where(self.table.c.started_at < cutoff)
+                   .order_by(self.table.c.id).limit(_LOG_CLEANUP_BATCH).scalar_subquery())
+        removed = 0
+        while True:
+            with self.engine.begin() as conn:
+                deleted = conn.execute(
+                    self.table.delete().where(self.table.c.id.in_(old_ids))).rowcount
+            removed += deleted
+            if deleted < _LOG_CLEANUP_BATCH:
+                break
+        if removed:
+            logger.info("Removed %s rows older than %s days from %s", removed,
+                        self.retention_days, REPLICATOR_LOG)
+        return removed
 
     def start(self, exchange: str, obj: str, message_no: int | None, load_type: str) -> int:
+        self.cleanup_if_due()
         # Счётчики стартуют с нуля — их наращивает write_result (col = col + n) по мере сохранений.
         with self.engine.begin() as conn:
             res = conn.execute(insert(self.table).values(

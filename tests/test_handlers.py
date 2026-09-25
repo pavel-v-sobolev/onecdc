@@ -1189,3 +1189,33 @@ def test_the_replicator_signals_a_disabled_handler_too(db):
     _signal(db, "Catalog_X", SOURCE_CHANGES)
 
     assert _state(runner, 'quiet').update_requested_at is not None
+
+
+def test_a_handler_without_backfill_still_gets_the_rows_in_its_window(db):
+    """
+    ON_FULL_LOAD=False отписывает и от пометки исчезнувших строк: она сигналит тем же источником
+    (CDC-45). Потерей это не становится — сигнал здесь будильник, а не носитель события.
+
+    Проверяем именно это: пока обработчик спит, last_run_at не двигается, поэтому окно только
+    растёт, и строки, помеченные за время сна, попадают в него при первом же пробуждении.
+    """
+    spy = Spy(on_full_load=False)
+    rep = _replicator(db)
+    runner = _runner_for(db, spy)
+    runner.run_if_pending()                       # первый прогон: окно закрыто, отметка снята
+    spy.calls.clear()
+    window_start = _last_run_at(runner, spy.name)
+
+    # Пометка исчезнувших строк во время полной выгрузки: сигнал этому обработчику не ставится.
+    _replicator_signal(rep, "Catalog_X", _result(deleted=3), SOURCE_FULL_LOAD)
+    runner.run_if_pending()
+    assert spy.calls == [], 'бэкфилл его не будит — ради этого флаг и выключают'
+    assert _last_run_at(runner, spy.name) == window_start, 'окно не закрылось, оно растёт'
+
+    # Любое живое изменение открывает окно — и помеченные строки лежат внутри него.
+    _replicator_signal(rep, "Catalog_X", _result(updated=1), SOURCE_CHANGES)
+    runner.run_if_pending()
+
+    assert len(spy.calls) == 1
+    assert spy.calls[0].last_run_at == window_start, \
+        'окно начинается там же, где закончилось прошлое — пометка внутри него'

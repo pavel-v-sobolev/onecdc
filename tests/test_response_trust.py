@@ -1,17 +1,15 @@
 """
 Отказ инфраструктуры не должен читаться как «данных нет».
 
-Два разных механизма приводили к одному и тому же — ложным удалениям.
+Любое тело, которое разобралось как XML, но не содержало `feed`, считалось пустым набором. Честное
+«нет данных» от 1С — это feed с нулём entry, а не отсутствие feed. Страница шлюза с кодом 200
+(«Service temporarily unavailable», корректный XHTML) читалась как пустой объект, и полная
+выгрузка помечала удалённым ВСЁ, чего не увидела.
 
-1. Любой 404 считался ответом «объекта нет». Смысл задуман верный: 1С на несуществующий объект
-   отвечает честным 404. Но такой же 404 отдаёт IIS со снятой публикацией, ingress без правила
-   во время обновления, чужой vhost. А вызывается это из перепроверки кандидатов на пометку, где
-   «нет» означает «пометить удалённым» и погасить ресурсы.
-
-2. Любое тело, которое разобралось как XML, но не содержало `feed`, считалось пустым набором.
-   Честное «нет данных» от 1С — это feed с нулём entry, а не отсутствие feed. Страница шлюза
-   с кодом 200 («Service temporarily unavailable», корректный XHTML) читалась как пустой объект,
-   и полная выгрузка помечала удалённым ВСЁ, чего не увидела.
+Второй механизм той же беды — «любой 404 значит, что объекта нет» — из кода ушёл совсем. Его
+проверяла отдельная функция (`is_entity_absent`), но спрашивать «404 от 1С или от веб-сервера»
+стало негде: перепроверка кандидатов убрана в CDC-05, а поиск плана видов субконто переведён на
+$filter, где ответ «нет такого» — это 200 и пустая коллекция (CDC-42).
 """
 
 from pathlib import Path
@@ -22,7 +20,7 @@ from sqlalchemy import text
 
 import fake_1c
 from onecdc import Replicator
-from onecdc.common_functions import ODataFormatError, is_entity_absent, parse_odata
+from onecdc.common_functions import ODataFormatError, parse_odata
 
 from conftest import FakeResponseMixin
 
@@ -41,29 +39,6 @@ class _Response(FakeResponseMixin):
         self.reason = 'OK' if status == 200 else 'Not Found'
         self.ok = status < 400
         self.url = 'http://fake'
-
-
-# --- Кто ответил: 1С или то, что стоит перед ней ---
-
-@pytest.mark.parametrize("body", [
-    ODATA_NOT_FOUND,
-    '<m:error xmlns:m="x"><m:message>Экземпляр сущности не найден</m:message></m:error>',
-    'Экземпляр сущности не найден',                      # тело без разметки
-    '{"odata.error": {"message": "Entity instance not found"}}',
-])
-def test_a_1c_answer_is_recognised(body):
-    assert is_entity_absent(_Response(body, 404))
-
-
-@pytest.mark.parametrize("body", [
-    GATEWAY_PAGE,
-    '<html><head><title>404 - Not Found</title></head><body><h1>404</h1></body></html>',
-    '<!DOCTYPE html><html><body>Nothing matches the given URI.</body></html>',
-    '',                                                  # прокси вообще без тела
-])
-def test_an_infrastructure_404_is_not_an_answer(body):
-    assert not is_entity_absent(_Response(body, 404)), \
-        'отказ инфраструктуры принят за ответ «объекта нет» — это ложные удаления'
 
 
 # --- Структура ответа обязана быть OData ---

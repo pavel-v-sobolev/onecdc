@@ -55,6 +55,7 @@ python -m onecdc     # то же самое
 | `ONECDC_POLL_INTERVAL` | `60` | период опроса изменений, секунд (только в режиме `loop`) |
 | `ONECDC_MODE` | `loop` | `loop` — вечный цикл; `once` — один цикл read → save → notify и выход |
 | `ONECDC_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
+| `ONECDC_LOG_RETENTION_DAYS` | `30` | сколько суток держать журнал загрузок (`onecdc_replicator_log`); `0` — хранить всё |
 | `ONECDC_RUNNER` | `/config/runner.py` | **только в контейнере**: путь к своему runner'у, если он назван иначе |
 
 Про `ONECDC_DB_TEMP_SCHEMA` стоит сказать отдельно: своя схема удобна тем, что в ней по определению
@@ -68,7 +69,7 @@ python -m onecdc     # то же самое
 (подробнее — [README_DB.md](README_DB.md), раздел «Сколько нужно соединений к БД»).
 
 Смонтированный `runner.py` читает те же `ONECDC_FULL_LOAD_WORKERS`, `ONECDC_POLL_INTERVAL`,
-`ONECDC_LOG_LEVEL` и `ONECDC_AUTOMATIC_FULL_LOAD`, а пул считает от числа своих обработчиков и
+`ONECDC_LOG_LEVEL`, `ONECDC_LOG_RETENTION_DAYS` и `ONECDC_AUTOMATIC_FULL_LOAD`, а пул считает от числа своих обработчиков и
 расписаний. Не читает он только `ONECDC_MODE`: что и как запускать, решает он сам — он и есть
 режим.
 
