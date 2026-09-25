@@ -66,8 +66,15 @@ class FullLoadClaim:
     (MetadataReader._sync_objects), то есть позже, чем строится репликатор.
     """
 
-    def __init__(self, engine: Engine, table_provider, owner: str):
+    def __init__(self, engine: Engine, table_provider, owner: str,
+                 heartbeat_engine: Engine | None = None):
         self.engine = engine
+        # Отметку живости шлём ОТДЕЛЬНЫМ пулом (см. lease.lease_engine). Самая частая причина
+        # ложного истечения — не смерть процесса, а то, что потоку отметки не досталось
+        # соединения: страницы выгрузки разобрали пул целиком. Это уже случалось, и здесь цена
+        # выше всего — захват живого процесса достаётся чужому расписанию, и 1С делает ту же
+        # работу дважды. Остальные запросы короткие и редкие, они остаются на общем пуле.
+        self._heartbeat_engine = heartbeat_engine or engine
         self._table_provider = table_provider
         self.owner = owner
         self._lock = threading.Lock()
@@ -216,7 +223,7 @@ class FullLoadClaim:
         table = self.table
         if table is None:
             return
-        with self.engine.begin() as conn:
+        with self._heartbeat_engine.begin() as conn:
             conn.execute(update(table).where(table.c[OWNER_FIELD] == self.owner)
                          .values(**{HEARTBEAT_FIELD: func.now()}))
 

@@ -122,8 +122,14 @@ class WriteTracker:
     """
 
     def __init__(self, engine: Engine, schema: str | None, owner: str,
-                 deliver_signal=None):
+                 deliver_signal=None, heartbeat_engine: Engine | None = None):
         self.engine = engine
+        # Отметку живости шлём ОТДЕЛЬНЫМ пулом (см. lease.lease_engine). Самая частая причина
+        # ложного истечения — не смерть процесса, а то, что потоку отметки не досталось
+        # соединения: страницы выгрузки разобрали пул целиком. Это уже случалось, и здесь цена
+        # выше всего — граница окна обработчика перестаёт держаться, и снимок затирает
+        # изменения, пришедшие после неё. Остальные запросы короткие и редкие, они остаются на общем пуле.
+        self._heartbeat_engine = heartbeat_engine or engine
         self.schema_name = _check_create_schema(engine, schema)
         # Уникализируем ВНУТРИ, а не доверяем вызывающему: владелец здесь — не «чей это обмен», а
         # «какой процесс держит строку», и цена ошибки — молча удалённая чужая живая строка.
@@ -317,7 +323,7 @@ class WriteTracker:
             in_flight = list(self._in_flight)
         if not in_flight:
             return
-        with self.engine.begin() as conn:
+        with self._heartbeat_engine.begin() as conn:
             conn.execute(update(self.table)
                          .where(self.table.c.id.in_(in_flight))
                          .values(heartbeat_at=func.now()))

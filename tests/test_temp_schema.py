@@ -100,3 +100,42 @@ def test_without_it_the_keys_table_goes_to_the_data_schema(db):
 
     assert rep._full_load_keys("Catalog_X").schema == db.schema
     rep.close()
+
+
+# --- уборка брошенных таблиц ключей ---------------------------------------------------------
+
+def test_a_keys_table_left_by_a_killed_process_is_cleaned_up(db, temp_schema):
+    """
+    Таблица ключей снимается по выходу из блока, в том числе при ошибке. Но убитый процесс (OOM,
+    docker kill) оставляет её навсегда, и за год таких остатков набирается столько, что список
+    таблиц схемы перестаёт читаться — а это та же схема, где лежат данные, если отдельная не
+    задана (хвост CDC-43).
+    """
+    from onecdc.full_load_keys import KEYS_TABLE_PREFIX, drop_orphaned_keys_tables
+
+    old = f'{KEYS_TABLE_PREFIX}240101120000_Catalog_X_abcdef12'      # позавчерашняя
+    fresh = None
+    with db.engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE "{temp_schema}"."{old}" (id int)'))
+    keys = FullLoadKeys(db.engine, target_table_name="Catalog_X",
+                        key_columns={"Ref_Key": String()}, schema=temp_schema)
+    with keys:
+        fresh = keys.name
+
+        dropped = drop_orphaned_keys_tables(db.engine, temp_schema)
+
+        assert dropped == [old]
+        left = inspect(db.engine).get_table_names(schema=temp_schema)
+        assert left == [fresh], 'идущий прогон трогать нельзя'
+
+
+def test_a_table_that_is_not_ours_is_left_alone(db, temp_schema):
+    """Имя не разбирается — не наше дело: лучше оставить мусор, чем снести чужое."""
+    from onecdc.full_load_keys import KEYS_TABLE_PREFIX, drop_orphaned_keys_tables
+
+    strange = f'{KEYS_TABLE_PREFIX}не_время_Catalog_X'
+    with db.engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE "{temp_schema}"."{strange}" (id int)'))
+
+    assert drop_orphaned_keys_tables(db.engine, temp_schema) == []
+    assert strange in inspect(db.engine).get_table_names(schema=temp_schema)

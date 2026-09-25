@@ -255,3 +255,38 @@ def test_those_who_keep_score_can_tell_busy_from_no_changes(db):
     with first.claim_full_load(OBJECT):
         with pytest.raises(FullLoadBusy, match=OBJECT):
             second.full_load(OBJECT, skip_if_busy=False)
+
+
+def test_the_heartbeat_does_not_compete_with_the_pages_for_connections(db):
+    """
+    Отметка живости идёт ОТДЕЛЬНЫМ пулом. Самая частая причина ложного истечения — не смерть
+    процесса, а то, что потоку отметки не досталось соединения: страницы выгрузки разобрали пул
+    целиком. Здесь цена этого выше всего — захват живого процесса достаётся чужому расписанию, и
+    1С делает ту же работу дважды.
+
+    Пул берём свой и крошечный: занимать общий тестовый значило бы подвесить соседние тесты.
+    """
+    from sqlalchemy import create_engine
+
+    # Два соединения: одного не хватает даже на подготовку реестра (dbmerge держит своё под
+    # промежуточную таблицу). Дальше занимаем ОБА — это и есть «страницы разобрали пул».
+    engine = create_engine(db.engine.url.render_as_string(hide_password=False),
+                           pool_size=2, max_overflow=0, pool_timeout=1)
+    rep = Replicator(odata_url="http://x", odata_auth=None, engine=engine,
+                     exchange_name="E", queue_guid=TEST_QUEUE_GUID, db_schema=db.schema)
+    rep.metadata.is_loaded = True
+    rep.metadata[OBJECT] = MetadataObject(OBJECT, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
+    rep.metadata._sync_objects([OBJECT])
+    try:
+        assert rep._full_load_claim._heartbeat_engine is rep._lease_engine
+        assert rep.writes._heartbeat_engine is rep._lease_engine
+        assert rep._lease_engine is not engine, 'иначе изоляции нет'
+
+        assert rep._full_load_claim.claim(OBJECT)
+        with engine.connect(), engine.connect():    # пул занят целиком
+            rep._full_load_claim.heartbeat()        # а отметка всё равно проходит
+            rep.writes.heartbeat()
+        assert _owner(rep) == rep._full_load_claim.owner
+    finally:
+        rep.close()
+        engine.dispose()

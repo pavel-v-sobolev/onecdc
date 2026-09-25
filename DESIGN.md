@@ -931,7 +931,7 @@ grace period. Хуже, чем не ставить перехват вовсе. 
 Ниже — как `Replicator.full_load` разбивает такое чтение: чем листать, сколько записей брать
 за раз и как не платить за глубокий `$skip`.
 
-Код: `Replicator.full_load`, `Replicator._load_pages`, `Replicator._period_partitions`,
+Код: `Replicator.full_load`, `Replicator._load_pages`, `Replicator._load_by_windows`,
 `Replicator._next_page_size`, `Replicator._full_load_key`,
 `Replicator._mark_missing_rows`, `DataReader.read_object`, `DataReader.read_date_bound`,
 `FullLoadKeys` (`full_load_keys.py`).

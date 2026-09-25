@@ -21,9 +21,10 @@ scoped-удаления (у него нет регистратора, и наб�
 """
 
 import uuid
+from datetime import datetime, timedelta
 
 from sqlalchemy import (Column, Index, MetaData, Table, and_, exists, func, insert, not_, or_,
-                        select, tuple_, update)
+                        select, text, tuple_, update)
 from sqlalchemy.engine import Engine
 
 from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, truncate_to_bytes
@@ -35,6 +36,11 @@ logger = get_logger(__name__)
 # `tmpkeys_...` парсились одним разбором `<префикс>_<время>_<таблица>_<hex8>`.
 KEYS_TABLE_PREFIX = 'tmpkeys_'
 KEYS_TABLE_TIMESTAMP_FORMAT = '%y%m%d%H%M%S'
+
+# Через сколько часов брошенная таблица ключей считается мусором. Живой прогон столько не идёт:
+# самая долгая выгрузка, которую мы видели, — часы, но не сутки, а у объекта, который не
+# укладывается, выгрузка режется на окна по периоду. Сутки с запасом.
+ORPHAN_KEYS_TABLE_HOURS = 24
 # Столько же, сколько у dbmerge: 63 байта лимита Postgres минус запас на суффикс индекса.
 MAX_KEYS_TABLE_NAME_LEN = 58
 UNIQUE_ID_LENGTH = 8
@@ -79,6 +85,61 @@ def mark_orphaned_table_part(engine: Engine, part: Table, owner: Table,
                  .values(**{mark_field: True, 'merged_on': func.now()}))
     with engine.begin() as conn:
         return conn.execute(statement).rowcount
+
+
+def drop_orphaned_keys_tables(engine: Engine, schema: str | None = None,
+                              older_than_hours: int = ORPHAN_KEYS_TABLE_HOURS) -> list[str]:
+    """
+    Убирает таблицы ключей, брошенные упавшими прогонами. Возвращает имена убранных.
+
+    Таблица живёт один прогон и снимается по выходу из блока — в том числе при ошибке. Но процесс
+    можно и убить (OOM, `docker kill`, перезапуск узла), и тогда она остаётся в схеме навсегда.
+    Сама по себе она безвредна, однако таких остатков за год набирается столько, что список таблиц
+    схемы перестаёт читаться, — а это та же схема, где лежат данные, если отдельная не задана.
+
+    Возраст берём ИЗ ИМЕНИ, а не из каталога: Postgres времени создания таблиц не хранит, ради
+    этого время и вынесено в имя (см. _make_name). Час запаса не спасёт от того, что имя чужое или
+    странное — такую таблицу просто не трогаем: лучше оставить мусор, чем снести чужое.
+
+    Идёт вместе с полной выгрузкой, а не отдельным расписанием: место, где эти таблицы заводят, —
+    единственное, где точно известно, что они такое.
+    """
+    if engine.dialect.name != 'postgresql':
+        return []
+    with engine.connect() as conn:
+        names = conn.execute(text("""
+            SELECT c.relname
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = COALESCE(:schema, current_schema())
+               AND c.relkind = 'r'
+               AND c.relname LIKE :prefix
+             ORDER BY c.relname"""),
+            {'schema': schema, 'prefix': f'{KEYS_TABLE_PREFIX}%'}).scalars().all()
+        now = conn.scalar(select(DB_NOW_WITH_TIMEZONE))
+
+    cutoff = now - timedelta(hours=older_than_hours)
+    preparer = engine.dialect.identifier_preparer
+    dropped = []
+    for name in names:
+        stamp = name[len(KEYS_TABLE_PREFIX):].split('_', 1)[0]
+        try:
+            created = datetime.strptime(stamp, KEYS_TABLE_TIMESTAMP_FORMAT)
+        except ValueError:
+            # Имя не наше или испорчено — не наше дело.
+            continue
+        if created.replace(tzinfo=now.tzinfo) >= cutoff:
+            continue
+        qualified = preparer.quote(name)
+        if schema:
+            qualified = f'{preparer.quote_schema(schema)}.{qualified}'
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS {qualified}'))
+        dropped.append(name)
+    if dropped:
+        logger.info("Dropped %s orphaned full load key tables older than %sh: %s",
+                    len(dropped), older_than_hours, ', '.join(dropped))
+    return dropped
 
 
 class FullLoadKeys:

@@ -395,7 +395,10 @@ class DataReader(UserDict):
         self._ext_dimensions_segment_limit = EXT_DIMENSIONS_MAX_SEGMENT_CHARS
         
         # {регистр: {вид субконто (Ref_Key): предопределённое имя}} — читаемые ключи JSON субконто.
-        # Строится один раз на процесс, см. _ensure_ext_dimension_kinds.
+        # Строится один раз на ЭКЗЕМПЛЯР ридера (см. _ensure_ext_dimension_kinds). Для потока
+        # изменений это и есть «раз на процесс» — ChangeReader живёт столько же. А каждая полная
+        # выгрузка заводит свой DataReader, и карту ей приходится строить заново: это перебор
+        # планов видов характеристик плюс одно чтение, то есть единицы запросов на прогон.
         self._ext_dimension_kinds: dict[str, dict[str, str]] = {}
 
     def read_object(self, object_name: str, top: int | None = None,
@@ -726,7 +729,8 @@ class DataReader(UserDict):
     def _ensure_ext_dimension_kinds(self, object_name: str, elements: list) -> None:
         """
         Готовит карту {вид субконто (Ref_Key): предопределённое имя} для регистра — по ней ключи
-        JSON становятся читаемыми (см. _ext_dimensions). Считается один раз на процесс.
+        JSON становятся читаемыми (см. _ext_dimensions). Считается один раз на экземпляр ридера:
+        для потока изменений это раз на процесс, для полной выгрузки — раз на прогон.
 
         План видов характеристик, хранящий виды субконто, приходится ИСКАТЬ: в поле
         `ExtDimensionTypeDr1_Key` лежит голый Guid, тип у него в `$metadata` — `Edm.Guid`, а

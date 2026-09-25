@@ -31,7 +31,8 @@ from onecdc.db_logs import (DEFAULT_LOG_RETENTION_DAYS, LOAD_TYPE_CHANGES, LOAD_
                             align_merge_timestamps,
                             create_table_if_absent,
                             exchange_nodes_table)
-from onecdc.full_load_keys import FullLoadKeys, mark_orphaned_table_part
+from onecdc.full_load_keys import (FullLoadKeys, drop_orphaned_keys_tables,
+                                   mark_orphaned_table_part)
 from onecdc.lease import Lease, lease_engine
 from onecdc.handlers import (HandlerSignals, SOURCE_CHANGES, SOURCE_FULL_LOAD)
 from onecdc.stop_signal import StopSignal, install_signal_handlers, stop_requested
@@ -658,9 +659,14 @@ class Replicator:
         # Захват объекта под выгрузку (см. full_load_claim): не пускает второго ни в этом процессе,
         # ни в чужом. Репликатор и расписание могут быть подняты в разных контейнерах, поэтому
         # заслон только один и только в БД — множество в памяти их бы не развело.
+        # Отдельный пул под отметки живости: иначе страницы выгрузки разбирают соединения,
+        # потоку отметки не достаётся, и живой процесс теряет аренду или захват (см.
+        # lease_engine). Пул один на адрес БД — им пользуются и аренды, и оба реестра.
+        self._lease_engine = lease_engine(self.engine)
         self._full_load_claim = FullLoadClaim(
             engine, lambda: self.metadata.objects_table,
-            owner=instance_owner(self._owner_label))
+            owner=instance_owner(self._owner_label),
+            heartbeat_engine=self._lease_engine)
         # Субконто регистра бухгалтерии: по умолчанию НЕ читаем (см. DataReader._fill_subconto).
         self._read_subconto = read_subconto
         # {объект: сколько циклов подряд не разбирается} — см. _package_is_blocked.
@@ -709,7 +715,8 @@ class Replicator:
         # Он же отвечает за доставку сигнала: строка снимается одной транзакцией с сигналом,
         # а брошенная строка — единственный след того, что сигнал не дошёл (см. _deliver_signal).
         self.writes = WriteTracker(self.engine, self.db_schema, self._owner_label,
-                                   deliver_signal=self._deliver_signal)
+                                   deliver_signal=self._deliver_signal,
+                                   heartbeat_engine=self._lease_engine)
         # Аренда узла обмена: читать изменения одного узла вправе ровно один процесс. Без неё
         # два репликатора читают и подтверждают параллельно, а подтверждение удаляет регистрации
         # изменений в самой 1С — вернуть их нечем (витрину-то всегда можно пересобрать).
@@ -717,9 +724,6 @@ class Replicator:
         # дал бы «занято», а отсутствие таблицы пришлось бы трактовать как «можно всем».
         self._nodes_table = exchange_nodes_table(MetaData(), self.db_schema)
         create_table_if_absent(self.engine, self._nodes_table)
-        # Отдельный пул под аренды: иначе страницы выгрузки разбирают соединения, потоку отметки
-        # живости не достаётся, и живой процесс теряет аренду (см. lease_engine).
-        self._lease_engine = lease_engine(self.engine)
         self._node_lease = Lease(self._lease_engine, lambda: self._nodes_table,
                                  instance_owner(self._owner_label), subject='exchange-node',
                                  key_field=NODE_KEY_FIELD, owner_field=NODE_OWNER_FIELD,
@@ -1659,7 +1663,15 @@ class Replicator:
                 for field, type_name in metadata_obj.primary_key.items()}
 
     def _full_load_keys(self, object_name: str) -> FullLoadKeys:
-        """Одноразовая таблица ключей прогона (см. full_load_keys)."""
+        """
+        Одноразовая таблица ключей прогона (см. full_load_keys).
+
+        Заодно убираем брошенные упавшими процессами: таблица снимается по выходу из блока, в том
+        числе при ошибке, но убитый процесс (OOM, docker kill) оставляет её навсегда. Уборка —
+        здесь, а не отдельным расписанием: это единственное место, где точно известно, что эти
+        таблицы такое. Нечего убирать — один запрос к каталогу.
+        """
+        drop_orphaned_keys_tables(self.engine, self.db_temp_schema or self.db_schema)
         return FullLoadKeys(self.engine, target_table_name=self._handler_key(object_name),
                             key_columns=self._primary_key_columns(object_name),
                             schema=self.db_temp_schema or self.db_schema)
