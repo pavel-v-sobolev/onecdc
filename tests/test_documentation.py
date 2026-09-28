@@ -69,6 +69,22 @@ def test_documented_methods_exist_with_the_documented_parameters():
                 f'{method}: параметра {parameter} нет ни у одного класса'
 
 
+def test_the_released_version_is_written_down():
+    """
+    Версия пакета и верхний раздел CHANGELOG обязаны совпадать, и раздел не может остаться
+    «Unreleased» у выпущенной версии. Разошлись молча: pyproject ушёл на 0.2.1 и дальше, а
+    CHANGELOG год показывал «[0.2.0] — Unreleased», хотя обе 0.2.x уже лежали на PyPI.
+    """
+    version = re.search(r'^version = "([^"]+)"',
+                        (ROOT / 'pyproject.toml').read_text(), re.M)
+    assert version, 'в pyproject нет версии'
+    heading = re.search(r'^## \[([^\]]+)\] — (.+)$', (ROOT / 'CHANGELOG.md').read_text(), re.M)
+    assert heading, 'в CHANGELOG нет ни одного раздела версии'
+
+    assert heading.group(1) == version.group(1), 'верхний раздел CHANGELOG — не эта версия'
+    assert 'nreleased' not in heading.group(2), 'у выпущенной версии должна стоять дата'
+
+
 def test_the_readme_engine_example_caps_the_pool():
     """
     Пример из README копируют первым. Один `pool_size` без `max_overflow` — это молча до
