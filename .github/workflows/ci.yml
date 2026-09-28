@@ -3,9 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    # Оба написания намеренно: выпущенные теги в репозитории без `v` (0.1.0, 0.2.1), а условие
-    # публикации ниже ждало `v*` — тег без префикса просто не публиковался, молча.
-    tags: ["v[0-9]*", "[0-9]*"]
   pull_request:
 
 jobs:
@@ -47,17 +44,10 @@ jobs:
         env:
           ONECDC_TEST_DB_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc
 
-  publish:
-    # Публикация на PyPI по git-тегу версии — с `v` и без. Требует настроенного Trusted Publishing
-    # на стороне PyPI (проект + этот репозиторий/workflow) — секреты/токены не нужны.
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: test
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv build
-      - run: uv publish --trusted-publishing always
+# Публикации здесь нет намеренно: пакет выкладывается руками, из чистой сборки.
+#
+#   rm -rf dist && uv build
+#   uv publish dist/onecdc-<версия>* --token pypi-...
+#
+# Маска обязательна: в dist/ копятся артефакты прошлых версий, и публикация без неё спотыкается
+# об уже выложенное.
