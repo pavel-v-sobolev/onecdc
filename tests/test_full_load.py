@@ -6,7 +6,7 @@
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 import requests
@@ -1134,3 +1134,256 @@ def test_only_a_heavy_page_is_shrunk(db, monkeypatch, exc, shrinks):
         with pytest.raises(type(exc)):
             rep.full_load("Catalog_X", batch_size=100)
         assert "Catalog_X" not in rep._full_load_page_limit, 'потолок опущен без причины'
+
+
+# --- Выборку 1С не собирает: режем её периодом ---
+
+def _out_of_memory():
+    """Отказ сервера приложений 1С: 500 «Недостаточно памяти для получения результата запроса»."""
+    return requests.HTTPError("500", response=_response(500))
+
+
+def _heavy_object(db, monkeypatch, rows_per_selection, *, record_set=True):
+    """
+    Объект с подменённым чтением. record_set=True — регистр, подчинённый регистратору, как
+    ForecastVisionNew в Thor; False — документ с известными границами дат (2026-01-15 ..
+    2026-03-20). rows_per_selection(filter, top) — сколько записей отдать выборке (или
+    исключение, если 1С её не собирает). Возвращает (rep, имя объекта, calls), calls — пары
+    (filter, top) каждого запроса.
+    """
+    rep = _replicator(db)
+    if record_set:
+        name, key = "InformationRegister_F", "Recorder_Key"
+        meta = MetadataObject(name, {key: "Guid", "Period": "DateTime"},
+                              {key: "Guid", "LineNumber": "Int64"}, object_key=[key])
+    else:
+        name, key = "Document_H", "Ref_Key"
+        meta = MetadataObject(name, {key: "Guid", "Date": "DateTime"}, {key: "Guid"},
+                              object_key=None)
+        monkeypatch.setattr(DataReader, "read_date_bound",
+                            lambda self, n, field, *, newest, extra_filter=None:
+                            datetime(2026, 3, 20) if newest else datetime(2026, 1, 15))
+    rep.metadata[name] = meta
+    calls = []
+    counter = {"v": 0}
+
+    def fake_read_object(self, object_name, top=None, key_fields=None,
+                         extra_filter=None, skip=None):
+        calls.append((extra_filter, top))
+        n = rows_per_selection(extra_filter, top)
+        n = 0 if skip else n
+        self.clear()
+        rows = []
+        for _ in range(n):
+            counter["v"] += 1
+            row = {key: uuid.UUID(int=counter["v"])}
+            if record_set:
+                row["LineNumber"] = 1
+            rows.append(row)
+        if rows:
+            self[object_name] = DataObject(meta, rows)
+        return n
+
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+    return rep, name, calls
+
+
+def _window_start(flt):
+    return datetime.fromisoformat(flt.split("ge datetime'")[1][:19])
+
+
+def _window_end(flt):
+    return datetime.fromisoformat(flt.split("lt datetime'")[1][:19])
+
+
+def _is_closed(flt):
+    return ' ge ' in flt and ' lt ' in flt
+
+
+def _finished(rep):
+    log = rep.onecdc_replicator_log.table
+    with rep.engine.connect() as conn:
+        return conn.execute(select(log.c.finished_at)).scalar_one() is not None
+
+
+def test_record_set_register_is_windowed_right_away(db, monkeypatch):
+    """
+    Регистр в режиме набора записей читается окнами сразу, без чтения «как есть».
+
+    На любой запрос 1С поднимает в память сервера приложений все строки выборки и только потом
+    отрезает $top. Без фильтра это весь регистр: ForecastVisionNew падал по памяти даже на
+    $top=1, хотя первым шёл набор из 6 строк, а фильтр «на всё» (`Recorder_Key ne` пустой
+    ссылке) падал точно так же. Окно ограничивает выборку, а мелкому регистру обход стоит лишь
+    запроса на месяц истории.
+    """
+    closed = []
+
+    def rows(flt, top):
+        assert flt is not None, 'регистр в режиме набора записей без фильтра читать нельзя'
+        if _is_closed(flt):
+            closed.append(flt)
+            return 1 if len(closed) <= 2 else 0
+        return 0
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows)
+    rep.full_load(name, batch_size=1000)
+
+    # Оба конца открыты: первое окно — вверх без правой границы, последнее — вниз без левой.
+    assert ' ge ' in calls[0][0] and ' lt ' not in calls[0][0]
+    assert ' lt ' in calls[-1][0] and ' ge ' not in calls[-1][0]
+    assert len(calls) == 1 + 2 + FULL_LOAD_EMPTY_WINDOWS_TO_STOP + 1, \
+        'окно вверх, два окна с данными, пустые окна и хвост — и ни одного лишнего запроса'
+    assert _finished(rep)
+
+
+def test_selection_too_heavy_even_for_one_entry_is_cut_by_period(db, monkeypatch):
+    """
+    Документ, который 1С без фильтра не отдаёт даже по одной записи. Раньше отказ на одной
+    записи пробрасывался, прогон падал и через паузу начинался заново с тем же результатом:
+    окна включались только у глубокого объекта.
+
+    Теперь такая выборка режется периодом, как глубокая. Потолок размера страницы при этом
+    снимается: он выведен из отказов, которые от размера не зависели, и окна, унаследовав его,
+    читались бы по одной записи за запрос.
+    """
+    def rows(flt, top):
+        if flt is None:
+            raise _out_of_memory()
+        return 1
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows, record_set=False)
+    rep.full_load(name, batch_size=1000)
+
+    assert [top for flt, top in calls if flt is None] == [20, 5, 1], \
+        'сначала страница уменьшается до одной записи, и только потом выборка режется'
+    windows = [(flt, top) for flt, top in calls if flt]
+    assert windows, 'выборка обязана была уйти в окна'
+    assert all(top == 20 for _, top in windows), \
+        f'потолок снят: окна читаются пробной страницей, а не по одной записи: {windows[:3]}'
+    assert name not in rep._full_load_page_limit
+    assert ' lt ' not in windows[0][0], 'первое окно открыто вверх'
+    assert _finished(rep), 'прогон обязан закончиться успехом'
+
+
+def test_refused_record_set_window_is_narrowed_not_shrunk(db, monkeypatch):
+    """
+    Регистру в режиме набора записей уменьшение страницы при отказе сервера не помогает: 1С всё
+    равно поднимает в память всю выборку окна. Поэтому первое же 500 сужает окно — без двух
+    заведомо провальных запросов 20 → 5 → 1.
+    """
+    refused = []
+
+    def rows(flt, top):
+        if _is_closed(flt) and not refused:
+            refused.append(flt)
+            raise _out_of_memory()
+        return 0
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows)
+    rep.full_load(name, batch_size=1000)
+
+    assert [top for flt, top in calls if flt == refused[0]] == [20], \
+        'отказанное окно запрошено один раз — страница не уменьшалась'
+    closed = [flt for flt, _ in calls if _is_closed(flt)]
+    narrowed = closed[1]
+    assert _window_end(narrowed) == _window_end(refused[0]), 'тот же отрезок, от того же края'
+    assert (_window_end(narrowed) - _window_start(narrowed)).days == 10
+    assert name not in rep._full_load_page_limit, 'потолок страницы отказ сервера не ставит'
+    assert _finished(rep)
+
+
+def test_too_large_record_set_page_is_still_shrunk(db, monkeypatch):
+    """
+    А слишком большой ответ от страницы зависит: меньше наборов — меньше байт. Его по-прежнему
+    лечит уменьшение страницы, и окно из-за него не сужается.
+    """
+    def rows(flt, top):
+        if top > 5:
+            raise ResponseTooLargeError("страница крупнее потолка")
+        return 0
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows)
+    rep.full_load(name, batch_size=1000)
+
+    assert [top for _, top in calls[:2]] == [20, 5]
+    assert calls[0][0] == calls[1][0], 'та же выборка, меньше страница'
+    assert rep._full_load_page_limit[name] == 5
+    closed = [flt for flt, _ in calls if _is_closed(flt)]
+    assert closed and all((_window_end(f) - _window_start(f)).days == 30 for f in closed), \
+        'окна не сужались'
+
+
+def test_heavy_open_window_is_cut_as_well(db, monkeypatch):
+    """
+    Окно вверх `[anchor, +inf)` у регистра прогноза — это весь прогноз на будущее, и 1С может не
+    собрать и его. Бросать открытое окно нельзя (за краем потерялись бы строки), поэтому оно
+    режется тем же обходом, только вверх, а за пустыми окнами снова читается открытым — уже от
+    последнего из них.
+    """
+    opened = []
+
+    def rows(flt, top):
+        if ' lt ' not in flt:                       # открыто вверх
+            opened.append(flt)
+            if flt == opened[0]:
+                raise _out_of_memory()
+            return 0
+        if ' ge ' not in flt:                       # хвост вниз
+            return 0
+        anchor = _window_start(opened[0])
+        start = _window_start(flt)
+        return 1 if anchor <= start < anchor + timedelta(days=60) else 0
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows)
+    rep.full_load(name, batch_size=1000)
+
+    assert all(top == 20 for _, top in calls), 'отказ сервера не уменьшал страницу'
+    anchor = _window_start(opened[0])
+    upward = [flt for flt, _ in calls if _is_closed(flt) and _window_start(flt) >= anchor]
+    # Два окна с данными и FULL_LOAD_EMPTY_WINDOWS_TO_STOP пустых.
+    assert len(upward) == 2 + FULL_LOAD_EMPTY_WINDOWS_TO_STOP, upward
+    # Встык: левая граница каждого окна вверх — правая предыдущего.
+    assert [_window_start(f) for f in upward[1:]] == [_window_end(f) for f in upward[:-1]]
+    assert _window_start(upward[0]) == anchor, 'обход вверх начинается от границы открытого окна'
+
+    reopened = [flt for flt in dict.fromkeys(opened) if flt != opened[0]]
+    assert reopened and _window_start(reopened[0]) == _window_end(upward[-1]), \
+        'за пустыми окнами вверх — снова открытое окно, от правой границы последнего'
+    assert any(' ge ' not in flt for flt, _ in calls), 'обход вниз тоже состоялся'
+
+
+def test_selection_without_a_date_is_not_cut(db, monkeypatch):
+    # Резать нечем: отказ на одной записи — по-прежнему ошибка прогона.
+    rep = _replicator(db)
+    rep.metadata["Catalog_Z"] = MetadataObject("Catalog_Z", {"Ref_Key": "Guid"},
+                                               {"Ref_Key": "Guid"}, object_key=None)
+    calls = []
+    monkeypatch.setattr(DataReader, "read_object", _failing_above(0, calls))
+
+    with pytest.raises(requests.HTTPError):
+        rep.full_load("Catalog_Z", batch_size=1000)
+    assert [c["top"] for c in calls] == [20, 5, 1]
+
+
+def test_a_heavy_day_is_an_error(db, monkeypatch):
+    """
+    Если 1С не собирает даже окно в один день, дробить дальше некуда: на нём в последний раз
+    пробуется уменьшение страницы, а потом ошибка пробрасывается — а не превращается в
+    бесконечное сужение.
+    """
+    def rows(flt, top):
+        raise _out_of_memory()
+
+    rep, name, calls = _heavy_object(db, monkeypatch, rows)
+    with pytest.raises(requests.HTTPError):
+        rep.full_load(name, batch_size=1000)
+
+    closed = [flt for flt, _ in calls if _is_closed(flt)]
+    spans = [(_window_end(f) - _window_start(f)).days for f in dict.fromkeys(closed)]
+    assert spans == [30, 10, 3, 1], f'окно сужается до дня и на нём останавливается: {spans}'
+    day = closed[-1]
+    assert [top for flt, top in calls if flt == day] == [20, 5, 1], \
+        'на однодневном окне страница уменьшается — это последнее средство'
+    assert all([f for f, _ in calls].count(w) == 1 for w in dict.fromkeys(closed) if w != day), \
+        'окна шире дня сужаются после первого же отказа, без уменьшения страницы'

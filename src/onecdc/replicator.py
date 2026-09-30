@@ -1290,27 +1290,44 @@ class Replicator:
             # пользователь или обход окнами выбрал сам.
             windowed = False
 
-            # Сначала читаем объект как есть — без окон и без лишних запросов. Мелкому объекту
-            # (а таких большинство) окна только вредят: он укладывается в пару страниц, а за
-            # обход пришлось бы заплатить запросом на каждое окно истории, даже пустое.
-            # Лимит страниц ставим, только если резать вообще есть по чему.
-            records, modified, exhausted = self._load_pages(
-                object_name, extra_filter=date_filter, **page_args,
-                max_pages=FULL_LOAD_PARTITION_MAX_PAGES if partition_field else None)
-            total += records
-            rows_modified += modified
+            if partition_field and self._is_record_set_object(object_name):
+                # Регистр в режиме набора записей читаем окнами СРАЗУ. На любой запрос к нему 1С
+                # поднимает в память сервера приложений все строки выборки и только потом
+                # отрезает $top/$skip — проверено на регистре прогноза (см. DESIGN.md, «Если 1С
+                # всё же не осилила страницу»). Без фильтра это весь регистр на каждой странице:
+                # большой падает по памяти даже на $top=1, а тот, что влез, платит за весь
+                # регистр каждой страницей. Окно ограничивает выборку, а мелкому регистру обход
+                # стоит лишь запроса на месяц истории.
+                logger.info("Full load of %s: record set register, reading it by %s windows of "
+                            "%s days right away", object_name, partition_field,
+                            FULL_LOAD_WINDOW_DAYS)
+                exhausted = False
+            else:
+                # Остальное сначала читаем как есть — без окон и без лишних запросов. Мелкому
+                # объекту (а таких большинство) окна только вредят: он укладывается в пару
+                # страниц, а за обход пришлось бы заплатить запросом на каждое окно истории,
+                # даже пустое. Лимит страниц и отказ «не собрать даже одну запись» режут
+                # выборку, только если резать вообще есть по чему.
+                records, modified, exhausted = self._load_pages(
+                    object_name, extra_filter=date_filter, **page_args,
+                    max_pages=FULL_LOAD_PARTITION_MAX_PAGES if partition_field else None,
+                    can_cut=partition_field is not None)
+                total += records
+                rows_modified += modified
+                if not exhausted:
+                    # Объект глубокий или тяжёлый. Глубокий — $skip уже уходит далеко, и дальше
+                    # цена растёт квадратично: 1С на каждый запрос строит выборку заново,
+                    # сортирует и отбрасывает первые N строк. Тяжёлый — 1С не собирает выборку
+                    # даже ради одной записи. Лечится одинаково: окнами по периоду. Фильтр по
+                    # дате переводит запрос на индекс (Дата у документа, Период у регистра входят
+                    # в него), и собирается маленький кусок. Прочитанные страницы перезапишутся
+                    # теми же значениями — выгрузка идемпотентна, и это дешевле, чем гадать о
+                    # размере объекта заранее ($count 1С не отдаёт).
+                    logger.info("Full load of %s: deep or heavy object, re-reading it by %s "
+                                "windows of %s days", object_name, partition_field,
+                                FULL_LOAD_WINDOW_DAYS)
 
             if not exhausted:
-                # Объект глубокий: $skip уже уходит далеко, и дальше цена растёт квадратично —
-                # 1С на каждый запрос строит выборку заново, сортирует и отбрасывает первые N
-                # строк. Перечитываем его окнами по периоду: фильтр по дате переводит запрос на
-                # индекс (Дата у документа, Период у регистра входят в него), и сортируется
-                # маленький кусок. Прочитанные страницы перезапишутся теми же значениями —
-                # выгрузка идемпотентна, и это дешевле, чем гадать о размере объекта заранее
-                # ($count 1С не отдаёт).
-                logger.info("Full load of %s: deep object (> %s pages), re-reading it by %s "
-                            "windows of %s days", object_name, FULL_LOAD_PARTITION_MAX_PAGES,
-                            partition_field, FULL_LOAD_WINDOW_DAYS)
                 windowed = True
                 records, modified = self._load_by_windows(
                     object_name, reader=reader, date_field=partition_field,
@@ -1334,7 +1351,7 @@ class Replicator:
 
     def _load_pages(self, object_name: str, *, reader: DataReader, key_fields: list[str],
                     extra_filter: str | None, batch_size: int, keys, log_id,
-                    max_pages: int | None) -> tuple[int, int, bool]:
+                    max_pages: int | None, can_cut: bool = False) -> tuple[int, int, bool]:
         """
         Постраничное чтение одной выборки (объект целиком либо его окно по периоду) с записью
         каждой страницы. Возвращает (сколько записей прочитано, сколько строк изменено, дочитано ли
@@ -1343,6 +1360,10 @@ class Replicator:
         max_pages ограничивает число страниц: превышение означает «выборка слишком глубокая», и
         вызывающий режет её на меньшие периоды (см. full_load). None — читать до конца.
 
+        can_cut — вызывающий умеет сузить выборку. Тогда отказ 1С даже на одной записи тоже
+        возвращается как «не дочитано», а не пробрасывается: выборку режут окнами по периоду. У
+        регистра в режиме набора записей так возвращается уже первый отказ сервера, без
+        уменьшения страницы.
         """
         skip = 0
         total = 0
@@ -1383,8 +1404,36 @@ class Replicator:
                 # timeout у нас 15 минут: прогон падал на сороковой странице, через минуту
                 # начинался заново с той же страницы и того же размера — сутки нагрузки на 1С без
                 # единой полезной записи.
-                if not _page_too_heavy(exc) or page_size <= FULL_LOAD_MIN_BATCH:
+                if not _page_too_heavy(exc):
                     raise
+                if (can_cut and isinstance(exc, requests.HTTPError)
+                        and self._is_record_set_object(object_name)):
+                    # Регистру в режиме набора записей уменьшение страницы при отказе сервера не
+                    # поможет: 1С поднимает в память все строки выборки и только потом отрезает
+                    # $top (см. _load_object). Такой отказ означает «выборка велика», и лечится он
+                    # сужением окна — сразу, без двух заведомо провальных запросов 20 → 5 → 1.
+                    # Уменьшение остаётся за отказами, которые от страницы зависят: слишком
+                    # большой ответ и таймаут чтения. Потолок не трогаем: он выведен из них.
+                    logger.warning("Full load of %s: 1C refused a record set selection (%s), "
+                                   "cutting it by period", object_name, exc)
+                    return total, rows_modified, False
+                if page_size <= FULL_LOAD_MIN_BATCH:
+                    if not can_cut:
+                        raise
+                    # 1С не отдаёт даже одну запись, то есть дорог не размер страницы, а сборка
+                    # всей выборки: платформа строит её целиком, и $top тут не помогает. Так
+                    # ведёт себя регистр прогноза ForecastVisionNew: без фильтра — 500 «Недостаточно
+                    # памяти» и на $top=1, а окно за месяц отдаётся за 10 секунд. Сузить выборку
+                    # умеет вызывающий — окнами по периоду.
+                    #
+                    # Потолок размера страницы снимаем: он выведен из отказов, которые от размера
+                    # не зависели, и узкое окно, унаследовав его, читалось бы по одной записи за
+                    # запрос. Если entry действительно толстые, окно подберёт размер заново.
+                    self._full_load_page_limit.pop(object_name, None)
+                    self._full_load_page_size.pop(object_name, None)
+                    logger.warning("Full load of %s: 1C cannot build this selection even for a "
+                                   "single entry, cutting it by period", object_name)
+                    return total, rows_modified, False
                 page_size = max(FULL_LOAD_MIN_BATCH, page_size // FULL_LOAD_BATCH_DIVISOR)
                 # Потолок, а не просто новый размер. Подбор по весу (_next_page_size) считает
                 # страницу из БАЙТОВ ответа, а 1С падает не только от них: толстый документ валит
@@ -1461,18 +1510,24 @@ class Replicator:
 
         Порядок обхода:
 
-        1. Открытое окно вверх `[anchor, +inf)`. Им забираются даты в будущем (редкость, но своя
-           у них быть должна) и всё, что создаётся уже во время прогона.
+        1. Открытое окно вверх `[anchor, +inf)`. Им забираются даты в будущем (у регистра прогноза
+           это заметная часть данных) и всё, что создаётся уже во время прогона.
         2. Вниз окнами `[cursor - window, cursor)`, встык: end одного окна = start следующего,
            поэтому пропустить между ними нельзя ничего.
         3. Хвост `(-inf, cursor)` одним сплошным $skip — как только подряд попалось
            FULL_LOAD_EMPTY_WINDOWS_TO_STOP пустых окон (см. ниже).
 
-        Окно, упёршееся в лимит страниц, СУЖАЕТСЯ (делится на FULL_LOAD_WINDOW_DIVISOR) и
-        перечитывается с того же места — заново, а не с середины: страницы упорядочены по ключу, а
-        не по дате, и какие строки уже прочитаны, в терминах периода неизвестно. Дойдя до
-        FULL_LOAD_WINDOW_MIN_DAYS, окно читается без лимита страниц: дробить дальше бессмысленно.
-        Обратно окно не растёт (см. FULL_LOAD_WINDOW_DAYS).
+        Оба конца открыты всегда, иначе строки за крайними границами терялись бы. Если открытое
+        окно 1С не собирает даже ради одной записи, оно режется окнами тем же обходом, от своей
+        границы наружу: вверх `[cursor, cursor + window)`, вниз — как в шаге 2. Пустые окна снова
+        заканчиваются открытым окном за последним из них.
+
+        Окно, не дочитанное за лимит страниц или не собранное 1С даже на одной записи, СУЖАЕТСЯ
+        (делится на FULL_LOAD_WINDOW_DIVISOR) и перечитывается с того же места — заново, а не с
+        середины: страницы упорядочены по ключу, а не по дате, и какие строки уже прочитаны, в
+        терминах периода неизвестно. Дойдя до FULL_LOAD_WINDOW_MIN_DAYS, окно читается без лимита
+        страниц, а отказ 1С пробрасывается: дробить дальше бессмысленно. Обратно окно не растёт
+        (см. FULL_LOAD_WINDOW_DAYS).
 
         Где остановиться — зависит от того, отдаёт ли 1С границы периода (_supports_date_bounds):
 
@@ -1488,18 +1543,71 @@ class Replicator:
         total = 0
         rows_modified = 0
 
-        def read(start, end, *, max_pages):
+        def read(start, end, *, max_pages, can_cut=True):
             nonlocal total, rows_modified
             window = self._window(object_name, date_field, start, end)
             records, modified, exhausted = self._load_pages(
                 object_name, extra_filter=_and_filters(window.filter, date_filter),
-                max_pages=max_pages, **page_args)
+                max_pages=max_pages, can_cut=can_cut, **page_args)
             total += records
             rows_modified += modified
             logger.debug("Full load of %s: window %s — %s records%s", object_name, window.title,
-                         records, '' if exhausted else ' (hit the page limit)')
+                         records, '' if exhausted else ' (not read through, cutting it)')
             self._check_not_stopping(object_name)
             return records, exhausted
+
+        def walk(cursor, *, up, oldest=None):
+            """
+            Обход окнами от cursor наружу: вниз — к старым, вверх — к будущим. Заканчивается
+            окном, накрывшим oldest (только вниз и только при известной границе), либо открытым
+            окном за пустыми — оно читается последним, чтобы за краем ничего не осталось.
+            """
+            window_days = FULL_LOAD_WINDOW_DAYS
+            empty_in_a_row = 0
+            while up or oldest is None or cursor > oldest:
+                if empty_in_a_row >= FULL_LOAD_EMPTY_WINDOWS_TO_STOP:
+                    # Дальше шагать окнами не по чему: остаток добираем одним окном без внешней
+                    # границы. Дороже одного окна, но дешевле сотен пустых — и ничего не теряем.
+                    logger.info("Full load of %s: %s empty windows in a row, reading everything "
+                                "%s %s in one go", object_name, empty_in_a_row,
+                                'from' if up else 'below', cursor)
+                    _, exhausted = read(*((cursor, None) if up else (None, cursor)),
+                                        max_pages=None)
+                    if exhausted:
+                        return
+                    # Остаток 1С целиком не собирает — значит, он не пуст: шагаем дальше.
+                    empty_in_a_row = 0
+                    continue
+                span = timedelta(days=window_days)
+                start, end = (cursor, cursor + span) if up else (cursor - span, cursor)
+                # Окно, накрывшее самую раннюю дату, — последнее: ниже ничего нет, и лимит страниц
+                # ему уже не нужен, дробить всё равно нечего.
+                last = not up and oldest is not None and start <= oldest
+                narrowest = window_days <= FULL_LOAD_WINDOW_MIN_DAYS
+                records, exhausted = read(
+                    start, end, can_cut=not narrowest,
+                    max_pages=None if last or narrowest else FULL_LOAD_PARTITION_MAX_PAGES)
+                if not exhausted:
+                    # Глубоко или тяжело даже в этом окне — сужаем и перечитываем ТОТ ЖЕ отрезок.
+                    window_days = max(FULL_LOAD_WINDOW_MIN_DAYS,
+                                      window_days // FULL_LOAD_WINDOW_DIVISOR)
+                    logger.info("Full load of %s: window %s is deep or heavy, narrowing to %s "
+                                "days", object_name,
+                                self._window(object_name, date_field, start, end).title,
+                                window_days)
+                    continue
+                cursor = end if up else start
+                if last:
+                    return
+                # Пустые окна считаем ВСЕГДА, а не только когда границу снизу спросить не у кого.
+                # Известная граница доверия не заслуживает: 1С отдаёт её как есть, а в периоде
+                # регистра сведений встречается мусор — пустая дата 1С (0001-01-01) или просто
+                # промах пальцем (в демо-базе бухгалтерии лежит запись за 0209 год). Одна такая
+                # запись заставляла шагать окнами от сегодняшнего дня до неё: 22 тысячи запросов
+                # на регистр, внешне неотличимые от зависшего прогона. Теперь обход ограничен
+                # ПЛОТНОСТЬЮ ДАННЫХ, а не календарём, и древний хвост стоит трёх пустых окон плюс
+                # одно сплошное чтение.
+                empty_in_a_row = empty_in_a_row + 1 if records == 0 else 0
 
         # Сюда попадают только объекты, которые НЕ дочитались за лимит страниц, — то есть заведомо
         # непустые. Поэтому отсутствие границы здесь значит не «данных нет», а «границу взять не
@@ -1522,52 +1630,12 @@ class Replicator:
         # пустое окно. Часы 1С ради этого спрашивать незачем.
         anchor = newest or datetime.now().replace(microsecond=0)
 
-        read(anchor, None, max_pages=None)
-
-        cursor = anchor
-        window_days = FULL_LOAD_WINDOW_DAYS
-        empty_in_a_row = 0
-        # Обход прекращён по пустым окнам, а не потому, что дошёл до самой ранней даты. Значит,
-        # ниже cursor данные ещё могут быть, и их надо добрать (см. ниже).
-        history_probed = False
-        while oldest is None or cursor > oldest:
-            start = cursor - timedelta(days=window_days)
-            # Окно, накрывшее самую раннюю дату, — последнее: ниже ничего нет, и лимит страниц ему
-            # уже не нужен, дробить всё равно нечего.
-            last = oldest is not None and start <= oldest
-            no_limit = last or window_days <= FULL_LOAD_WINDOW_MIN_DAYS
-            records, exhausted = read(start, cursor,
-                                      max_pages=None if no_limit else FULL_LOAD_PARTITION_MAX_PAGES)
-            if not exhausted:
-                # Глубоко даже в этом окне — сужаем и перечитываем ТОТ ЖЕ отрезок.
-                window_days = max(FULL_LOAD_WINDOW_MIN_DAYS,
-                                  window_days // FULL_LOAD_WINDOW_DIVISOR)
-                logger.info("Full load of %s: window %s is deep (> %s pages), narrowing to %s days",
-                            object_name, self._window(object_name, date_field, start, cursor).title,
-                            FULL_LOAD_PARTITION_MAX_PAGES, window_days)
-                continue
-            cursor = start
-            if last:
-                return total, rows_modified
-            # Пустые окна считаем ВСЕГДА, а не только когда границу снизу спросить не у кого.
-            # Известная граница доверия не заслуживает: 1С отдаёт её как есть, а в периоде
-            # регистра сведений встречается мусор — пустая дата 1С (0001-01-01) или просто
-            # промах пальцем (в демо-базе бухгалтерии лежит запись за 0209 год). Одна такая
-            # запись заставляла шагать окнами от сегодняшнего дня до неё: 22 тысячи запросов
-            # на регистр, внешне неотличимые от зависшего прогона. Теперь обход ограничен
-            # ПЛОТНОСТЬЮ ДАННЫХ, а не календарём, и древний хвост стоит трёх пустых окон плюс
-            # одно сплошное чтение.
-            empty_in_a_row = empty_in_a_row + 1 if records == 0 else 0
-            if empty_in_a_row >= FULL_LOAD_EMPTY_WINDOWS_TO_STOP:
-                history_probed = True
-                break
-
-        if history_probed:
-            # Дальше шагать окнами не по чему: остаток истории добираем одним окном без нижней
-            # границы. Дороже одного окна, но дешевле сотен пустых — и ничего не теряем.
-            logger.info("Full load of %s: %s empty windows in a row, reading everything below "
-                        "%s in one go", object_name, empty_in_a_row, cursor)
-            read(None, cursor, max_pages=None)
+        _, exhausted = read(anchor, None, max_pages=None)
+        if not exhausted:
+            logger.info("Full load of %s: everything from %s is too heavy for one selection, "
+                        "reading it by windows as well", object_name, anchor)
+            walk(anchor, up=True)
+        walk(anchor, up=False, oldest=oldest)
         return total, rows_modified
 
     def _request_full_load(self, object_name: str) -> None:
