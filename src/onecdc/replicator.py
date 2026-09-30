@@ -25,7 +25,7 @@ from sqlalchemy.exc import NoSuchTableError, OperationalError
 from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
                                     SUPPORTED_TYPES, MetadataReader, type_mapping)
 from onecdc.common_functions import (DB_NOW_WITH_TIMEZONE, ResponseTooLargeError,
-                                     check_queue_guid, format_duration,
+                                     check_queue_guid, format_bytes, format_duration,
                                      instance_owner, odata_datetime_value)
 from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
                                 MAX_RESPONSE_BYTES,
@@ -540,6 +540,21 @@ class _Window:
         left = f"{self.start:{fmt}}" if self.start is not None else '-inf'
         right = f"{self.end:{fmt}}" if self.end is not None else '+inf'
         return f"[{left} .. {right})"
+
+
+def _selection_title(date_from, date_to) -> str:
+    """
+    Подпись выборки прогона для лога. Границы показываем как их задал вызывающий (date, datetime
+    или строка) — переводить их в свой формат значило бы показывать не то, что человек написал.
+
+    Скобки квадратные с обеих сторон, и это не опечатка: границы прогона ВКЛЮЧИТЕЛЬНЫ
+    (см. _build_date_filter), тогда как окно обхода полуоткрыто и подписывается `[.. )`
+    (см. _Window.title). По скобке в логе видно, чья это выборка.
+    """
+    if date_from is None and date_to is None:
+        return 'the whole object'
+    return f"[{date_from if date_from is not None else '-inf'} .. " \
+           f"{date_to if date_to is not None else '+inf'}]"
 
 
 class FullLoadBusy(Exception):
@@ -1310,6 +1325,7 @@ class Replicator:
                 # выборку, только если резать вообще есть по чему.
                 records, modified, exhausted = self._load_pages(
                     object_name, extra_filter=date_filter, **page_args,
+                    selection=_selection_title(date_from, date_to),
                     max_pages=FULL_LOAD_PARTITION_MAX_PAGES if partition_field else None,
                     can_cut=partition_field is not None)
                 total += records
@@ -1351,7 +1367,8 @@ class Replicator:
 
     def _load_pages(self, object_name: str, *, reader: DataReader, key_fields: list[str],
                     extra_filter: str | None, batch_size: int, keys, log_id,
-                    max_pages: int | None, can_cut: bool = False) -> tuple[int, int, bool]:
+                    max_pages: int | None, selection: str,
+                    can_cut: bool = False) -> tuple[int, int, bool]:
         """
         Постраничное чтение одной выборки (объект целиком либо его окно по периоду) с записью
         каждой страницы. Возвращает (сколько записей прочитано, сколько строк изменено, дочитано ли
@@ -1364,6 +1381,11 @@ class Replicator:
         возвращается как «не дочитано», а не пробрасывается: выборку режут окнами по периоду. У
         регистра в режиме набора записей так возвращается уже первый отказ сервера, без
         уменьшения страницы.
+
+        selection — подпись выборки для лога: окно обхода или период прогона. Каждый запрос к 1С
+        пишется строкой ДО отправки, вместе с `$skip` и `$top`, — иначе про запрос, висящий до
+        таймаута чтения (15 минут), в логе не было бы вообще ничего, и «прогон идёт» было бы не
+        отличить от «прогон стоит».
         """
         skip = 0
         total = 0
@@ -1394,6 +1416,12 @@ class Replicator:
             # может появиться в метаданных уже по ходу выгрузки (их перечитывает data_reader), и
             # тогда её merge не держал бы границу. Обращение локальное, в сеть не ходит.
             page_started_at = self.writes.boundary(self._full_load_tables(object_name))
+            # Параметры запроса — ДО его отправки: это единственный момент, когда их видно у
+            # запроса, который не вернётся. Размер страницы подбирается по весу ответа и
+            # опускается отказами, поэтому $top в строке — фактический, а не batch_size.
+            logger.info("Full load of %s: reading %s $skip=%s $top=%s",
+                        object_name, selection, skip, page_size)
+            request_started = time.monotonic()
             try:
                 page = reader.read_object(object_name, top=page_size, key_fields=key_fields,
                                           extra_filter=extra_filter, skip=skip)
@@ -1446,6 +1474,13 @@ class Replicator:
                 logger.warning("Full load of %s: page failed, retrying with batch_size=%s "
                                "(and not going above it again)", object_name, page_size)
                 continue
+            # Чем ответ обошёлся. На DEBUG, потому что при INFO строка выше уже отвечает на
+            # вопрос «что сейчас читается», а вес и время нужны, когда разбираются, почему
+            # страница ужалась или окно оказалось тяжёлым.
+            logger.debug("Full load of %s: read %s $skip=%s $top=%s — %s entries, %s in %s",
+                         object_name, selection, skip, page_size, page,
+                         format_bytes(reader.last_response_bytes),
+                         format_duration(time.monotonic() - request_started))
             if keys is not None:
                 # Ключи страницы — до сохранения: если save упадёт, прогон не закончится и
                 # пометки не будет вовсе, а лишние ключи в одноразовой таблице никому не мешают.
@@ -1548,7 +1583,7 @@ class Replicator:
             window = self._window(object_name, date_field, start, end)
             records, modified, exhausted = self._load_pages(
                 object_name, extra_filter=_and_filters(window.filter, date_filter),
-                max_pages=max_pages, can_cut=can_cut, **page_args)
+                selection=window.title, max_pages=max_pages, can_cut=can_cut, **page_args)
             total += records
             rows_modified += modified
             logger.debug("Full load of %s: window %s — %s records%s", object_name, window.title,

@@ -5,6 +5,7 @@
 и одна строка в onecdc_replicator_log.
 """
 
+import re
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -1387,3 +1388,131 @@ def test_a_heavy_day_is_an_error(db, monkeypatch):
         'на однодневном окне страница уменьшается — это последнее средство'
     assert all([f for f, _ in calls].count(w) == 1 for w in dict.fromkeys(closed) if w != day), \
         'окна шире дня сужаются после первого же отказа, без уменьшения страницы'
+
+
+# --- параметры запросов в логе ---------------------------------------------------------------
+
+def _requests_logged(caplog):
+    """
+    Строки «что читаем сейчас» — по одной на запрос к 1С, без пометки режима загрузки: её
+    дописывает адаптер логгера всем сообщениям сразу, и проверяется она отдельно (ниже).
+    """
+    return [re.sub(r'^\[[^\]]+\] ', '', r.getMessage())
+            for r in caplog.records if '$skip=' in r.getMessage()]
+
+
+def test_every_request_is_logged_with_its_period_and_paging(db, monkeypatch, caplog):
+    """
+    Прогон — это десятки запросов к 1С, и по логу должно быть видно, какой из них идёт сейчас:
+    период выборки и смещение со страницей. Без этого длинная выгрузка выглядит как молчание.
+    """
+    rep = _replicator(db)
+    meta = rep.metadata["Catalog_X"]
+    pages = iter([2, 2, 1])
+
+    def fake_read_object(self, object_name, top=None, key_fields=None,
+                         extra_filter=None, skip=None):
+        n = next(pages)
+        self.clear()
+        self[object_name] = DataObject(meta, [{"Ref_Key": uuid.uuid4()} for _ in range(n)])
+        return n
+
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+
+    with caplog.at_level('INFO', logger='onecdc'):
+        rep.full_load("Catalog_X", batch_size=2)
+
+    assert _requests_logged(caplog) == [
+        'Full load of Catalog_X: reading the whole object $skip=0 $top=2',
+        'Full load of Catalog_X: reading the whole object $skip=2 $top=2',
+        'Full load of Catalog_X: reading the whole object $skip=4 $top=2',
+    ]
+
+
+def test_the_logged_period_is_the_one_the_caller_asked_for(db, monkeypatch, caplog):
+    """Границы прогона включительны с обеих сторон, поэтому и скобки квадратные — в отличие от
+    полуоткрытого окна обхода."""
+    rep = _replicator(db)
+    monkeypatch.setattr(DataReader, "read_object",
+                        lambda self, object_name, **kw: 0)
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+
+    with caplog.at_level('INFO', logger='onecdc'):
+        rep.full_load("Catalog_X", date_field="Date",
+                      date_from=date(2026, 8, 1), date_to=date(2026, 8, 31))
+
+    assert _requests_logged(caplog) == [
+        'Full load of Catalog_X: reading [2026-08-01 .. 2026-08-31] $skip=0 $top=20']
+
+
+def test_a_windowed_run_logs_the_window_of_every_request(db, monkeypatch, caplog):
+    """У обхода окнами подпись своя — то самое окно, полуоткрытое."""
+    rep, name, _ = _heavy_object(db, monkeypatch, lambda flt, top: 0, record_set=True)
+
+    with caplog.at_level('INFO', logger='onecdc'):
+        rep.full_load(name, batch_size=1000)
+
+    windows = [m.split(' reading ')[1] for m in _requests_logged(caplog)]
+    assert all(w.endswith('$skip=0 $top=20') for w in windows), windows
+    # Регистр набора записей идёт окнами сразу, и первое окно — открытое вверх.
+    assert windows[0].startswith('[') and ' .. +inf)' in windows[0], windows[0]
+    assert any(' .. ' in w and not w.startswith('[-inf') and '+inf' not in w
+               for w in windows), 'закрытых окон в обходе не оказалось'
+
+
+def test_the_request_is_logged_before_it_is_sent(db, monkeypatch, caplog):
+    """
+    Главное свойство: строка пишется ДО запроса. Запрос, висящий до таймаута чтения (15 минут),
+    иначе не оставил бы в логе ничего, и «идёт» было бы не отличить от «встал».
+    """
+    rep = _replicator(db)
+
+    def explode(self, object_name, top=None, key_fields=None, extra_filter=None, skip=None):
+        raise requests.ConnectionError('1C is gone')
+
+    monkeypatch.setattr(DataReader, "read_object", explode)
+
+    with caplog.at_level('INFO', logger='onecdc'):
+        with pytest.raises(requests.ConnectionError):
+            rep.full_load("Catalog_X", batch_size=2)
+
+    assert _requests_logged(caplog) == [
+        'Full load of Catalog_X: reading the whole object $skip=0 $top=2']
+
+
+def test_the_cost_of_a_page_is_on_debug(db, monkeypatch, caplog):
+    """Вес и время ответа нужны, когда разбираются, почему страница ужалась, — на INFO это шум."""
+    rep = _replicator(db)
+    meta = rep.metadata["Catalog_X"]
+
+    def fake_read_object(self, object_name, top=None, key_fields=None,
+                         extra_filter=None, skip=None):
+        self.clear()
+        self[object_name] = DataObject(meta, [{"Ref_Key": uuid.uuid4()}])
+        self.last_response_bytes = 2048
+        return 1
+
+    monkeypatch.setattr(DataReader, "read_object", fake_read_object)
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+
+    with caplog.at_level('DEBUG', logger='onecdc'):
+        rep.full_load("Catalog_X", batch_size=2)
+
+    read = [r for r in caplog.records if ': read the whole object' in r.getMessage()]
+    assert len(read) == 1 and read[0].levelname == 'DEBUG'
+    assert '1 entries' in read[0].getMessage() and '2.0 KB' in read[0].getMessage()
+
+
+def test_the_request_lines_carry_the_full_load_tag(db, monkeypatch, caplog):
+    """Строки прогона идут в общий лог вперемешку с циклом изменений, и без пометки режима было
+    бы не понять, к чему относится $skip."""
+    rep = _replicator(db)
+    monkeypatch.setattr(DataReader, "read_object", lambda self, object_name, **kw: 0)
+    rep.writer.save = lambda name, obj, full_load_started_at=None: _ZERO_RESULT
+
+    with caplog.at_level('INFO', logger='onecdc'):
+        rep.full_load("Catalog_X", batch_size=2)
+
+    lines = [r.getMessage() for r in caplog.records if '$skip=' in r.getMessage()]
+    assert lines and all(line.startswith('[FULL RELOAD] ') for line in lines), lines
