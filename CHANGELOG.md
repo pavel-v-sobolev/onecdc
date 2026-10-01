@@ -3,7 +3,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [1.0.2] — 2026-10-01
 
 ### Added
 - **Каждый запрос полной выгрузки к 1С пишется в лог до отправки** — выборка, `$skip` и `$top`:
@@ -763,6 +763,7 @@
   приходит транзитом через `dbmerge` и на каждом merge пишет INFO о диалекте и транзакционном DDL.
   Логгер самого `dbmerge` не трогается. Если логирование настроило приложение, уровни не меняются.
 
+[1.0.2]: https://github.com/pavel-v-sobolev/onecdc/releases/tag/v1.0.2
 [1.0.1]: https://github.com/pavel-v-sobolev/onecdc/releases/tag/v1.0.1
 [1.0.0]: https://github.com/pavel-v-sobolev/onecdc/releases/tag/v1.0.0
 [0.2.1]: https://github.com/pavel-v-sobolev/onecdc/releases/tag/0.2.1

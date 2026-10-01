@@ -1,5 +1,5 @@
 # Образ ставит onecdc с PyPI по версии: версия пакета = версия образа, собирать нечего.
-#   docker build --build-arg ONECDC_VERSION=1.0.1 -t sobolevp/onecdc:1.0.1 -t sobolevp/onecdc:latest .
+#   docker build --build-arg ONECDC_VERSION=1.0.2 -t sobolevp/onecdc:1.0.2 -t sobolevp/onecdc:latest .
 # Версия должна быть уже опубликована на PyPI, иначе pip внутри сборки её не найдёт.
 # Базовый образ по тегу, а не по дайджесту — осознанно: тег приносит патчи безопасности с
 # каждой пересборкой, а образ пересобирается на каждый релиз. Дайджест дал бы побайтовую
