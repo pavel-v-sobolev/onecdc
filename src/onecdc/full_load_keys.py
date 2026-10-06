@@ -159,11 +159,16 @@ class FullLoadKeys:
         self.engine = engine
         self.schema = schema
         self.key_columns = key_columns
+        self.collected = 0
         self.table = Table(self._make_name(target_table_name), MetaData(),
                            *(Column(name, type_) for name, type_ in key_columns.items()),
                            schema=schema,
                            prefixes=['UNLOGGED'] if engine.dialect.name == 'postgresql' else [])
         self._index = Index(f'ix_{self.table.name}', *(self.table.c[c] for c in key_columns))
+        # Сколько ключей собрано за прогон. Считаем в памяти, а не SELECT COUNT(*) в конце:
+        # число нужно одной строке лога, а таблица к тому моменту может быть в миллионы строк.
+        # Это ключи СТРОК, а не объектов: у регистра в режиме набора записей их столько же,
+        # сколько записей в наборах, а не сколько регистраторов.
 
     @property
     def name(self) -> str:
@@ -200,6 +205,7 @@ class FullLoadKeys:
             return
         with self.engine.begin() as conn:
             conn.execute(insert(self.table), rows)
+        self.collected += len(rows)
 
     def _not_seen(self, target: Table):
         """«Строки нет среди увиденных» — анти-join по ключу."""

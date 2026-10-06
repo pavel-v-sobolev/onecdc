@@ -7,6 +7,7 @@
 период кандидат сперва перепроверяется в 1С — из окна он мог уехать, а не исчезнуть.
 """
 
+import re
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -180,11 +181,18 @@ def test_a_row_that_moved_out_of_the_period_is_marked_anyway(db, monkeypatch):
     (см. соседний тест) либо следующей выгрузкой её нового периода.
     """
     rep = _replicator(db)
-    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
+    # Даты у строк настоящие и внутри читаемого периода: без них колонки Date в таблице не
+    # возникает, а тогда пометку нечем ограничить и прогон за период от неё откажется
+    # (см. test_a_period_run_refuses_to_mark_when_the_scope_cannot_be_built).
+    _pages(rep, CATALOG, monkeypatch,
+           [[_record(Ref_Key="a", Val="1", Date=datetime(2026, 7, 1)),
+             _record(Ref_Key="b", Val="2", Date=datetime(2026, 7, 2))]])
     rep.full_load(CATALOG, batch_size=10)
 
-    # Строка b жива в 1С, но уехала из читаемого периода — прогон её не видит.
-    calls = _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+    # Строка b жива в 1С, но уехала из читаемого периода — прогон её не видит. В БД при этом
+    # лежит её ПРЕЖНЯЯ дата, то есть в область пометки она попадает.
+    calls = _pages(rep, CATALOG, monkeypatch,
+                   [[_record(Ref_Key="a", Val="1", Date=datetime(2026, 7, 1))]])
     rep.full_load(CATALOG, batch_size=10, mark_missing=True,
                   date_field="Date", date_from=date(2026, 6, 1))
 
@@ -201,9 +209,12 @@ def test_the_mark_is_lifted_when_the_row_arrives_with_changes(db, monkeypatch):
     пометка уходит вместе с остальными значениями.
     """
     rep = _replicator(db)
-    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
+    _pages(rep, CATALOG, monkeypatch,
+           [[_record(Ref_Key="a", Val="1", Date=datetime(2026, 7, 1)),
+             _record(Ref_Key="b", Val="2", Date=datetime(2026, 7, 2))]])
     rep.full_load(CATALOG, batch_size=10)
-    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+    _pages(rep, CATALOG, monkeypatch,
+           [[_record(Ref_Key="a", Val="1", Date=datetime(2026, 7, 1))]])
     rep.full_load(CATALOG, batch_size=10, mark_missing=True,
                   date_field="Date", date_from=date(2026, 6, 1))
     assert _rows(db, CATALOG)["b"]["is_deleted_or_empty"] is True
@@ -252,3 +263,126 @@ def test_empty_object_without_table_is_not_a_failure(db, monkeypatch):
     assert rep.full_load(CATALOG, batch_size=10, mark_missing=True) == 0
 
 
+
+
+# --- видно ли механизм в логе -----------------------------------------------------------------
+
+def _marking_lines(caplog):
+    """Строки про пометку пропавших, без пометки режима загрузки."""
+    return [re.sub(r'^\[[^\]]+\] ', '', r.getMessage())
+            for r in caplog.records
+            if 'collected keys' in r.getMessage() or 'mark_missing is off' in r.getMessage()]
+
+
+def _first_run(db, monkeypatch):
+    """Прогон, после которого в БД лежат две строки, а в 1С останется одна."""
+    rep = _replicator(db)
+    _pages(rep, CATALOG, monkeypatch,
+           [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
+    rep.full_load(CATALOG, batch_size=10)
+    return rep
+
+
+def _measured(caplog):
+    """
+    Ловим лог ТОЛЬКО измеряемого прогона. caplog собирает записи за весь тест, а at_level лишь
+    меняет уровень, — без очистки в выборку попадала строка подготовительного прогона, и тест
+    падал через раз: видно её или нет, зависело от того, поднял ли уровень логгера onecdc
+    какой-то соседний тест раньше.
+    """
+    caplog.clear()
+    return caplog.at_level('INFO', logger='onecdc')
+
+
+def test_the_marking_reports_what_it_collected_and_what_it_marked(db, monkeypatch, caplog):
+    """
+    Пометка — единственное, что замечает физическое удаление в 1С, и по логу должно быть видно,
+    что она отработала: сколько ключей собрал прогон и сколько строк в итоге погашено.
+    """
+    rep = _first_run(db, monkeypatch)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10)
+
+    assert _marking_lines(caplog) == [
+        f'Full load of {CATALOG}: missing rows checked against 1 collected keys — '
+        '1 rows marked deleted']
+
+
+def test_zero_marked_is_reported_too(db, monkeypatch, caplog):
+    """
+    Ноль — нормальный исход: всё, что лежит в БД, нашлось и в 1С. Но по молчанию его не отличить
+    от «механизм не отработал», а это разные новости.
+    """
+    rep = _first_run(db, monkeypatch)
+    _pages(rep, CATALOG, monkeypatch,
+           [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10)
+
+    assert _marking_lines(caplog) == [
+        f'Full load of {CATALOG}: missing rows checked against 2 collected keys — '
+        '0 rows marked deleted']
+
+
+def test_a_disabled_marking_says_so(db, monkeypatch, caplog):
+    """Выключенная пометка обязана быть громкой: удалённые строки останутся в таблице навсегда."""
+    rep = _first_run(db, monkeypatch)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10, mark_missing=False)
+
+    assert _marking_lines(caplog) == [
+        f'Full load of {CATALOG}: mark_missing is off — rows gone from 1C will stay as they are']
+
+
+def test_a_period_run_says_the_check_was_scoped(db, monkeypatch, caplog):
+    """Выгрузка за период помечает только свой период, и низкий счёт объясняется именно этим."""
+    rep = _first_run(db, monkeypatch)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1", Date="2026-05-01")]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10, date_field="Date",
+                      date_from=date(2026, 1, 1), date_to=date(2026, 12, 31))
+
+    assert 'within the loaded period' in _marking_lines(caplog)[0], _marking_lines(caplog)
+
+
+def test_a_period_run_refuses_to_mark_when_the_scope_cannot_be_built(db, monkeypatch, caplog):
+    """
+    Прогон за период обязан помечать только свой период. Колонки даты в целевой таблице может не
+    оказаться — таблица старше поля в 1С, — и тогда ограничить пометку нечем: под неё попала бы
+    ВСЯ таблица. Хуже всего при пустом ответе 1С: ключей ноль, и погашено было бы всё.
+    """
+    rep = _first_run(db, monkeypatch)
+    # Поле Date в 1С есть (иначе resolve_field_name не пропустит), а колонки в таблице нет: ни у
+    # одной прочитанной записи значения не было, поэтому заводить её было нечему. Так выглядит
+    # таблица, которая старше поля.
+    table = Table(CATALOG, MetaData(), schema=db.schema, autoload_with=db.engine)
+    assert 'Date' not in table.c
+    # 1С не отдала ничего — без области пометки это погасило бы всю таблицу.
+    _pages(rep, CATALOG, monkeypatch, [[]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10, date_field="Date",
+                      date_from=date(2026, 1, 1), date_to=date(2026, 12, 31))
+
+    assert all(not row['is_deleted_or_empty'] for row in _rows(db, CATALOG).values()), \
+        'без области пометка обязана отказаться, а не гасить всё'
+    refusals = [r for r in caplog.records if 'refusing to mark missing rows' in r.getMessage()]
+    assert len(refusals) == 1 and refusals[0].levelname == 'ERROR'
+
+
+def test_a_full_run_still_marks_without_a_date_column(db, monkeypatch, caplog):
+    """Отказ — только у прогона за период. Прогон без границ прочитал объект целиком, и кандидатом
+    законно становится вся таблица: колонка даты ему не нужна вовсе."""
+    rep = _first_run(db, monkeypatch)
+    _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
+
+    with _measured(caplog):
+        rep.full_load(CATALOG, batch_size=10)
+
+    assert _rows(db, CATALOG)["b"]['is_deleted_or_empty'] is True

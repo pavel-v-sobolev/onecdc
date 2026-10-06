@@ -1294,17 +1294,18 @@ class Replicator:
         # Ключи прогона: собираются постранично, в конце по ним помечаются пропавшие строки.
         # ExitStack — чтобы одноразовая таблица гарантированно удалилась и при ошибке прогона.
         keys = self._full_load_keys(object_name) if mark_missing else None
+        if keys is None:
+            # Молчание здесь читалось бы как «пропавших не нашлось». Разница существенная:
+            # физическое удаление в обмен не приходит вовсе, и с выключенной пометкой такие
+            # строки остаются в таблице навсегда.
+            logger.info("Full load of %s: mark_missing is off — rows gone from 1C will stay "
+                        "as they are", object_name)
         stack = ExitStack()
         with stack:
             if keys is not None:
                 stack.enter_context(keys)
             page_args = dict(reader=reader, key_fields=key_fields,
                              batch_size=batch_size, keys=keys, log_id=log_id)
-            # Читался ли объект окнами по дате. Важно для пометки пропавших строк: окно
-            # порождает «уехавшие» строки (см. _mark_missing_rows), и неважно, задал его
-            # пользователь или обход окнами выбрал сам.
-            windowed = False
-
             if partition_field and self._is_record_set_object(object_name):
                 # Регистр в режиме набора записей читаем окнами СРАЗУ. На любой запрос к нему 1С
                 # поднимает в память сервера приложений все строки выборки и только потом
@@ -1344,7 +1345,6 @@ class Replicator:
                                 FULL_LOAD_WINDOW_DAYS)
 
             if not exhausted:
-                windowed = True
                 records, modified = self._load_by_windows(
                     object_name, reader=reader, date_field=partition_field,
                     date_filter=date_filter, page_args=page_args)
@@ -1790,13 +1790,31 @@ class Replicator:
             return 0
         mark_field = self.name_mapper.map_field_name(IS_DELETED_OR_EMPTY_FIELD, object_name)
         scope = self._marking_scope(target, date_column, date_from, date_to)
+        if scope is None and (date_from is not None or date_to is not None):
+            # Прогон читал ПЕРИОД, а ограничить пометку этим периодом не удалось — колонки даты в
+            # целевой таблице нет (таблица старше поля в 1С либо старше нынешней схемы имён).
+            # Помечать без области тут нельзя: кандидат — это строка, не встреченная прогоном, а
+            # прогон видел одно окно, значит под пометку попала бы ВСЯ остальная таблица. Хуже
+            # всего при пустом ответе 1С: ключей не собрано ни одного, и погашено было бы всё.
+            # Поэтому отказываемся — непомеченная строка ждёт следующего прогона, а погашенная
+            # таблица ждёт пересборки руками.
+            logger.error("Full load of %s: refusing to mark missing rows — the run was limited to "
+                         "a period, but %s has no column %s to limit the marking by. Load the "
+                         "object without a period to mark its missing rows",
+                         object_name, target.name, date_column)
+            return 0
         with self.writes.track(table_name, SOURCE_FULL_LOAD) as tracked:
             reset_values = self._resource_reset_values(object_name, target)
             marked = keys.mark_missing(target, started_at, mark_field,
                                        reset_values=reset_values, scope=scope)
+            # Строка пишется и при нуле: ноль — это нормальный и даже желанный исход (всё, что
+            # лежит в БД, нашлось и в 1С), но отличить его от «механизм не отработал» по молчанию
+            # нельзя. Собранные ключи рядом: если их заметно меньше, чем строк в таблице, пометка
+            # сделала ровно то, чего от неё ждут, и видно почему.
+            logger.info("Full load of %s: missing rows checked against %s collected keys%s — "
+                        "%s rows marked deleted", object_name, keys.collected,
+                        '' if scope is None else ' within the loaded period', marked)
             if marked:
-                logger.info("Full load of %s: %s rows are gone from 1C and were marked deleted",
-                            object_name, marked)
                 # В журнал пометка идёт как deleted_row_count — тем же счётчиком, которым dbmerge
                 # считает строки, помеченные удалёнными. Он же решает, нужен ли сигнал: пометка —
                 # такое же изменение строк, как merge.
