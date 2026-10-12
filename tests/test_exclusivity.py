@@ -287,7 +287,7 @@ def test_a_stricter_isolation_level_does_not_break_the_claim(db, level):
 # --- CDC-08: истечение отметки живости доказывает молчание, а не смерть ---
 
 def test_the_role_ttl_is_long_enough_to_need_real_silence(db):
-    # Аренда роли уходит по молчанию. При 90 секундах хватает ЧЕТЫРЁХ несостоявшихся продлений
+    # Аренда роли уходит по молчанию. При 90 секундах хватает четырёх несостоявшихся продлений
     # подряд, при 900 — нужно сорок пять. Молчать четыре такта и работать дальше — бывает;
     # молчать сорок пять — почти противоречие.
     from onecdc.full_load_claim import CLAIM_HEARTBEAT_TTL
@@ -302,7 +302,7 @@ def test_the_role_ttl_is_long_enough_to_need_real_silence(db):
 def test_confirming_a_package_cannot_outlive_the_lease():
     # Общий таймаут рассчитан на чтение пакета (15 минут на ответ, пакет 1С формирует долго).
     # Для подтверждения это опасно: запрос, провисевший дольше аренды, применится уже тогда,
-    # когда узлом владеет другой — причём БЕЗ всякого замирания, просто от медленного ответа.
+    # когда узлом владеет другой — причём без всякого замирания, просто от медленного ответа.
     from onecdc.change_reader import NOTIFY_TIMEOUT
     from onecdc.lease import LEASE_ROLE_TTL
     from onecdc.metadata_reader import DEFAULT_REQUEST_TIMEOUT
@@ -312,7 +312,7 @@ def test_confirming_a_package_cannot_outlive_the_lease():
 
 
 def test_the_node_lease_is_held_across_cycles_inside_the_loop(db):
-    # ВНУТРИ run_forever аренда живёт через все циклы: отпускать её каждую минуту значило бы
+    # внутри run_forever аренда живёт через все циклы: отпускать её каждую минуту значило бы
     # устраивать новую гонку на ровном месте, а читатель мигал бы между процессами.
     with fake_1c.running_server(Path(__file__).parent / "responses" / "trade_demo_8.5") as (
             url, fake):

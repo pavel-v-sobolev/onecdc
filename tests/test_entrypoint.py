@@ -117,3 +117,30 @@ def test_main_unknown_flag_value(monkeypatch):
 
     with pytest.raises(SystemExit):
         entry.main()
+
+
+@pytest.mark.parametrize("days", ["0", "30"])
+def test_main_accepts_log_retention_including_unlimited(monkeypatch, days):
+    _set_env(monkeypatch, ONECDC_MODE="once", ONECDC_LOG_RETENTION_DAYS=days)
+    captured = _patch_replicator(monkeypatch, _FakeReplicator())
+
+    entry.main()
+
+    assert captured["log_retention_days"] == int(days)
+
+
+@pytest.mark.parametrize("days", ["-1", "0.5", "nan", "inf"])
+def test_main_rejects_invalid_log_retention(monkeypatch, days):
+    _set_env(monkeypatch, ONECDC_LOG_RETENTION_DAYS=days)
+
+    with pytest.raises(SystemExit, match="ONECDC_LOG_RETENTION_DAYS"):
+        entry.main()
+
+
+@pytest.mark.parametrize("name", ["ONECDC_FULL_LOAD_WORKERS", "ONECDC_POLL_INTERVAL"])
+def test_other_numeric_settings_still_require_positive_values(monkeypatch, name):
+    _set_env(monkeypatch, ONECDC_MODE="loop", **{name: "0"})
+    _patch_replicator(monkeypatch, _FakeReplicator())
+
+    with pytest.raises(SystemExit, match=rf"{name}.*must be positive"):
+        entry.main()

@@ -129,8 +129,8 @@ def test_first_run_reads_everything_ignoring_the_period(db):
 
 
 def test_first_run_is_recorded_so_it_happens_once(db):
-    # full_load реестр не трогает — отметку ставит фоновый воркер. Расписание, собравшее базу само,
-    # обязано отметиться, иначе читало бы всю историю на КАЖДОМ срабатывании.
+    # full_load реестр не трогает — отметку ставит фоновый поток. Расписание, собравшее базу само,
+    # обязано отметиться, иначе читало бы всю историю на каждом срабатывании.
     calls = []
     rep = _replicator(db, calls, fully_loaded=False)
     marked = []

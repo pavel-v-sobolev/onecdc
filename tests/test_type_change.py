@@ -86,7 +86,7 @@ def test_an_ordinary_column_is_retired_and_recreated(db, caplog):
     assert requested == [OBJ], 'нужна полная выгрузка: новая колонка пуста'
 
 
-# --- Колонка ключа: переименовывается ТАБЛИЦА ---
+# --- Колонка ключа: переименовывается таблица ---
 
 def test_a_key_column_retires_the_whole_table(db, caplog):
     """
@@ -160,7 +160,7 @@ def test_the_check_runs_once_per_table(db):
 
 def test_a_long_name_survives_retirement(db, caplog):
     """
-    Лимит идентификатора в Postgres — 63 БАЙТА, и он один на таблицы, колонки, индексы и
+    Лимит идентификатора в Postgres — 63 байта, и он один на таблицы, колонки, индексы и
     constraint'ы. Длиннее — молча усекается (проверено на живой БД: 83 байта на входе, 63 на
     выходе), а два разных длинных имени схлопнулись бы в одно.
 

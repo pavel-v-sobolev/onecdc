@@ -2,7 +2,7 @@
 Что из конфигурации и данных попадает в журналы и в служебную таблицу.
 
 Утечка здесь не про «злоумышленника»: конфигурацию задаёт оператор, а данные и так лежат в БД.
-Дело в том, что у журналов и у таблиц доступ РАЗНЫЙ. Лог контейнера стекается в общий сборщик,
+Дело в том, что у журналов и у таблиц доступ разный. Лог контейнера стекается в общий сборщик,
 а onecdc_handlers читает любой, у кого есть SELECT на схему, — то есть все потребители витрины.
 Пароль и значения полей уезжают таким образом туда, где их никто не охранял (CDC-29).
 
@@ -143,7 +143,7 @@ def test_last_error_keeps_the_message_but_not_the_sql_and_its_parameters(db, cap
 # --- CDC-29: значения полей и флуд в логе читателя --------------------------------------------
 
 def test_a_value_that_failed_conversion_is_not_in_the_warning(caplog):
-    """Значение поля — бизнес-данные. В WARNING остаётся, ГДЕ и ЧТО не сошлось, само оно в DEBUG."""
+    """Значение поля — бизнес-данные. В WARNING остаётся, где и что не сошлось, само оно в DEBUG."""
     with caplog.at_level(logging.WARNING, logger=READER_LOGGER):
         assert DataReader._convert_value('ИНН7712345678', 'Guid',
                                          context='Catalog_Контрагенты.ИНН') is None
@@ -161,7 +161,7 @@ def test_a_value_that_failed_conversion_is_not_in_the_warning(caplog):
 def test_an_unknown_field_is_reported_once_per_field_and_not_once_per_record(caplog):
     """
     Перечитывание метаданных было ограничено одним разом на объект, а сама строка лога — нет:
-    поле вне $metadata давало запись на КАЖДУЮ запись страницы. На странице их десятки тысяч.
+    поле вне $metadata давало запись на каждую запись страницы. На странице их десятки тысяч.
     """
     obj = "Catalog_Контрагенты"
     metadata = MetadataReader(odata_url="http://fake")
@@ -187,7 +187,7 @@ CYRILLIC = ('админ', 'секрет')
 def test_requests_cannot_send_cyrillic_credentials_itself():
     """
     Почему пара (пользователь, пароль) уходит в requests не кортежем: его Basic кодируется в
-    latin-1 (историческое поведение, до RFC 7617) и роняет ЛЮБОЙ запрос ещё до отправки. Для 1С
+    latin-1 (историческое поведение, до RFC 7617) и роняет любой запрос ещё до отправки. Для 1С
     это не экзотика — пользователь «админ» с русским паролем заводится повсеместно.
     """
     with pytest.raises(UnicodeEncodeError):
@@ -196,7 +196,7 @@ def test_requests_cannot_send_cyrillic_credentials_itself():
 
 def test_cyrillic_credentials_are_sent_in_utf8():
     """
-    UTF-8 — не компромисс, а единственное, что работает: на живой 1С (демо УТ, публикация на IIS)
+    UTF-8 — не компромисс, а единственное, что работает: на реальной 1С (демо УТ, публикация на IIS)
     заголовок в UTF-8 принимается (200), тот же заголовок в cp1251 — 401.
     """
     prepared = requests.Request('GET', 'http://host/',

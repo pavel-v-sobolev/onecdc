@@ -47,7 +47,7 @@ def test_offline_mapper_reproduces_the_plain_translit():
 
 
 def test_length_limit_is_counted_in_bytes_not_characters():
-    # Postgres считает идентификатор в БАЙТАХ и лишнее обрезает молча. Буквы вне таблицы
+    # Postgres считает идентификатор в байтах и лишнее обрезает молча. Буквы вне таблицы
     # транслита (украинские і ї є, белорусская ў) остаются двухбайтовыми: 63 символа — 113 байт,
     # и два разных имени схлопывались бы в одну таблицу незаметно.
     name = 'Catalog_' + 'і' * 60
@@ -71,7 +71,7 @@ COLLIDING = [
 
 @pytest.mark.parametrize("first, second", COLLIDING)
 def test_translit_alone_is_not_injective(first, second):
-    # Исходный дефект: без арбитра эти пары дают ОДНО имя, и данные двух объектов 1С ложатся
+    # Исходный дефект: без арбитра эти пары дают одно имя, и данные двух объектов 1С ложатся
     # в одну таблицу. Транслит починить нельзя — можно только не доверять ему в одиночку.
     m = NameMapper.offline()
     assert m.map_object_name(first) == m.map_object_name(second)
@@ -152,7 +152,7 @@ def test_claims_are_recorded_for_both_namespaces(db):
 # --- Гонка: арбитром выступает уникальный индекс, а не порядок вызовов ---
 
 def test_concurrent_mappers_agree_on_one_object(db):
-    # Два процесса регистрируют ОДИН объект: оба считают одного кандидата и вставляют одинаковую
+    # Два процесса регистрируют один объект: оба считают одного кандидата и вставляют одинаковую
     # строку. Выигрывает один, проигравший перечитывает и получает тот же ответ.
     mappers = [_mapper(db) for _ in range(8)]
     barrier = threading.Barrier(len(mappers))
@@ -173,7 +173,7 @@ def test_concurrent_mappers_agree_on_one_object(db):
 
 
 def test_concurrent_mappers_split_two_colliding_objects(db):
-    # Два процесса одновременно регистрируют РАЗНЫЕ имена с одинаковым транслитом. Кому достанется
+    # Два процесса одновременно регистрируют разные имена с одинаковым транслитом. Кому достанется
     # чистое имя — решает гонка, но достаться оно обязано ровно одному.
     names = ['Catalog_Сер', 'Catalog_Сэр']
     barrier = threading.Barrier(len(names))

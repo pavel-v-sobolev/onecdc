@@ -23,7 +23,7 @@ def test_a_signal_arriving_before_any_loop_is_not_swallowed(monkeypatch):
     Сигнал приходит и тогда, когда цикла ещё нет: конструкторы, загрузка метаданных, первый
     run_once, ручной full_load.
 
-    Раньше обработчик в этом случае не делал НИЧЕГО — а перехват уже заменил поведение по
+    Раньше обработчик в этом случае не делал ничего — а перехват уже заменил поведение по
     умолчанию. То есть с библиотекой SIGTERM переставал завершать процесс, и `docker stop` добивал
     `SIGKILL` по истечении grace period. Хуже, чем не ставить перехват вовсе.
     """
@@ -66,7 +66,7 @@ def test_the_host_handler_is_called_too():
 
 def test_queued_work_is_cancelled_not_drained():
     """
-    Выход из `with ThreadPoolExecutor` — это shutdown(wait=True): пул дожидался ВСЕХ поставленных
+    Выход из `with ThreadPoolExecutor` — это shutdown(wait=True): пул дожидался всех поставленных
     заданий, включая ещё не начатые. А ставятся они разом, по всему списку заказов на выгрузку —
     десяток объектов первичной выгрузки это часы, которых grace period не покрывает.
     """
@@ -150,13 +150,13 @@ def test_installing_twice_does_not_make_the_handler_call_itself():
     """
     Установка бывает повторной: сработал конструктор, а потом хозяин позвал install явно.
 
-    Тогда `signal.getsignal` возвращает НАС, и запись этого «прежним» превращала обработчик в
+    Тогда `signal.getsignal` возвращает нас, и запись этого «прежним» превращала обработчик в
     вызов самого себя — остановка кончалась RecursionError вместо остановки. Запоминаем
     первоначального владельца сигнала.
     """
     original = stop_module._previous_handlers.get(signal.SIGTERM)
     try:
-        # Предусловие делаем явным: сперва наш обработчик обязан ВСТАТЬ, иначе повторная установка
+        # Предусловие делаем явным: сперва наш обработчик обязан встать, иначе повторная установка
         # запомнит SIG_DFL и тест ничего не проверит.
         stop_module.install_signal_handlers()
         assert signal.getsignal(signal.SIGTERM) is handle_stop_signal

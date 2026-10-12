@@ -142,7 +142,7 @@ def test_the_template_does_not_pretend_to_read_the_mode():
 
 def test_the_connection_ceiling_is_set_by_us_and_not_inherited(db, monkeypatch):
     """
-    Потолок — это СУММА pool_size и max_overflow, и по умолчанию он на десять больше, чем
+    Потолок — это сумма pool_size и max_overflow, и по умолчанию он на десять больше, чем
     кажется: pool_size=5 на деле удерживает 15 (измерено). Три контейнера дают 45 соединений
     против лимита сервера, и ни одной ошибки до самого упора (CDC-40).
 

@@ -1,10 +1,9 @@
 # Образ ставит onecdc с PyPI по версии: версия пакета = версия образа, собирать нечего.
 #   docker build --build-arg ONECDC_VERSION=1.0.2 -t sobolevp/onecdc:1.0.2 -t sobolevp/onecdc:latest .
 # Версия должна быть уже опубликована на PyPI, иначе pip внутри сборки её не найдёт.
-# Базовый образ по тегу, а не по дайджесту — осознанно: тег приносит патчи безопасности с
-# каждой пересборкой, а образ пересобирается на каждый релиз. Дайджест дал бы побайтовую
-# воспроизводимость ценой ручного обновления и залежавшихся CVE. Версии Python-зависимостей при
-# этом закреплены не здесь, а верхними границами в pyproject.toml.
+# Базовый образ указан тегом, чтобы получать обновления, включая патчи безопасности.
+# Для получения свежего образа при сборке используйте --pull.
+# Зависимости Python ограничены диапазонами из пакета; точные версии эта сборка не фиксирует.
 FROM python:3.13-slim
 
 ARG ONECDC_VERSION
@@ -28,7 +27,8 @@ ENV PYTHONUNBUFFERED=1 \
 RUN test -n "${ONECDC_VERSION}" || (echo "build-arg ONECDC_VERSION is required" >&2; exit 1) \
     && pip install --no-cache-dir "onecdc[postgres]==${ONECDC_VERSION}"
 
-# Шаблон конфига внутри образа: достаётся из него же, версия шаблона совпадает с версией библиотеки.
+# Шаблон копируется из рабочего каталога. Собирайте образ из версии репозитория,
+# соответствующей ONECDC_VERSION; готовый шаблон можно извлечь командой ниже.
 #   docker run --rm sobolevp/onecdc:latest tar c -C /opt/onecdc config | tar x
 COPY config /opt/onecdc/config
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

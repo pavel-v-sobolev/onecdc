@@ -39,7 +39,7 @@ jobs:
       # бы каждый раз из «последних» версий.
       - run: uv sync --extra dev --locked
       # Тесты, которым нужна живая 1С, помечены integration и отсеиваются addopts из pyproject.
-      # Postgres нужен всем остальным — его и поднимает services выше.
+      # PostgreSQL для тестов с фикстурой db запускается в services выше.
       - run: uv run pytest -q
         env:
           ONECDC_TEST_DB_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc

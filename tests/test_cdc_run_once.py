@@ -3,7 +3,7 @@
 dev-Postgres. Параметры подключения берутся из debug_trade.py — там они и правятся, чтобы контуры не
 разъезжались (раньше здесь стояла своя копия, и адрес 1С успел разойтись с отладочным).
 
-Гоняет полный цикл Replicator.run_once(notify_changes=False): read → save БЕЗ notify, чтобы
+Гоняет полный цикл Replicator.run_once(notify_changes=False): read → save без notify, чтобы
 не списывать изменения из очереди обмена 1С и оставить прогон повторяемым. Проверяет, что
 метаданные читаются с живой 1С и изменения сохраняются в БД без ошибок.
 
@@ -24,7 +24,7 @@ from debug_trade import CONTOUR, DB_SCHEMA, DB_URL, EXCHANGE_NAME, ODATA_AUTH, O
 
 @pytest.mark.integration
 def test_run_once_against_live_1c():
-    # Не настроен контур — пропускаем, а не падаем: маркер integration отсеивает тест ПОСЛЕ
+    # Не настроен контур — пропускаем, а не падаем: маркер integration отсеивает тест после
     # сбора, и «нет настроек» — это не провал проверки, а её отсутствие.
     if not CONTOUR.is_configured:
         pytest.skip(CONTOUR.why_not)
@@ -49,7 +49,7 @@ def test_run_once_against_live_1c():
             assert inspect(repl.engine).get_table_names(schema=DB_SCHEMA)
     finally:
         # Отпускаем аренду узла обмена явно. Без этого повторный прогон в ближайшие 15 минут
-        # пропустил бы цикл (узел числился бы за завершившимся процессом) и прошёл бы ВХОЛОСТУЮ,
+        # пропустил бы цикл (узел числился бы за завершившимся процессом) и прошёл бы вхолостую,
         # не проверив ничего, — а выглядел бы успешным.
         repl.close()
 
