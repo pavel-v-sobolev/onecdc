@@ -190,7 +190,7 @@ def test_object_key_uses_recorder_key():
 
 def test_empty_key_measure_gets_type_default_instead_of_null():
     """
-    Пустое измерение в ключе 1С присылает пустым элементом (в json — null) либо не присылает вовсе:
+    Пустое измерение в ключе 1С присылает пустым элементом (в json — null) либо не присылает:
     так приходит «ИдентификаторСтроки» у регистра сумм документов. В целевой таблице поля ключа
     NOT NULL, поэтому без дефолта такая запись роняла вставку всей пачки — регистр не грузился.
     """
@@ -198,7 +198,7 @@ def test_empty_key_measure_gets_type_default_instead_of_null():
     primary_key = dict(_PRIMARY_KEY, ИдентификаторСтроки="String")
     reader = _reader(fields, primary_key=primary_key)
 
-    # Поля ИдентификаторСтроки в записи нет вовсе — 1С не прислала пустое измерение.
+    # Поля ИдентификаторСтроки в записи нет — 1С не прислала пустое измерение.
     reader._get_register_records(REG, {"d:Recorder_Key": REC, "d:RecordSet": {"d:element": [_row()]}})
 
     assert reader[REG].data["ИдентификаторСтроки"] == ['']

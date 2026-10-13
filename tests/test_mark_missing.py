@@ -89,7 +89,7 @@ def test_row_gone_from_1c_is_marked(db, monkeypatch):
     rep.full_load(CATALOG, batch_size=10)
     before = _rows(db, CATALOG)
 
-    # Второй прогон: "b" из 1С исчез (удалён физически — в обмен такое не приходит вовсе).
+    # Второй прогон: "b" из 1С исчез (удалён физически — в обмен такое не приходит).
     _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
     rep.full_load(CATALOG, batch_size=10, mark_missing=True)
 
@@ -114,8 +114,8 @@ def test_period_run_marks_only_rows_of_that_period(db, monkeypatch):
     _pages(rep, CATALOG, monkeypatch, [[outside, inside]])
     rep.full_load(CATALOG, batch_size=10)
 
-    # Июньское окно, и 1С отдаёт по нему пусто: июньская строка исчезла. Январская в окно не
-    # входит вовсе — прогон её не видел и судить о ней не может.
+    # Июньское окно, и 1С отдаёт по нему пусто: июньская строка исчезла. Январская находится
+    # за пределами окна — прогон её не видел и судить о ней не может.
     calls = _pages(rep, CATALOG, monkeypatch, [[]])
     rep.full_load(CATALOG, batch_size=10, date_field="Date",
                   date_from=date(2026, 6, 1), date_to=date(2026, 6, 30))
@@ -140,7 +140,7 @@ def test_marking_is_on_by_default(db, monkeypatch):
 
 
 def test_marking_can_still_be_turned_off(db, monkeypatch):
-    # Выключается только осознанно и только у full_load: у расписания такого параметра нет вовсе.
+    # Выключается только осознанно и только у full_load: у расписания такого параметра нет.
     rep = _replicator(db)
     _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1"), _record(Ref_Key="b", Val="2")]])
     rep.full_load(CATALOG, batch_size=10)
@@ -175,7 +175,7 @@ def test_a_row_that_moved_out_of_the_period_is_marked_anyway(db, monkeypatch):
     ответ «такого нет» приходит кодом 404 — и отличить его от отказа инфраструктуры можно лишь по
     телу ответа, которое веб-сервер волен подменить своей страницей (IIS так и делает по
     умолчанию). То есть правильность пометки зависела от настройки публикации, а на регистре по
-    регистратору обходного пути нет вовсе: составной Recorder не фильтруется ничем.
+    регистратору обходного пути нет: составной Recorder не фильтруется ничем.
 
     Поэтому переспрашивать перестали. Пометка снимается сама, когда строка поступит изменением
     (см. соседний тест) либо следующей выгрузкой её нового периода.
@@ -378,7 +378,7 @@ def test_a_period_run_refuses_to_mark_when_the_scope_cannot_be_built(db, monkeyp
 
 def test_a_full_run_still_marks_without_a_date_column(db, monkeypatch, caplog):
     """Отказ — только у прогона за период. Прогон без границ прочитал объект целиком, и кандидатом
-    законно становится вся таблица: колонка даты ему не нужна вовсе."""
+    законно становится вся таблица: колонка даты ему не нужна."""
     rep = _first_run(db, monkeypatch)
     _pages(rep, CATALOG, monkeypatch, [[_record(Ref_Key="a", Val="1")]])
 

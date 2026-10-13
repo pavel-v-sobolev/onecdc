@@ -42,7 +42,7 @@ UNKNOWN_IN_ATTRIBUTE = """
   </EntityType>
 """
 
-# Ключ ссылается на поле, которого в Property нет вовсе — метаданные сломаны.
+# Ключ ссылается на поле, которого в Property нет — метаданные сломаны.
 BROKEN_KEY = """
   <EntityType Name="InformationRegister_Broken">
     <Key><PropertyRef Name="Ref_Key"/><PropertyRef Name="Nowhere"/></Key>

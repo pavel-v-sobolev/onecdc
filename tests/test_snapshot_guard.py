@@ -191,7 +191,7 @@ def test_table_parts_of_a_deleted_owner_are_marked(db, monkeypatch):
         assert any(total > marked for total, marked in alive_before.values()), \
             'предпосылка: у документа есть живые строки ТЧ'
 
-        # Документ физически удалён в 1С: его entry не приходит вовсе.
+        # Документ физически удалён в 1С: его entry не приходит.
         real_get = data_reader.requests.get
         monkeypatch.setattr(data_reader.requests, 'get',
                             lambda u, *a, **kw: (_EmptyFeed() if 'ЗаказКлиента?' in u
@@ -256,7 +256,7 @@ def test_a_snapshot_write_is_fenced_by_the_lease(db):
 
 
 def test_without_a_lease_the_guard_is_absent(db):
-    # Прямой вызов save и тесты идут без аренды вовсе — условия тогда быть не должно, иначе
+    # Прямой вызов save и тесты идут без аренды — условия тогда быть не должно, иначе
     # выгрузка на пустой базе не записала бы ничего.
     w = _writer(db)
     assert w.lease_guard is None

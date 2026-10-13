@@ -103,7 +103,7 @@ def test_fixed_bounds_are_passed_as_is(db):
 
 
 def test_marking_is_not_configurable(db):
-    # Пометкой пропавших строк расписание не управляет вовсе: выключить её значило бы тихо сломать
+    # Пометкой пропавших строк расписание не управляет: выключить её значило бы тихо сломать
     # витрины, а удаления у независимого регистра больше видеть неоткуда.
     with pytest.raises(TypeError):
         FullLoadCron(_replicator(db, []), TABLE, cron="0 3 * * *", mark_missing=False)

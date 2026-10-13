@@ -25,7 +25,7 @@ def test_a_signal_arriving_before_any_loop_is_not_swallowed(monkeypatch):
 
     Раньше обработчик в этом случае не делал ничего — а перехват уже заменил поведение по
     умолчанию. То есть с библиотекой SIGTERM переставал завершать процесс, и `docker stop` добивал
-    `SIGKILL` по истечении grace period. Хуже, чем не ставить перехват вовсе.
+    `SIGKILL` по истечении grace period. Хуже, чем работать без перехвата.
     """
     import weakref
 

@@ -30,7 +30,7 @@ from conftest import TEST_QUEUE_GUID
 
 PASSWORD = 's3cret-pass'
 # Уровень в тестах поднимаем этому логгеру поимённо: caplog.at_level без имени трогает только
-# корневой, а уровень нашего мог поднять соседний тест — и logger.debug не дошёл бы вовсе.
+# корневой, а уровень нашего мог поднять соседний тест — и logger.debug не попал бы в журнал.
 READER_LOGGER = 'onecdc.data_reader'
 
 

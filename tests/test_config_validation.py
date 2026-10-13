@@ -127,7 +127,7 @@ def test_a_guid_that_is_not_a_node_of_this_plan_stops_the_cycle(db, caplog):
     Раньше здесь были WARNING и 0, то есть «продолжим с первого пакета». Молчаливым простоем это
     не кончается: SelectChanges со старым номером 1С понимает как «отдай всё, что зарегистрировано
     с тех пор», а подтверждение снимает регистрацию — обмен идёт, счётчики стоят на единице, и
-    ошибки конфигурации не видно вовсе.
+    ошибки конфигурации не видно.
     """
     with fake_1c.running_server(_config_dir()) as (odata_url, fake):
         repl = _make(db, odata_url=odata_url, queue_guid="12345678-1234-1234-1234-123456789abc")
@@ -162,7 +162,7 @@ def test_this_node_is_refused_instead_of_being_read_from(db, caplog):
 
 def test_a_replicator_without_an_exchange_plan_is_allowed(db):
     """
-    Полная выгрузка читает объект прямо из OData и план обмена не использует вовсе. Требовать его
+    Полная выгрузка читает объект прямо из OData и план обмена не использует. Требовать его
     в конструкторе значило бы заставлять выдумывать план ради разовой загрузки — а выдуманный
     оседал в журнале и в onecdc_exchange_nodes.
     """

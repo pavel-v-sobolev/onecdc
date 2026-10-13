@@ -137,7 +137,7 @@ def test_abandoned_row_delivers_the_signal_it_owed(db):
 
 
 def test_a_row_of_a_vanished_process_is_delivered_too(db):
-    # kill -9: выход из блока не отработал вовсе, строка осталась с протухшей отметкой. Признак
+    # kill -9: выход из блока не отработал, строка осталась с протухшей отметкой. Признак
     # тот же, разбор тот же — отдельной ветки для этого не нужно.
     delivered = []
     gone = _tracker(db, [])

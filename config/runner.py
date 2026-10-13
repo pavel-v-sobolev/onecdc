@@ -67,7 +67,7 @@ CRON_JOBS = [
     # dict(table_name="Document_ZakazKlienta", cron="0 3 * * *",
     #      date_field="Date", date_from=timedelta(days=3)),
     #
-    # По воскресеньям в 02:00 — справочник целиком: он маленький, границы не нужны вовсе.
+    # По воскресеньям в 02:00 — справочник целиком: он маленький, границы не нужны.
     # dict(table_name="Catalog_Nomenklatura", cron="0 2 * * 0"),
 ]
 

@@ -423,7 +423,7 @@ def test_failed_handler_keeps_window_and_records_error(db):
 
 
 def test_a_disabled_handler_catches_up_when_enabled(db):
-    # Выключенный не вызывается — но сигнал ему ставится и копится. Раньше он не ставился вовсе
+    # Выключенный не вызывается — но сигнал ему ставится и копится. Раньше он не ставился
     # (подписки читались с WHERE enabled), а окно за простой всё равно копилось: last_run_at не
     # двигается. Получалось худшее из двух — и окно накопилось, и браться за него обработчик
     # решал по случайному поводу, при первом изменении после включения.
@@ -501,8 +501,8 @@ def test_full_rebuild_request_alone_starts_the_handler(db):
 
 
 def test_full_rebuild_requested_during_a_run_is_not_lost(db):
-    # Заказ пересборки может прийти в середине прогона (новая колонка приехала пакетом, пока
-    # обработчик считал). Записать поверх него свой результат — значит молча его отменить.
+    # Запрос на пересборку может поступить во время работы обработчика. Сохранение результата
+    # текущего прогона не должно сбрасывать этот запрос.
     spy = Spy()
     runner, _ = _runner(db, spy)
     runner.run_if_pending()
@@ -831,7 +831,7 @@ def test_heartbeat_does_not_revive_writes_of_a_dead_twin(db):
 
 def test_merge_heartbeat_works_without_a_replication_loop(db, monkeypatch):
     # Отметку живости раньше вёл только run_forever репликатора. Но строки реестра появляются и в
-    # одиночном run_once, и в вызванном руками full_load — там цикла нет вовсе, и merge, идущий
+    # одиночном run_once, и в вызванном руками full_load — там цикла нет, и merge, идущий
     # дольше MERGE_HEARTBEAT_TTL, признавался бы брошенным: обработчик перешагнул бы его строки.
     from onecdc import write_tracker as tracker_module
     from onecdc.handlers import MERGE_HEARTBEAT_TTL
@@ -987,8 +987,8 @@ def test_rebuild_goes_block_by_block(db):
 
 
 def test_changes_are_applied_between_rebuild_blocks(db):
-    # Ради этого пересборка и разбита на блоки: витрина не стоит холодной всю пересборку.
-    # Изменение, пришедшее в середине, применяется, не дожидаясь последнего блока.
+    # Витрина продолжает обновляться во время пересборки: накопившиеся изменения применяются
+    # между блоками, без ожидания последнего блока.
     spy = BlockSpy()
     runner = _runner_for(db, spy)
 

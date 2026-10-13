@@ -291,7 +291,7 @@ def test_read_object_page_url(db, monkeypatch):
 
     monkeypatch.setattr("onecdc.data_reader.requests.get", fake_get)
 
-    # Смещение в URL; без фильтра $filter не появляется вовсе.
+    # Смещение в URL; без фильтра $filter не появляется.
     reader.read_object("Catalog_X", top=500, key_fields=["Ref_Key"], skip=1000)
     url = captured["url"]
     assert "$top=500" in url and "$skip=1000" in url and "$orderby=Ref_Key" in url
@@ -399,9 +399,9 @@ def test_the_same_object_is_not_queued_twice(db):
 
 def test_a_failed_full_load_backs_off_instead_of_retrying_every_cycle(db, monkeypatch):
     """
-    Без паузы цикл брался за упавший объект каждый interval и читал его С нуля — а прогон бывает
-    на сотни страниц. Неустранимая беда давала так сутки непрерывной нагрузки на 1С без единой
-    полезной записи, и в логе по строке в минуту.
+    После ошибки пауза перед повторной выгрузкой должна увеличиваться. Без неё каждая попытка
+    начинала чтение объекта заново через interval секунд. При устойчивой ошибке это создавало
+    постоянную нагрузку на 1С, не позволяя завершить выгрузку.
     """
     from onecdc.replicator import DEFAULT_MAX_BACKOFF, FULL_LOAD_RETRY_DELAY
 
@@ -579,7 +579,7 @@ def test_build_date_filter_wraps_record_set_register(db):
     assert rep._build_date_filter("Document_Y_Tovary", "Date", date(2026, 6, 1), None) \
         == "Date ge datetime'2026-06-01T00:00:00'"
 
-    # Независимый регистр сведений читается плоскими записями (регистратора у него нет вовсе,
+    # Независимый регистр сведений читается плоскими записями (регистратора у него нет,
     # object_key пуст), и дата-измерение лежит на верхнем уровне — лямбда ему не нужна и не
     # подходит. Имя поля при этом произвольное: у документа это Date, у регистра с регистратором
     # Period, а у независимого — как назвал разработчик конфигурации.

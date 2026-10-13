@@ -79,9 +79,9 @@ class ChangeReader(DataReader):
         # (см. Replicator.run_once): пустой не подтверждаем, непустой — обязаны.
         self.entries_read = len(change_entries)
         parsed = self.read_data_entries(change_entries)
-        # Пакет приносит набор записей регистра бухгалтерии без субконто (их нет в описании
-        # движения вовсе) — дочитываем их отдельным запросом по периодам пакета, если чтение
-        # субконто включено (см. DataReader._fill_subconto).
+        # Описание движения регистра бухгалтерии не содержит субконто, поэтому в пакете их нет.
+        # Если чтение субконто включено, дочитываем их отдельным запросом по периодам пакета
+        # (см. DataReader._fill_subconto).
         self._fill_subconto()
         # Одна строка на пакет: что пришло, сколько строк и сколько весил ответ. Раньше лог писался
         # на каждую entry, и один пакет давал сотни одинаковых строк.
@@ -108,9 +108,7 @@ class ChangeReader(DataReader):
 
 
     def read_nodes(self) -> list[dict]:
-        """
-        Все узлы плана обмена (как их отдаёт OData), включая ЭтотУзел.
-        """
+        """Вернуть все узлы плана обмена в формате OData, включая ЭтотУзел."""
         url = f"{self.odata_url}/ExchangePlan_{self.exchange_name}?$format=json"
         response = requests.get(url,auth=self.odata_auth,timeout=resolve_timeout(self.request_timeout))
         raise_for_status(response, f'ExchangePlan_{self.exchange_name}')
@@ -125,16 +123,13 @@ class ChangeReader(DataReader):
 
     @staticmethod
     def _nodes_listing(nodes) -> str:
-        """Узлы столбиком — из лога guid можно скопировать прямо в конфигурацию."""
+        """Сформировать список узлов для журнала, из которого можно скопировать GUID в настройки."""
         return ''.join(f"\n    {node.get('Ref_Key')}  {node.get('Code') or ''}"
                        f"  {node.get('Description') or ''}".rstrip()
                        for node in nodes if not node.get('ThisNode'))
 
     def _raise_no_queue_guid(self):
-        """
-        queue_guid не задан: выводим в лог список узлов плана обмена, чтобы guid можно было взять
-        прямо отсюда, не открывая конфигуратор и не имея обработки в 1С.
-        """
+        """Сообщить об отсутствии queue_guid и вывести список доступных узлов плана обмена."""
         try:
             nodes = self.available_nodes()
         except Exception as error:
@@ -153,7 +148,7 @@ class ChangeReader(DataReader):
                          "specify the Ref_Key of the exchange node")
 
     def _raise_bad_queue_guid(self, reason: str, nodes):
-        """Узел указан, но не тот. Список печатаем так же, как для незаданного guid."""
+        """Сообщить о недопустимом узле и вывести список доступных узлов плана обмена."""
         logger.error("queue_guid %s %s. Available nodes of exchange plan %s:%s",
                      self.queue_guid, reason, self.exchange_name, self._nodes_listing(nodes))
         raise ValueError(f"queue_guid {self.queue_guid} {reason} "
