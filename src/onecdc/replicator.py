@@ -9,26 +9,23 @@ Replicator связывает MetadataReader, ChangeReader, DataReader и DBWrit
 
 import functools
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta
-from urllib.parse import quote
 
 import requests
 from dbmerge import mergeResult
 from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_, exists
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
-from onecdc.metadata_reader import (ACCOUNTING_REGISTER_TYPE, METADATA_ONLY_TYPES,
-                                    SUPPORTED_TYPES, MetadataReader, type_mapping)
+from onecdc.metadata_reader import (METADATA_ONLY_TYPES, SUPPORTED_TYPES,
+                                    MetadataReader, type_mapping)
 from onecdc.common_functions import (DB_NOW_WITH_TIMEZONE, ResponseTooLargeError,
                                      check_queue_guid, format_bytes, format_duration,
                                      instance_owner, odata_datetime_value)
-from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO, IS_DELETED_OR_EMPTY_FIELD,
-                                MAX_RESPONSE_BYTES,
-                                ODATA_PREFIX, RECORDER_FIELDS)
+from onecdc.data_reader import (DataReader, FULL_LOAD_MESSAGE_NO,
+                                IS_DELETED_OR_EMPTY_FIELD, MAX_RESPONSE_BYTES)
 from onecdc.change_reader import ChangeReader
 from onecdc.full_load_claim import (CLAIM_HEARTBEAT_TTL, HEARTBEAT_FIELD,
                                     OWNER_FIELD, FullLoadClaim)

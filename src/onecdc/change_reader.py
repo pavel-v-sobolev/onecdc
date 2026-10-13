@@ -8,8 +8,6 @@ ChangeReader использует разбор данных из DataReader. Ч�
 
 import requests
 
-import xmltodict
-
 from onecdc.data_reader import MAX_RESPONSE_BYTES, DataReader
 from onecdc.metadata_reader import MetadataReader, resolve_timeout
 from onecdc.common_functions import (canonical_guid, check_queue_guid, format_bytes, parse_odata,

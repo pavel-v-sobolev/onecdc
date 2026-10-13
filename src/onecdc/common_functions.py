@@ -20,7 +20,7 @@ from xml.parsers.expat import ExpatError
 
 import requests
 import xmltodict
-from sqlalchemy import DateTime, func
+from sqlalchemy import func
 
 from onecdc.logging_config import get_logger
 
@@ -161,7 +161,7 @@ DB_NOW_WITH_TIMEZONE = func.now()
 
 logger = get_logger(__name__)
 
-# Сколько символов исходного текста ошибки оставлять перед пометой о сокращении. Ограничение
+# Сколько символов исходного текста ошибки оставлять перед пометкой о сокращении. Ограничение
 # применяется и к нераспознанному ответу, когда вместо описания используется его тело.
 MAX_ERROR_BODY_CHARS = 500
 
@@ -192,8 +192,16 @@ def format_duration(seconds: float) -> str:
     return f'{minutes}m {sec:02d}s'
 
 
-def _one_line(text: str) -> str:
-    """Убрать переносы и лишние пробелы, затем сократить текст до MAX_ERROR_BODY_CHARS."""
+def _error_excerpt(text: str) -> str:
+    """
+    Выдержка из текста ошибки для лога и для `onecdc_handlers.last_error`: переносы и лишние
+    пробелы сворачиваются в одиночные, затем текст обрезается до MAX_ERROR_BODY_CHARS с пометкой,
+    сколько символов осталось за кадром.
+
+    Обрезка — часть работы, а не побочный эффект: 1С отдаёт в теле ошибки и многострочные
+    трейсбеки, и base64-дампы на сотни строк. Функция для ошибок и только для них — предел
+    в 500 символов на чужих данных молча испортил бы значение.
+    """
     text = re.sub(r'\s+', ' ', text).strip()
     if len(text) > MAX_ERROR_BODY_CHARS:
         return f'{text[:MAX_ERROR_BODY_CHARS]}... [+{len(text) - MAX_ERROR_BODY_CHARS} chars]'
@@ -214,7 +222,7 @@ def _exception_descriptions(payload: dict) -> list[str]:
     kept: list[str] = []
     node = payload.get('exception') or payload
     while isinstance(node, dict):
-        descr = _one_line(node.get('descr') or '')
+        descr = _error_excerpt(node.get('descr') or '')
         if descr and not any(descr in text for text in kept):
             kept = [text for text in kept if text not in descr]
             kept.append(descr)
@@ -253,7 +261,7 @@ def _show_control_chars(text: str) -> str:
 
 def _readable(text: str) -> str:
     """Декодировать base64, показать управляющие символы и свернуть текст в одну строку."""
-    return _one_line(_show_control_chars(_decode_base64(text.strip())))
+    return _error_excerpt(_show_control_chars(_decode_base64(text.strip())))
 
 
 def extract_error_text(body: str) -> str:

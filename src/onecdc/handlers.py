@@ -29,7 +29,6 @@ boundary: тогда видимые новые строки будут повт�
 изменения в том же потоке. Подробности контракта — в Handler и README_API.md.
 """
 
-import itertools
 import threading
 import time
 from dataclasses import dataclass
@@ -38,7 +37,7 @@ from types import ModuleType
 from typing import Any, Callable, Iterable, Iterator
 
 from sqlalchemy import (ARRAY, Boolean, case, Column, ColumnElement, DateTime, Engine, exists,
-                        Float, func, insert, inspect, MetaData, or_, select, String, Table,
+                        Float, func, insert, MetaData, or_, select, String, Table,
                         text, update)
 
 from onecdc.common_functions import DB_NOW_WITH_TIMEZONE, instance_owner

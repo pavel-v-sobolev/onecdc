@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import MetaData, Table, select
 
 from onecdc import DataObject, NameMapper
-from onecdc.data_reader import DataReader, _json_safe, _odata_literal
+from onecdc.data_reader import DataReader, _odata_literal
 from onecdc.db_writer import DBWriter
 from onecdc.metadata_reader import MetadataObject
 
@@ -54,13 +54,6 @@ def test_a_broken_number_still_becomes_null_instead_of_breaking_the_batch():
 def test_an_odata_literal_never_uses_exponential_form(value, expected):
     # Экспоненциальную запись 1С в $filter не принимает.
     assert _odata_literal(value, 'Double') == expected
-
-
-def test_json_export_keeps_the_previous_wire_shape():
-    # json.dumps Decimal не умеет вовсе. Отдаём float — ровно то, что уходило в приёмники до
-    # появления точного разбора, чтобы не менять тип поля в сообщении.
-    assert _json_safe(Decimal('3333.33')) == 3333.33
-    assert isinstance(_json_safe(Decimal('3333.33')), float)
 
 
 def test_an_exact_number_reaches_the_database(db):

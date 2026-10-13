@@ -10,7 +10,7 @@ import random
 import time
 from datetime import datetime
 
-from sqlalchemy.exc import CompileError, DatabaseError, IntegrityError, NoSuchTableError
+from sqlalchemy.exc import CompileError, DatabaseError, IntegrityError
 from sqlalchemy import (DateTime, Engine, Index, JSON, MetaData, Table, Integer, Numeric,
                         inspect, text, tuple_, select, or_, and_, exists)
 from sqlalchemy.dialects.postgresql import JSONB
