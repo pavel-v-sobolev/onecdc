@@ -189,39 +189,3 @@ def test_a_packet_of_only_unsupported_objects_does_not_stall_the_plan(db, monkey
             assert 'CHANGES LOST' in caplog.text, 'потеря обязана быть громкой'
         finally:
             repl.close()
-
-
-def test_the_chart_of_characteristic_types_is_read_for_metadata_but_not_loaded(db):
-    """
-    План видов характеристик — единственный класс, который читается метаданными, но не сохраняется.
-
-    Убрать его из метаданных вместе с остальными было нельзя: по ним регистр бухгалтерии ищет, в
-    каком плане лежит вид субконто (DataReader._find_ext_dimension_chart перебирает метаданные), и
-    без этого ключом субконто остался бы голый Guid. Отсюда развилка, которую легко потерять при
-    следующей правке списка классов, — поэтому она под тестом.
-    """
-    from conftest import TEST_QUEUE_GUID
-    from onecdc import Replicator
-    from onecdc.metadata_reader import METADATA_ONLY_TYPES
-
-    chart = "ChartOfCharacteristicTypes_VidySubkonto"
-    assert chart.startswith(METADATA_ONLY_TYPES)
-
-    repl = Replicator(odata_url="http://x", odata_auth=None, exchange_name="План",
-                      queue_guid=TEST_QUEUE_GUID, engine=db.engine, db_schema=db.schema)
-    try:
-        repl.metadata[chart] = MetadataObject(chart, {"Ref_Key": "Guid"}, {"Ref_Key": "Guid"})
-        repl.metadata["Catalog_X"] = MetadataObject("Catalog_X", {"Ref_Key": "Guid"},
-                                                    {"Ref_Key": "Guid"})
-        repl.metadata.is_loaded = True
-
-        # Метаданные есть — регистру бухгалтерии есть где искать вид субконто.
-        assert chart in repl.metadata
-
-        # Но выгружать его мы не беремся: ни в списке объектов, ни через full_load.
-        assert chart not in repl.list_objects()
-        assert "Catalog_X" in repl.list_objects()
-        with pytest.raises(ValueError, match='metadata only'):
-            repl.full_load(chart)
-    finally:
-        repl.close()

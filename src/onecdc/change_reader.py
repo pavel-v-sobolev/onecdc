@@ -33,10 +33,10 @@ class ChangeReader(DataReader):
 
     def __init__(self, odata_url: str, exchange_name: str, queue_guid: str,
                  metadata: MetadataReader, odata_auth: tuple[str, str] | None = None,
-                 request_timeout: float | None = None, read_subconto: bool = False,
+                 request_timeout: float | None = None,
                  max_response_bytes: int | None = MAX_RESPONSE_BYTES):
         super().__init__(odata_url, metadata, odata_auth, request_timeout,
-                         read_subconto=read_subconto, max_response_bytes=max_response_bytes)
+                         max_response_bytes=max_response_bytes)
         self.exchange_name = exchange_name
         # Канонизируем здесь, а не только в конструкторе репликатора: ридер создают и напрямую,
         # и тогда guid из формы 1С (верхний регистр) не совпал бы с Ref_Key при сравнении.
@@ -79,10 +79,6 @@ class ChangeReader(DataReader):
         # (см. Replicator.run_once): пустой не подтверждаем, непустой — обязаны.
         self.entries_read = len(change_entries)
         parsed = self.read_data_entries(change_entries)
-        # Описание движения регистра бухгалтерии не содержит субконто, поэтому в пакете их нет.
-        # Если чтение субконто включено, дочитываем их отдельным запросом по периодам пакета
-        # (см. DataReader._fill_subconto).
-        self._fill_subconto()
         # Одна строка на пакет: что пришло, сколько строк и сколько весил ответ. Раньше лог писался
         # на каждую entry, и один пакет давал сотни одинаковых строк.
         logger.info("Read changes (message %s): %s entries, %s rows, %s%s",

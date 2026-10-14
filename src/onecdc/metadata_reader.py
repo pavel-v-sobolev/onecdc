@@ -58,11 +58,7 @@ type_mapping = {'Guid':Uuid(),
                 # ХранилищеЗначения публикуется парой полей: <Имя> (Edm.Stream, см. IGNORED_TYPES)
                 # и <Имя>_Base64Data (Edm.Binary). Binary реально приходит в теле ответа
                 # base64-строкой (в ней бывает JSON или XML-сериализация 1С), поэтому храним как текст.
-                'Binary':String(),
-                # Субконто регистра бухгалтерии: тип синтетический, поля с ним в $metadata нет —
-                # см. EXT_DIMENSIONS_FIELDS. JSON, а не JSONB: диалект знает только писатель
-                # (DBWriter.save поднимает его до JSONB на postgres).
-                'ExtDimensions':JSON()}
+                'Binary':String()}
 
 # Типы, которых нет в данных: их нельзя отобразить в колонку, но это не ошибка метаданных.
 # Collection — табличная часть, читается отдельным объектом.
@@ -99,15 +95,9 @@ ENTITY_TYPES = ('Catalog','Document')
 #
 # Класс возвращается сюда вместе с записанными ответами 1С и тестом на них, не раньше.
 
-# План видов характеристик: метаданные читаем, объект не сохраняем. Читаем потому, что по нему
-# регистр бухгалтерии определяет виды субконто (DataReader._find_ext_dimension_chart перебирает
-# планы в метаданных) — без этого ключом субконто остался бы голый Guid.
-METADATA_ONLY_TYPES = ('ChartOfCharacteristicTypes',)
 # Классы, которые мы умеем сохранять. Всё остальное, придя в пакете изменений, будет потеряно
 # (пакет подтверждается целиком), поэтому такие объекты логируются отдельно — см. read_data_entries.
 SUPPORTED_TYPES = REGISTER_TYPES + ENTITY_TYPES
-# Классы, для которых строятся метаданные. Шире SUPPORTED_TYPES ровно на METADATA_ONLY_TYPES.
-KNOWN_ENTITY_TYPES = ENTITY_TYPES + METADATA_ONLY_TYPES
 METADATA_POSTFIXES = ('_RecordType','_RowType','_Balance','_Turnover','_BalanceAndTurnover')
 ODATA_PREFIX = 'StandardODATA.'
 TYPE_PREFIX = 'Edm.'
@@ -116,19 +106,7 @@ TYPE_PREFIX = 'Edm.'
 # типов документов, и Recorder_Key (Guid, без Recorder_Type), если тип регистратора единственный.
 RECORDER_FIELDS = ('Recorder', 'Recorder_Key', 'Recorder_Type')
 
-# --- Субконто регистра бухгалтерии ---
-# Колонки, которых в $metadata нет: в описании движения (_RowType) субконто отсутствуют,
-# они живут только в виртуальной таблице RecordsWithExtDimensions и собираются оттуда
-# (см. DataReader). Ключ JSON — предопределённое имя вида субконто или его GUID,
-# значение — {"value", "type"}.
-#
-# Почему JSON, а не колонки: 1С отдаёт субконто слотами (ExtDimensionDr1..3), а номер слота смысла
-# не имеет — субконто1 счёта 10 это Номенклатура, счёта 60 Контрагенты. Витрина, написавшая
-# `ExtDimensionDr1 = …`, была бы права ровно до следующего счёта, причём молча.
 ACCOUNTING_REGISTER_TYPE = 'AccountingRegister'
-EXT_DIMENSIONS_TYPE = 'ExtDimensions'
-# Сторона проводки -> имя колонки.
-EXT_DIMENSIONS_FIELDS = {'Dr': 'ExtDimensionsDr', 'Cr': 'ExtDimensionsCr'}
 # Системные поля движений регистра (не измерения/ресурсы/реквизиты).
 SYSTEM_REGISTER_FIELDS = frozenset(
     ('Period', 'LineNumber', 'Active', 'RecordType') + RECORDER_FIELDS)
@@ -483,11 +461,6 @@ class MetadataReader(UserDict):
                 object_key = self._get_object_key(item_name, properties, primary_key)
                 dimensions, resources, attributes = _classify_register_fields(
                     item_name, properties, complextypes)
-                if item_name.startswith(ACCOUNTING_REGISTER_TYPE):
-                    # Колонки субконто заводим после классификации: в 1С это измерения, но
-                    # программно ими не пользуются (внутри JSON), и в dimensions им делать нечего.
-                    properties.update({f: EXT_DIMENSIONS_TYPE
-                                       for f in EXT_DIMENSIONS_FIELDS.values()})
                 objects[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
                                                  dimensions, resources, attributes)
 
@@ -508,7 +481,7 @@ class MetadataReader(UserDict):
                 objects[item_name] = MetadataObject(item_name, properties, primary_key, object_key,
                                                  dimensions, resources, attributes)
 
-            elif (item_name.startswith(KNOWN_ENTITY_TYPES)
+            elif (item_name.startswith(ENTITY_TYPES)
                   and not item_name.endswith(METADATA_POSTFIXES)):
             # если документ или справочник без постфикса, то
             # читаем его описание полей и ключ

@@ -40,7 +40,6 @@ Replicator(
     full_load_workers: int = 2,           # фоновых потоков полной выгрузки
     log_retention_days: int = 30,         # сколько держать журнал загрузок; 0 — хранить всё
     automatic_full_load: bool = True,     # назначать выгрузку новым объектам и при смене типа
-    read_subconto: bool = False,          # субконто регистра бухгалтерии в JSON-колонку
     max_response_bytes: int | None = 512 * 1024**2,   # предел ответа 1С в байтах; None — без ограничения
 )
 ```
@@ -75,14 +74,13 @@ Replicator(
 `run_forever` вызывает его при штатном завершении. `close()` не останавливает активный цикл —
 сначала вызовите `request_stop()` и дождитесь завершения.
 
-### `full_load(object_name, batch_size=1000, date_field=None, date_from=None, date_to=None, mark_missing=True, read_subconto=None, skip_if_busy=True)`
+### `full_load(object_name, batch_size=1000, date_field=None, date_from=None, date_to=None, mark_missing=True, skip_if_busy=True)`
 
 | параметр | что делает |
 |---|---|
 | `batch_size` | максимальное число записей на странице; фактический размер подбирается с учётом объёма ответа |
 | `date_field`, `date_from`, `date_to` | выгрузка за период с включительными границами; `date_to` типа `date` включает весь день, а `datetime` и ISO-строка задают точный момент. При наличии поля даты большие объекты автоматически читаются окнами |
 | `mark_missing` | помечать строки, которых в 1С больше нет. По умолчанию **включено** |
-| `read_subconto` | субконто регистра бухгалтерии; `None` — как задано у репликатора |
 | `skip_if_busy` | при `True` занятый объект пропускается; при `False` возникает `FullLoadBusy` |
 
 На время выгрузки объект захватывается в общей служебной таблице. Это координирует

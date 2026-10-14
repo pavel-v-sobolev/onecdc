@@ -19,8 +19,7 @@ from dbmerge import mergeResult
 from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_, exists
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
-from onecdc.metadata_reader import (METADATA_ONLY_TYPES, SUPPORTED_TYPES,
-                                    MetadataReader, type_mapping)
+from onecdc.metadata_reader import SUPPORTED_TYPES, MetadataReader, type_mapping
 from onecdc.common_functions import (DB_NOW_WITH_TIMEZONE, ResponseTooLargeError,
                                      check_queue_guid, format_bytes, format_duration,
                                      instance_owner, odata_datetime_value)
@@ -608,7 +607,6 @@ class Replicator:
                  # Сколько дней держать журнал загрузок. 0 — хранить всё (тогда уборка ваша).
                  log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
                  automatic_full_load: bool = True,
-                 read_subconto: bool = False,
                  max_response_bytes: int | None = MAX_RESPONSE_BYTES):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
@@ -685,8 +683,6 @@ class Replicator:
             engine, lambda: self.metadata.objects_table,
             owner=instance_owner(self._owner_label),
             heartbeat_engine=self._lease_engine)
-        # Субконто регистра бухгалтерии: по умолчанию НЕ читаем (см. DataReader._fill_subconto).
-        self._read_subconto = read_subconto
         # {объект: сколько циклов подряд не разбирается} — см. _package_is_blocked.
         self._parse_failures: dict[str, int] = {}
         # Потолок размера ответа 1С (см. MAX_RESPONSE_BYTES). None — без ограничения.
@@ -696,18 +692,10 @@ class Replicator:
         self._full_load_queued: set[str] = set()
         self._full_load_retry_at: dict[str, float] = {}
         self._full_load_delay: dict[str, float] = {}
-        if read_subconto:
-            logger.warning(
-                "read_subconto=True: ext dimensions are read from the RecordsWithExtDimensions "
-                "virtual table, which supports neither $skip nor a usable Top, so they can only "
-                "be addressed by listing periods. On a large accounting register this means many "
-                "requests and it scales poorly. Analytics of the same posting is usually easier to "
-                "take from its recorder document than from the subconto JSON column")
 
         self.changes = ChangeReader(self._odata_url, self._exchange_name, self._queue_guid,
                                     self.metadata, odata_auth=self._odata_auth,
                                     request_timeout=self._request_timeout,
-                                    read_subconto=self._read_subconto,
                                     max_response_bytes=self._max_response_bytes)
         # lease_guard вшивает «объект всё ещё наш» прямо в условие записи снимка. Проверять до
         # записи здесь мало: страница пишется минутами, и проверка успевает устареть — а условие
@@ -1161,7 +1149,6 @@ class Replicator:
                   date_from: date | datetime | str | None = None,
                   date_to: date | datetime | str | None = None,
                   mark_missing: bool = True,
-                  read_subconto: bool | None = None,
                   skip_if_busy: bool = True) -> int:
         """
         Прочитать объект 1С и обновить его таблицу вместе с табличными частями.
@@ -1177,8 +1164,7 @@ class Replicator:
 
         mark_missing=True после успешного чтения помечает строки, отсутствующие в загруженной
         области. $skip не обеспечивает согласованного снимка меняющегося источника; ограничения
-        и защита от конкурентного CDC описаны в DESIGN.md. read_subconto=None наследует настройку
-        репликатора, True/False переопределяют её для этого вызова.
+        и защита от конкурентного CDC описаны в DESIGN.md.
 
         Возвращает сумму изменений строк по страницам и шагу пометки, а не число прочитанных
         или уникальных строк. Если объект занят, при skip_if_busy=True возвращает 0 с предупреждением,
@@ -1199,14 +1185,6 @@ class Replicator:
         date_from = _check_period_bound(date_from, 'date_from')
         date_to = _check_period_bound(date_to, 'date_to')
         object_name = self.metadata.resolve_object_name(object_name)
-        # Класс, метаданные которого читаются, но сохранять который мы не беремся (METADATA_ONLY_TYPES
-        # — сейчас это план видов характеристик, нужный регистру бухгалтерии для видов субконто).
-        # В метаданных он есть, поэтому имя разрешилось бы и выгрузка пошла бы — с результатом,
-        # который никто не проверял. Отказываем сразу и по делу.
-        if object_name.startswith(METADATA_ONLY_TYPES):
-            raise ValueError(
-                f'{object_name}: this class is read for metadata only and is not supported for '
-                f'loading (supported: {", ".join(SUPPORTED_TYPES)})')
         self._refuse_table_part(object_name)
         if date_field:
             date_field = self.metadata.resolve_field_name(object_name, date_field)
@@ -1224,7 +1202,7 @@ class Replicator:
                            "ready", object_name)
             return self._load_object(object_name, batch_size=batch_size, date_field=date_field,
                                      date_from=date_from, date_to=date_to,
-                                     mark_missing=mark_missing, read_subconto=read_subconto)
+                                     mark_missing=mark_missing)
         with self._full_load_claim.hold(object_name) as claimed:
             if not claimed:
                 if not skip_if_busy:
@@ -1236,10 +1214,10 @@ class Replicator:
                 return 0
             return self._load_object(object_name, batch_size=batch_size, date_field=date_field,
                                      date_from=date_from, date_to=date_to,
-                                     mark_missing=mark_missing, read_subconto=read_subconto)
+                                     mark_missing=mark_missing)
 
     def _load_object(self, object_name: str, *, batch_size: int, date_field: str | None,
-                     date_from, date_to, mark_missing: bool, read_subconto: bool | None) -> int:
+                     date_from, date_to, mark_missing: bool) -> int:
         """
         Сама выгрузка: имена уже разрешены, объект уже занят (см. full_load). Отдельным методом
         только ради этого — чтобы захват и освобождение были видны одним блоком, а не терялись
@@ -1252,8 +1230,6 @@ class Replicator:
 
         reader = DataReader(self._odata_url, self.metadata, odata_auth=self._odata_auth,
                             request_timeout=self._request_timeout,
-                            read_subconto=(self._read_subconto if read_subconto is None
-                                           else read_subconto),
                             max_response_bytes=self._max_response_bytes)
         # Полная выгрузка = базовая версия: ниже любого номера пакета изменений (>=1), и заодно
         # след автора строки для guard'а вставки (см. FULL_LOAD_MESSAGE_NO).

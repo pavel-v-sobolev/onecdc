@@ -118,7 +118,7 @@ Unknown ONECDC_LOG_LEVEL='TRACE' (expected DEBUG/INFO/WARNING/ERROR/CRITICAL)
 для чисел, а ложными значениями флага считает `0`, `false`, `no`, `off`; остальные строки
 включают флаг. Сообщения об ошибках могут отличаться от команды `onecdc`.
 
-Параметры `request_timeout`, `read_subconto` и `max_response_bytes` не имеют переменных
+Параметры `request_timeout` и `max_response_bytes` не имеют переменных
 `ONECDC_*` в готовой точке входа. Для их изменения передайте аргументы `Replicator`
 в собственном скрипте.
 
