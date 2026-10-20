@@ -111,6 +111,18 @@ def test_mark_full_loaded_keyed_by_full_name(db):
     assert reader.list_full_load_required() == ["AccumulationRegister_Sales"]
 
 
+def test_list_full_load_required_without_a_registry(db):
+    """
+    Реестра может не быть вовсе: его заводит первая синхронизация метаданных, а процесс способен
+    до неё не дойти — так живёт второй репликатор на занятом узле обмена. Спрашивать очередь
+    выгрузок у него всё равно будут, и ответ тут пустой список, а не исключение.
+    """
+    reader = _reader(db)
+
+    assert reader.objects_table is None, 'метаданные ещё не читались'
+    assert reader.list_full_load_required() == []
+
+
 def test_list_full_load_required_excludes_done_and_absent(db):
     reader = _reader(db)
     reader._sync_objects(["Catalog_A", "Document_B", "Catalog_C"])

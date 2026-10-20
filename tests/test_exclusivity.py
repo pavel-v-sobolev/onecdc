@@ -13,6 +13,7 @@
 """
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,36 @@ def test_the_second_replicator_does_not_read_the_same_node(db):
         # Цикл первого закончился — узел свободен, и следующий цикл берёт тот, кто успел.
         assert second._claim_node()
         second._node_lease.release(fake.queue_guid)
+
+
+def test_the_second_replicator_survives_the_cycle_it_skipped(db):
+    """
+    Пропущенный цикл не должен ронять процесс целиком.
+
+    Второй репликатор до чтения метаданных не доходит — узел занят, run_once выходит раньше, —
+    поэтому реестра объектов у него нет. А очередь полных выгрузок run_forever опрашивает в том же
+    витке, сразу после run_once, и приходила к objects_table=None. Цикл падал, уходил в
+    нарастающий backoff (120 → 240 → 480 → 960 с) и переставал даже пытаться взять узел.
+    """
+    with fake_1c.running_server(Path(__file__).parent / "responses" / "trade_demo_8.5") as (
+            url, fake):
+        def make():
+            return Replicator(odata_url=url, odata_auth=None, exchange_name="ДляODATA",
+                              queue_guid=fake.queue_guid, engine=db.engine, db_schema=db.schema)
+
+        first, second = make(), make()
+        first._keep_node_lease = True          # так его держит run_forever
+        assert first._claim_node()
+        try:
+            # Ровно то, что делает виток _replication_loop, и ровно в том же порядке.
+            second.run_once()
+            assert second.metadata.objects_table is None, 'цикл пропущен, метаданные не читались'
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                second._dispatch_full_loads(executor)
+        finally:
+            first.close()
+            second.close()
 
 
 def test_a_package_is_not_confirmed_after_a_takeover(db, monkeypatch):
