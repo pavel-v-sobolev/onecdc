@@ -1,5 +1,5 @@
 [![PyPI version](https://img.shields.io/pypi/v/onecdc.svg)](https://pypi.org/project/onecdc/)
-![Status](https://img.shields.io/badge/status-beta-yellow)
+![Status](https://img.shields.io/badge/status-stable-brightgreen)
 [![Python versions](https://img.shields.io/pypi/pyversions/onecdc.svg)](https://pypi.org/project/onecdc/)
 
 
