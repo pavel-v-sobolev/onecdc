@@ -51,3 +51,8 @@ jobs:
 #
 # Маска обязательна: в dist/ копятся артефакты прошлых версий, и публикация без неё спотыкается
 # об уже выложенное.
+#
+# Не `twine upload` из PATH. Системный twine бывает старым (5.0.0 с pkginfo 1.9.6 знает метаданные
+# до 2.2), а hatchling собирает с Metadata-Version 2.5 — и такой twine падает с «Metadata is
+# missing required fields: Name, Version», хотя оба поля на месте. Ловушка срабатывала дважды.
+# Нужен twine — берите его отдельным окружением: `uvx twine upload dist/onecdc-<версия>*`.

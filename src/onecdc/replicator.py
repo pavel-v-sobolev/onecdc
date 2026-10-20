@@ -136,6 +136,8 @@ PERIOD_FIELD = 'Period'
 # RecordSet/any(r: r/Period ge ...). См. _Window.filter.
 RECORD_SET_FIELD = 'RecordSet'
 RECORD_SET_LAMBDA = 'r'
+# Начало обёртки лямбды — по нему _and_filters узнаёт фильтры, которые надо сливать.
+_RECORD_SET_ANY_PREFIX = f'{RECORD_SET_FIELD}/any({RECORD_SET_LAMBDA}: '
 
 # Сколько времени по монотонным часам может пройти между продлением аренды узла и отправкой
 # подтверждения. С запасом меньше LEASE_ROLE_TTL: между ними всего несколько операторов, и любое
@@ -472,10 +474,31 @@ def _load_mode_tag(mode: str):
 
 
 def _and_filters(*parts: str | None) -> str | None:
-    """Склейка OData-фрагментов $filter по AND; None и пустые пропускаются."""
+    """
+    Склейка OData-фрагментов `$filter` по AND; None и пустые пропускаются.
+
+    Два `RecordSet/any(...)` через AND сводятся в ОДНУ лямбду. Так приходится потому, что
+    платформа двух лямбд не принимает (измерено на живой демобазе бухгалтерии 20.10.2026: одна
+    лямбда — 200, две через `and` — 500, оба условия внутри одной — 200). Сюда попадают окно
+    обхода и период, заданный вызывающим: у регистра в режиме набора записей оба оборачиваются
+    лямбдой каждый сам по себе, потому что каждый бывает и единственным фильтром.
+
+    Слияние заодно единственно верное по смыслу: `any(A and B)` — «в наборе есть запись,
+    удовлетворяющая обоим условиям», тогда как два `any` означали бы «есть запись под A и есть
+    запись под B», то есть, возможно, разные записи.
+    """
     clauses = [part for part in parts if part]
     if not clauses:
         return None
+    wrapped = [c for c in clauses
+               if c.startswith(_RECORD_SET_ANY_PREFIX) and c.endswith(')')]
+    if len(wrapped) > 1:
+        inner = " and ".join(c[len(_RECORD_SET_ANY_PREFIX):-1] for c in wrapped)
+        merged = f'{_RECORD_SET_ANY_PREFIX}{inner})'
+        # Место первой лямбды сохраняем: порядок условий в адресе остаётся предсказуемым.
+        at = clauses.index(wrapped[0])
+        clauses = [c for c in clauses if c not in wrapped]
+        clauses.insert(at, merged)
     return " and ".join(clauses)
 
 

@@ -140,3 +140,54 @@ def test_a_prefixed_plan_name_is_still_accepted():
     # Префикс снимается и только потом проверяется — иначе точка в «ПланОбмена.X» не прошла бы.
     assert _check_exchange_name('ПланОбмена.ДляODATA') == 'ДляODATA'
     assert _check_exchange_name('ExchangePlan_ДляODATA') == 'ДляODATA'
+
+
+# --- $filter: две лямбды по набору записей ----------------------------------------------------
+
+def test_two_record_set_lambdas_are_merged_into_one():
+    """
+    Регистр в режиме набора записей фильтруется лямбдой `RecordSet/any(r: …)`, и таких фильтров
+    в одном запросе бывает два: окно обхода и период, заданный вызывающим. Каждый оборачивается
+    сам по себе, потому что каждый бывает и единственным.
+
+    Склеить их простым `and` нельзя — платформа отвечает 500. Измерено на живой демобазе
+    бухгалтерии 20.10.2026: одна лямбда — 200, две через `and` — 500, оба условия внутри одной —
+    200. До исправления `full_load` регистра бухгалтерии ЗА ПЕРИОД падал на первом же запросе.
+
+    Слияние верно и по смыслу: `any(A and B)` — «есть запись, удовлетворяющая обоим условиям»,
+    а два `any` означали бы «есть запись под A и есть запись под B», то есть разные записи.
+    """
+    from onecdc.replicator import _and_filters
+
+    window = "RecordSet/any(r: r/Period ge datetime'2013-01-01T00:00:00')"
+    period = "RecordSet/any(r: r/Period le datetime'2013-01-31T00:00:00')"
+
+    merged = _and_filters(window, period)
+
+    assert merged.count('RecordSet/any(') == 1, merged
+    assert merged == ("RecordSet/any(r: r/Period ge datetime'2013-01-01T00:00:00'"
+                      " and r/Period le datetime'2013-01-31T00:00:00')")
+
+
+def test_a_single_lambda_is_left_as_it_was():
+    """Один фильтр трогать незачем: оборачивать и разворачивать его заново — лишний риск."""
+    from onecdc.replicator import _and_filters
+
+    one = "RecordSet/any(r: r/Period ge datetime'2013-01-01T00:00:00')"
+
+    assert _and_filters(one) == one
+    assert _and_filters(None, one, '') == one
+
+
+def test_a_flat_filter_keeps_its_place_next_to_the_lambda():
+    """У объекта без набора записей фильтр плоский, и сливать его с лямбдой нельзя."""
+    from onecdc.replicator import _and_filters
+
+    flat = "Date ge datetime'2013-01-01T00:00:00'"
+    a = "RecordSet/any(r: r/Period ge datetime'2013-01-01T00:00:00')"
+    b = "RecordSet/any(r: r/Period le datetime'2013-01-31T00:00:00')"
+
+    merged = _and_filters(flat, a, b)
+
+    assert merged.startswith(flat + ' and '), merged
+    assert merged.count('RecordSet/any(') == 1, merged
