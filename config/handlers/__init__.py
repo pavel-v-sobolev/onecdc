@@ -9,5 +9,8 @@
 
 from .zakazy_klientov import ZakazyKlientov
 from .zakazy_klientov_grouped import ZakazyKlientovGrouped
+from .zakazy_klientov_clickhouse import ZakazyKlientovClickHouse
+from .zakazy_klientov_grouped_clickhouse import ZakazyKlientovGroupedClickHouse
 
-__all__ = ["ZakazyKlientov", "ZakazyKlientovGrouped"]
+__all__ = ["ZakazyKlientov", "ZakazyKlientovGrouped",
+           "ZakazyKlientovClickHouse", "ZakazyKlientovGroupedClickHouse"]
