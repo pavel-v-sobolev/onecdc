@@ -86,6 +86,37 @@ def test_uncommenting_the_examples_is_enough(db, monkeypatch):
     namespace["replicator"].close()
 
 
+def test_clickhouse_examples_take_the_address_from_the_environment(db, monkeypatch):
+    """
+    Витрины в ClickHouse получают engine из runner.py, а адрес — из окружения: в handlers/ его нет.
+    Раскомментировать engine и сами обработчики достаточно, потоки посчитаются от списка.
+    """
+    pytest.importorskip("clickhouse_connect")
+    _env(monkeypatch, db, ONECDC_CLICKHOUSE_URL="clickhousedb://default:secret@chhost:8123/dwh")
+    source = RUNNER.read_text().replace("# from handlers import", "from handlers import")
+    for line in ("# CLICKHOUSE = create_engine(", '# CLICKHOUSE_SOURCE = "onecdc_pg"',
+                 "# ZakazyKlientovClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),",
+                 "# ZakazyKlientovGroupedClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),"):
+        assert line in source, f'в шаблоне нет строки {line!r}'
+        source = source.replace(line, line.replace("# ", "", 1))
+
+    namespace, pool = _run(source, monkeypatch)
+
+    clickhouse = namespace["CLICKHOUSE"]
+    assert clickhouse.url.host == "chhost" and clickhouse.url.database == "dwh"
+    assert [type(h).__name__ for h in namespace["HANDLERS"]] == \
+        ["ZakazyKlientovClickHouse", "ZakazyKlientovGroupedClickHouse"]
+    assert all(h.clickhouse is clickhouse for h in namespace["HANDLERS"]), 'один пул на все витрины'
+    assert all(h.database == "dwh" for h in namespace["HANDLERS"]), 'база витрин — из адреса'
+    assert all(h.source_database == "onecdc_pg" for h in namespace["HANDLERS"])
+    assert pool.call_args.kwargs["max_workers"] == 3, 'репликатор + два обработчика'
+    for runnable in namespace["RUNNABLES"]:
+        owner = getattr(runnable, "__self__", None)
+        if owner is not None and hasattr(owner, "close"):
+            owner.close()
+    namespace["replicator"].close()
+
+
 def test_1c_without_authentication_works_here_too(db, monkeypatch):
     """
     Образ без runner.py в той же ситуации работает анонимно, а шаблон требовал обе переменные и

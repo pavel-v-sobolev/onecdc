@@ -60,6 +60,7 @@ python -m onecdc     # то же самое
 | `ONECDC_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
 | `ONECDC_LOG_RETENTION_DAYS` | `30` | сколько суток держать журнал загрузок (`onecdc_replicator_log`); `0` — хранить всё |
 | `ONECDC_RUNNER` | `/config/runner.py` | **только в контейнере**: путь к собственному скрипту запуска |
+| `ONECDC_CLICKHOUSE_URL` | — | **только в шаблоне `runner.py`**: адрес ClickHouse для витрин из примеров, `clickhousedb://user:pass@host:8123/db`. Команда `onecdc` его не читает |
 
 `ONECDC_DB_TEMP_SCHEMA` позволяет хранить таблицы ключей отдельно от таблиц данных. Это упрощает
 поиск таблиц, оставшихся после аварийной остановки процесса. На промежуточную таблицу merge эта настройка не влияет:

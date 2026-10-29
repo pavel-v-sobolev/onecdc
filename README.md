@@ -366,6 +366,16 @@ DDL можно прописать прямо в обработчике (`setup`)
    находит, какие группы затронуло изменение в источнике.
    [config/handlers/zakazy_klientov_grouped.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/handlers/zakazy_klientov_grouped.py).
 
+Те же две витрины можно писать в ClickHouse
+([config/handlers/zakazy_klientov_clickhouse.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/handlers/zakazy_klientov_clickhouse.py),
+[config/handlers/zakazy_klientov_grouped_clickhouse.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/handlers/zakazy_klientov_grouped_clickhouse.py)).
+Данные по-прежнему загружаются в PostgreSQL, а ClickHouse читает представления витрин сам, через
+базу с движком `PostgreSQL`, и сливает изменившиеся строки в таблицу `ReplacingMergeTree`. Данные
+идут с сервера на сервер, минуя Python. Такую базу один раз создаёт администратор ClickHouse,
+и пароль PostgreSQL хранится там же. Драйвер ставится вместе с `pip install onecdc[clickhouse]`.
+Подключение к ClickHouse обработчик получает в конструкторе из `runner.py`, а адрес — из переменной
+`ONECDC_CLICKHOUSE_URL`.
+
 
 ---
 

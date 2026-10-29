@@ -37,14 +37,28 @@ from sqlalchemy import create_engine
 from onecdc import FullLoadCron, HandlerLoop, Replicator
 
 # from handlers import ZakazyKlientov, ZakazyKlientovGrouped
+# from handlers import ZakazyKlientovClickHouse, ZakazyKlientovGroupedClickHouse
 
 # --- Что считаем и что выгружаем по расписанию ---------------------------------------------------
+
+# Витрины в ClickHouse: ClickHouse сам читает загруженные таблицы из основной БД (PostgreSQL) и пишет
+# результат к себе. Подключение к нему обработчик получает в конструкторе, а адрес с паролем — только
+# отсюда, из окружения: в handlers/ их нет, и тесты подставляют туда своё подключение. Драйвер —
+# clickhouse-connect (pip install onecdc[clickhouse]); база витрин — в пути адреса.
+# create_engine ничего не открывает: ошибка в адресе проявится при первом прогоне обработчика.
+# Пул общий для всех витрин ClickHouse; каждая держит одно соединение на время своего merge.
+# CLICKHOUSE = create_engine(os.environ["ONECDC_CLICKHOUSE_URL"], pool_pre_ping=True)
+# База ClickHouse с движком PostgreSQL, через которую он читает схему репликатора. Её один раз создаёт
+# администратор ClickHouse, пароль PostgreSQL хранится там же (см. handlers/zakazy_klientov_clickhouse.py).
+# CLICKHOUSE_SOURCE = "onecdc_pg"
 
 # Обработчики витрин: пример, замените на свои. Считают витрины из уже загруженных таблиц, каждый
 # своим циклом. Классы — в handlers/ рядом.
 HANDLERS = [
     # ZakazyKlientov(),
     # ZakazyKlientovGrouped(),
+    # ZakazyKlientovClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),
+    # ZakazyKlientovGroupedClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),
 ]
 
 # Полные выгрузки по расписанию: пример, замените на свои.

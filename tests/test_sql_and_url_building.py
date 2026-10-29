@@ -11,7 +11,8 @@
 
 import pytest
 
-from config.handlers import zakazy_klientov, zakazy_klientov_grouped
+from config.handlers import (zakazy_klientov, zakazy_klientov_clickhouse, zakazy_klientov_grouped,
+                             zakazy_klientov_grouped_clickhouse)
 from onecdc.db_logs import _check_create_schema
 from onecdc.handlers import Handler, HandlerLoop
 from onecdc.replicator import _check_db_schema, _check_exchange_name
@@ -71,6 +72,11 @@ def test_the_shipped_examples_build_their_sql_the_same_way(db):
              zakazy_klientov_grouped.ddl(context),
              zakazy_klientov_grouped.groups_to_handle_sql(context),
              zakazy_klientov_grouped.rebuild_blocks_sql(context)]
+    # У примеров для ClickHouse — их SQL к PostgreSQL; SQL к ClickHouse схему не берёт.
+    texts += [zakazy_klientov_clickhouse.postgres_ddl(context),
+              zakazy_klientov_clickhouse.rebuild_blocks_sql(context),
+              zakazy_klientov_grouped_clickhouse.postgres_ddl(context),
+              zakazy_klientov_grouped_clickhouse.postgres_months_sql(context)]
 
     for sql in texts:
         assert f'"{db.schema}".' in sql, 'схема не подставлена'
