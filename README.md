@@ -11,7 +11,7 @@
   </picture>
 </p>
 
-**OneCDC** is a Python library and Docker image for loading **1C:Enterprise** data into PostgreSQL using Change Data Capture (CDC). \
+**OneCDC** is a Python library and Docker image for loading **1C:Enterprise** data into PostgreSQL using change data capture (CDC). \
 It uses the standard OData interface and exchange plans to read changes and update the target database.
 
 **OneCDC** — Python-библиотека и Docker-образ для загрузки данных из **1С** в PostgreSQL по принципу CDC (Change Data Capture — получение изменений данных). \
@@ -126,13 +126,14 @@ docker run --rm --network host \
 
 `-v "$PWD/config:/config:ro"` — монтирует папку `config` из текущего каталога. В ней лежит файл [runner.py](https://github.com/pavel-v-sobolev/onecdc/blob/main/config/runner.py), а также подпапка с примерами обработчиков (config/handlers).
 
-**docker compose.** Пример — [docker-compose.yml](https://github.com/pavel-v-sobolev/onecdc/blob/main/docker-compose.yml) в репозитории.
+**Docker Compose.** Пример — [docker-compose.yml](https://github.com/pavel-v-sobolev/onecdc/blob/main/docker-compose.yml) в репозитории.
 
 
 ## Запуск из окружения
 
 Для запуска из окружения Python используйте `python -m onecdc` или команду
-`onecdc`. Параметры читаются из переменных окружения, описанных в [README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md)
+`onecdc`. Параметры читаются из переменных окружения, описанных в
+[README_ENV.md](https://github.com/pavel-v-sobolev/onecdc/blob/main/README_ENV.md).
 
 
 
