@@ -14,7 +14,7 @@ from sqlalchemy.exc import CompileError, DatabaseError, IntegrityError
 from sqlalchemy import (DateTime, Engine, Index, JSON, MetaData, Table, Integer, Numeric,
                         inspect, text, tuple_, select, or_, and_, exists)
 from sqlalchemy.dialects.postgresql import JSONB
-from dbmerge import dbmerge, mergeResult
+from dbmerge import dbmerge, mergeResult, MergeTracker
 
 from onecdc.data_reader import (DataObject, EXCHANGE_MESSAGE_NO_FIELD, FULL_LOAD_MESSAGE_NO,
                                 IS_DELETED_OR_EMPTY_FIELD, VERSION_FIELDS)
@@ -115,7 +115,8 @@ class DBWriter:
     """
 
     def __init__(self, engine: Engine, name_mapper: NameMapper, schema: str | None = None,
-                 temp_schema: str | None = None, lease_guard=None, request_full_load=None):
+                 temp_schema: str | None = None, lease_guard=None, request_full_load=None,
+                 tracker: MergeTracker | None = None):
         # Функция без аргументов, отдающая условие «объект всё ещё наш» (см. _still_ours), либо
         # None. Подставляет её тот, кто ведёт аренду, — writer про захваты ничего не знает.
         self.lease_guard = lease_guard
@@ -137,6 +138,8 @@ class DBWriter:
         self._request_full_load = request_full_load
         # Таблицы, у которых состав типов уже сверен в этом процессе (см. _retype_changed_columns).
         self._retyped_tables: set[str] = set()
+        # Журнал merges (dbmerge.tracking) для витрин. None — журнал не ведём, как раньше.
+        self.tracker = tracker
 
     def save(self, object_name: str, data_object: DataObject,
              full_load_started_at: datetime | None = None,
@@ -214,6 +217,7 @@ class DBWriter:
 
         object_key = metadata_obj.object_key
         started_at = full_load_started_at
+        scope = 'full_load' if started_at is not None else 'changes'
         # Под снимком шум перестаёт быть шумом: см. always_touch.
         skip_compare = [] if always_touch else self._noisy_fields(records, object_name)
 
@@ -227,7 +231,8 @@ class DBWriter:
                              merged_on_field=MERGED_ON_FIELD, inserted_on_field=INSERTED_ON_FIELD,
                              skip_compare_fields=skip_compare,
                              delete_mode='no', schema=self.schema) as merge:
-                    return merge.exec(
+                    return self._exec_merge(
+                        merge, scope=scope,
                         update_condition=self._not_touched_since(merge.table, started_at)
                                          if started_at is not None else None)
 
@@ -250,9 +255,10 @@ class DBWriter:
                 scoped = self._scoped_delete_condition(merge.table, merge.temp_table,
                                                        mapped_object_key)
                 if started_at is None:
-                    return merge.exec(delete_condition=scoped)
+                    return self._exec_merge(merge, scope=scope, delete_condition=scoped)
                 # own-or-skip группы: не трогаем то, что переписано после старта прогона.
-                return merge.exec(
+                return self._exec_merge(
+                    merge, scope=scope,
                     delete_condition=and_(scoped, self._not_touched_since(merge.table, started_at)),
                     update_condition=self._not_touched_since(merge.table, started_at),
                     insert_condition=self._group_not_touched_since(
@@ -260,6 +266,13 @@ class DBWriter:
 
         result = self._merge_with_retry(run_merge, table_name)
         self._ensure_merged_on_index(table_name)
+        return result
+
+    def _exec_merge(self, merge, *, scope, **exec_kwargs):
+        """Запустить merge, записав его в журнал, если трекер задан."""
+        if self.tracker is None:
+            return merge.exec(**exec_kwargs)
+        _, result = self.tracker.exec_merge(merge, scope=scope, **exec_kwargs)
         return result
 
     # Сколько раз повторяем merge, упёршийся в уникальный ключ, и с какой паузой (секунды,

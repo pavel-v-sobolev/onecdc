@@ -15,7 +15,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta
 
 import requests
-from dbmerge import mergeResult
+from dbmerge import mergeResult, MergeTracker
 from sqlalchemy import Engine, Integer, MetaData, Numeric, Table, and_, exists
 from sqlalchemy.exc import NoSuchTableError, OperationalError
 
@@ -630,7 +630,9 @@ class Replicator:
                  # Сколько дней держать журнал загрузок. 0 — хранить всё (тогда уборка ваша).
                  log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
                  automatic_full_load: bool = True,
-                 max_response_bytes: int | None = MAX_RESPONSE_BYTES):
+                 max_response_bytes: int | None = MAX_RESPONSE_BYTES,
+                 # Журнал merges для витрин (dbmerge.tracking). None — журнал не ведём.
+                 tracker: MergeTracker | None = None):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
         # Перехват SIGTERM/SIGINT ставим здесь, а не при запуске цикла: run_forever типовая точка
@@ -729,7 +731,8 @@ class Replicator:
                                # Смена типа колонки в 1С обесценивает уже загруженное: writer
                                # отставляет старое в сторону, а наполнить новое историей может
                                # только полная выгрузка (см. DBWriter._retype_changed_columns).
-                               request_full_load=self._request_full_load)
+                               request_full_load=self._request_full_load,
+                               tracker=tracker)
         # Лог загрузки (строка на объект) пишет оркестратор: только здесь есть контекст обмена
         # (exchange_name/message_no), а writer универсален и может делать и полную перевыгрузку.
         self.onecdc_replicator_log = ReplicatorLog(
@@ -1786,8 +1789,16 @@ class Replicator:
             return 0
         with self.writes.track(table_name, SOURCE_FULL_LOAD) as tracked:
             reset_values = self._resource_reset_values(object_name, target)
-            marked = keys.mark_missing(target, started_at, mark_field,
-                                       reset_values=reset_values, scope=scope)
+
+            def mark_missing():
+                return keys.mark_missing(target, started_at, mark_field,
+                                         reset_values=reset_values, scope=scope)
+
+            if self.writer.tracker is None:
+                marked = mark_missing()
+            else:
+                _, marked = self.writer.tracker.exec(
+                    mark_missing, destination=(target.schema, target.name), scope=SOURCE_FULL_LOAD)
             # Строка пишется и при нуле: ноль — это нормальный и даже желанный исход (всё, что
             # лежит в БД, нашлось и в 1С), но отличить его от «механизм не отработал» по молчанию
             # нельзя. Собранные ключи рядом: если их заметно меньше, чем строк в таблице, пометка

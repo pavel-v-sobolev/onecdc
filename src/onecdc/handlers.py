@@ -52,6 +52,9 @@ from onecdc.stop_signal import StopSignal, install_signal_handlers
 from onecdc.write_tracker import (MERGE_HEARTBEAT_PERIOD, MERGE_HEARTBEAT_TTL, WRITES_TABLE,
                                   WriteTracker, _writes_table)
 
+# Старый Handler остаётся совместимым; новые витрины используют контракт dbmerge.
+from dbmerge.mart import MartContext, MartHandler
+
 logger = get_logger(__name__)
 
 HANDLERS_TABLE = "onecdc_handlers"
