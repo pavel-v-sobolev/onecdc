@@ -67,6 +67,7 @@ def test_the_query_text_is_not_parsed_on_the_way(db, sql, expected):
 def test_the_shipped_examples_build_their_sql_the_same_way(db):
     """Примеры — то, что копируют, поэтому способ в них должен быть ровно тот же."""
     context = _Context(db.engine, db.schema)
+    context.destination = (db.schema, 'example')
 
     texts = [zakazy_klientov.ddl(context), zakazy_klientov.rebuild_blocks_sql(context),
              zakazy_klientov_grouped.ddl(context),

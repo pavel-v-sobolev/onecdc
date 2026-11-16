@@ -38,18 +38,17 @@ MAX(), чтобы зерно группы осталось прежним.
 
 from sqlalchemy import text, tuple_
 
-from dbmerge import dbmerge
-
-from onecdc import Handler, HandlerContext
+from dbmerge import MartContext, MartHandler, dbmerge
 
 
-def ddl(context: HandlerContext) -> str:
+
+def ddl(context: MartContext) -> str:
     """
     Сформировать DDL витрины, подставив имя схемы из контекста через f-строку.
 
     Если схема не задана, пример использует public.
     """
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientovGrouped_rows_view"
 AS
@@ -142,7 +141,7 @@ CREATE INDEX IF NOT EXISTS "ix_ZakazyKlientovGrouped_Period" ON
 """
 
 
-def groups_to_handle_sql(context: HandlerContext) -> str:
+def groups_to_handle_sql(context: MartContext) -> str:
     """
     Группы, которые надо пересчитать за окно (:last_run_at — конец прошлого прогона):
     PREVIOUS — что изменившиеся объекты давали раньше, CURRENT — что дают сейчас.
@@ -155,7 +154,7 @@ def groups_to_handle_sql(context: HandlerContext) -> str:
 
     Окно приходит параметром `:last_run_at` — его связывает вызывающий (см. handle).
     """
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 WITH changed_recorders AS (
     SELECT DISTINCT "Recorder" AS id
@@ -189,7 +188,7 @@ SELECT "Number", "Year" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
 """
 
 
-def rebuild_blocks_sql(context: HandlerContext) -> str:
+def rebuild_blocks_sql(context: MartContext) -> str:
     """
     Сформировать список месяцев для пересборки по источнику и текущей витрине.
 
@@ -197,7 +196,7 @@ def rebuild_blocks_sql(context: HandlerContext) -> str:
     источников позволяет запустить блок и очистить такой месяц. Метки YYYY-MM сортируются
     хронологически при обычном строковом сравнении.
     """
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 SELECT DISTINCT "Period" FROM "{schema}"."ZakazyKlientovGrouped_rows_view"
 UNION
@@ -206,19 +205,23 @@ ORDER BY 1
 """
 
 
-class ZakazyKlientovGrouped(Handler):
+class ZakazyKlientovGrouped(MartHandler):
     # Имена таблиц в целевой БД (транслит), а не имена объектов 1С — те же, что стоят в SQL выше:
     #   AccumulationRegister_ZakazyKlientov  ← РегистрНакопления.ЗаказыКлиентов
     #   Document_ZakazKlienta                ← Документ.ЗаказКлиента
     #   Catalog_Nomenklatura                 ← Справочник.Номенклатура
     # Читаются все три, поэтому все три и перечислены: по этому же списку считается верхняя
     # граница окна.
-    ON = ["AccumulationRegister_ZakazyKlientov", "Document_ZakazKlienta", "Catalog_Nomenklatura"]
+    sources = ["AccumulationRegister_ZakazyKlientov", "Document_ZakazKlienta", "Catalog_Nomenklatura"]
 
-    def setup(self, context: HandlerContext) -> None:
+    def __init__(self, engine, *, tracker, schema=None, **lease_kwargs):
+        super().__init__(engine, tracker=tracker, destination=(schema, "ZakazyKlientovGrouped"),
+                         sources=[(schema, name) for name in self.sources], **lease_kwargs)
+
+    def setup(self, context: MartContext) -> None:
         self.execute(context, ddl(context))
 
-    def rebuild(self, context: HandlerContext):
+    def rebuild(self, context: MartContext):
         """
         Пересобрать витрину по месяцам, применяя накопившиеся изменения между блоками.
 
@@ -234,24 +237,26 @@ class ZakazyKlientovGrouped(Handler):
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                  # этот месяц уже посчитан до перезапуска процесса
 
-            with dbmerge(context.engine, table_name="ZakazyKlientovGrouped", schema=context.schema,
+            with dbmerge(context.engine, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientovGrouped", schema=context.destination[0],
                          source_table_name="ZakazyKlientovGrouped_view",
-                         source_schema=context.schema, delete_mode='delete') as merge:
+                         source_schema=context.destination[0], delete_mode='delete') as merge:
                 merge.exec(source_condition=merge.source_table.c["Period"] == period,
                            delete_condition=merge.table.c["Period"] == period)
 
             context.logger.info("Data Mart updated for %s", label)
             yield label
 
-    def handle(self, context: HandlerContext) -> None:
+    def process_changes(self, context: MartContext) -> None:
         # Выборка групп уходит в запрос dbmerge дважды, поэтому её не выполняют, а готовят:
         # text() с окном, связанным как обычный параметр.
         groups_to_handle = text(groups_to_handle_sql(context)).bindparams(
-            last_run_at=context.last_run_at)
+            last_run_at=context.watermark)
 
-        with dbmerge(context.engine, table_name="ZakazyKlientovGrouped", schema=context.schema,
+        with dbmerge(context.engine, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientovGrouped", schema=context.destination[0],
                      # Источник данных — представление в той же схеме, что и витрина.
-                     source_table_name="ZakazyKlientovGrouped_view", source_schema=context.schema,
+                     source_table_name="ZakazyKlientovGrouped_view", source_schema=context.destination[0],
                      delete_mode='delete') as merge:
             # Ключ группы составной, поэтому сравнение row-value: (Number, Year) IN (SELECT
             # Number, Year ...). В остальном ничего не меняется по сравнению с одиночным ключом.
@@ -266,5 +271,5 @@ class ZakazyKlientovGrouped(Handler):
                        delete_condition=target_key.in_(groups_to_handle))
 
         context.logger.info(
-            f'Data Mart changes applied since {context.last_run_at}; '
-            f'Next run will apply since {context.boundary}')
+            f'Data Mart changes applied since {context.watermark}; '
+            f'Next run will apply since {context.next_watermark}')

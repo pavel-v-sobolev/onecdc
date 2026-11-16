@@ -3,19 +3,21 @@
 from datetime import datetime
 from pathlib import Path
 import runpy
+import subprocess
+import sys
+import importlib
 import threading
 from unittest.mock import patch
 
 import pytest
-from dbmerge import MergeTracker
+from dbmerge import MergeTracker, MartHandler, IncorrectParameter
 from sqlalchemy import (Boolean, Column, Integer, MetaData, Numeric, String, Table,
                         insert, select, update, delete)
 
 from config.handlers.orders_by_customer import OrdersByCustomer
 from onecdc import DataObject, NameMapper
 from onecdc.db_writer import DBWriter
-from onecdc.marts import (rebuild_requested, request_rebuild, request_stop, reset_stop,
-                          run_mart)
+from dbmerge import rebuild_requested, request_rebuild, request_stop, reset_stop
 from onecdc.metadata_reader import MetadataObject
 from test_mark_missing import CATALOG, _pages, _record, _replicator
 
@@ -73,7 +75,7 @@ def _orders(db, tracker):
                   Column('is_deleted_or_empty', Boolean, nullable=False, default=False),
                   schema=db.schema)
     table.create(db.engine)
-    handler = OrdersByCustomer(db.engine, destination=(db.schema, 'totals'),
+    handler = OrdersByCustomer(db.engine, tracker=tracker, destination=(db.schema, 'totals'),
                                sources=[(db.schema, 'orders')])
 
     def write(statement):
@@ -93,7 +95,7 @@ def _totals(db):
 
 def test_totals_handle_updates_moves_soft_and_hard_deletes(db, tracker):
     orders, handler, write = _orders(db, tracker)
-    loop = handler.loop(tracker)
+    loop = handler.loop()
     try:
         write(insert(orders).values([
             {'id': 1, 'customer_id': 'a', 'amount': 10},
@@ -120,7 +122,7 @@ def test_totals_handle_updates_moves_soft_and_hard_deletes(db, tracker):
 def test_rebuild_failure_keeps_resume_state_and_watermark(db, tracker):
     orders, handler, write = _orders(db, tracker)
     write(insert(orders).values(id=1, customer_id='a', amount=10))
-    loop = handler.loop(tracker)
+    loop = handler.loop()
     try:
         assert loop.run_if_pending()
         before = tracker.watermark('totals', schema=db.schema)
@@ -142,7 +144,7 @@ def test_rebuild_failure_keeps_resume_state_and_watermark(db, tracker):
 def test_new_rebuild_request_during_rebuild_is_not_lost(db, tracker):
     _, handler, _ = _orders(db, tracker)
     request_rebuild(db.engine, handler.destination, schema=db.schema)
-    loop = handler.loop(tracker)
+    loop = handler.loop()
     original = handler.process_changes
 
     def rebuild(ctx):
@@ -165,53 +167,38 @@ def test_rebuild_requests_are_business_schema_isolated(db):
     assert not rebuild_requested(db.engine, ('second', 'totals'), schema=db.schema)
 
 
-def test_run_mart_supports_functions_and_preserves_borrowed_tracker(db, tracker):
-    calls = []
-
-    def process(ctx):
-        calls.append(ctx)
-
-    process.destination = (db.schema, 'function_mart')
-    process.sources = [(db.schema, 'orders')]
-    request_rebuild(db.engine, process.destination, schema=db.schema)
-    assert run_mart(process, db.engine, tracker=tracker, run_forever=False)
-    assert len(calls) == 1
-    # The external tracker still accepts writes after the loop exits.
+def test_mart_preserves_caller_owned_tracker(db, tracker):
+    _, handler, _ = _orders(db, tracker)
+    assert handler.run_once(rebuild=True)
     tracker.exec(lambda: True, destination=(db.schema, 'orders'))
+
+
+def test_compatibility_imports_are_dbmerge_api():
+    from onecdc import marts
+    assert marts.MartHandler is MartHandler
+    assert marts.request_stop is request_stop
+    assert not hasattr(marts, 'run_mart')
 
 
 def test_stop_is_sticky_for_new_loops(db, tracker):
     _, handler, _ = _orders(db, tracker)
     request_rebuild(db.engine, handler.destination, schema=db.schema)
     request_stop()
-    assert not run_mart(handler, tracker=tracker, run_forever=False)
+    assert not handler.run_once()
     assert rebuild_requested(db.engine, handler.destination, schema=db.schema)
     reset_stop()
-    assert run_mart(handler, tracker=tracker, run_forever=False)
+    assert handler.run_once()
 
 
-def test_owned_tracker_closes_when_loop_setup_fails(db):
-    from dbmerge import mart
-
-    _, handler, _ = _orders(db, None)
-    created = []
-
-    def create(*args, **kwargs):
-        tracker = MergeTracker(*args, **kwargs)
-        created.append(tracker)
-        return tracker
-
-    with patch.object(mart, 'MergeTracker', side_effect=create):
-        with patch.object(handler, 'loop', side_effect=RuntimeError('setup')):
-            with pytest.raises(RuntimeError, match='setup'):
-                run_mart(handler, schema=db.schema, run_forever=False)
-        assert len(created) == 1 and created[0]._closed.is_set()
+def test_mart_requires_caller_owned_tracker(db):
+    with pytest.raises(IncorrectParameter):
+        _orders(db, None)
 
 
 def test_mart_destination_has_exclusive_lease(db, tracker):
     _, handler, _ = _orders(db, tracker)
     request_rebuild(db.engine, handler.destination, schema=db.schema)
-    first, second = handler.loop(tracker), handler.loop(tracker)
+    first, second = handler.loop(), handler.loop()
     try:
         assert first._lease.acquire(first.name)
         assert not second.run_if_pending()
@@ -253,6 +240,69 @@ def test_replicator_passes_tracker_without_owning_it(db, tracker):
     tracker.exec(lambda: True, destination=(db.schema, 'orders'))
 
 
+def test_replicator_creates_and_closes_default_tracker(db):
+    from onecdc import Replicator
+
+    rep = Replicator(odata_url='http://x', odata_auth=None, engine=db.engine,
+                     db_schema=db.schema)
+    try:
+        assert rep.tracker is rep.writer.tracker
+        assert rep.tracker.schema == db.schema
+        assert rep._owns_tracker
+        meta = MetadataObject('Catalog_X', {'Ref_Key': 'String', 'Val': 'String'},
+                              {'Ref_Key': 'String'}, object_key=None)
+        rep.writer.save('Catalog_X', DataObject(meta, [{
+            'Ref_Key': 'a', 'Val': 'value', 'is_deleted_or_empty': False,
+            'exchange_message_no': 1}]))
+        assert rep.tracker.last_merge('Catalog_X', schema=db.schema).changed
+    finally:
+        rep.close()
+    assert rep.tracker._closed.is_set()
+    rep.close()  # repeated close is safe
+
+
+def test_external_tracker_keeps_separate_schema_and_remains_open(db):
+    from onecdc import Replicator
+    from sqlalchemy import inspect, text
+
+    tracking_schema = db.schema + '_tracking'
+    try:
+        with MergeTracker(db.engine, schema=tracking_schema) as tracker:
+            rep = Replicator(odata_url='http://x', odata_auth=None, engine=db.engine,
+                             db_schema=db.schema, tracker=tracker)
+            try:
+                assert rep.tracker is tracker and rep.writer.tracker is tracker
+                assert not rep._owns_tracker
+                meta = MetadataObject('Catalog_X', {'Ref_Key': 'String', 'Val': 'String'},
+                                      {'Ref_Key': 'String'}, object_key=None)
+                rep.writer.save('Catalog_X', DataObject(meta, [{
+                    'Ref_Key': 'a', 'Val': 'value', 'is_deleted_or_empty': False,
+                    'exchange_message_no': 1}]))
+                record = tracker.last_merge('Catalog_X', schema=db.schema)
+                assert record.changed and record.scope == 'changes'
+                assert 'dbmerge_tracking' not in inspect(db.engine).get_table_names(schema=db.schema)
+                assert 'Catalog_X' in inspect(db.engine).get_table_names(schema=db.schema)
+            finally:
+                rep.close()
+            assert not tracker._closed.is_set()
+            tracker.exec(lambda: True, destination=(db.schema, 'orders'))
+    finally:
+        with db.engine.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{tracking_schema}" CASCADE'))
+
+
+@pytest.mark.parametrize('closed', [False, True])
+def test_replicator_rejects_invalid_or_closed_tracker(db, closed):
+    from onecdc import Replicator
+
+    tracker = MergeTracker(db.engine, schema=db.schema) if closed else object()
+    if closed:
+        tracker.close()
+    with pytest.raises(ValueError, match='open MergeTracker'):
+        Replicator(odata_url='http://x', odata_auth=None, engine=db.engine,
+                   db_schema=db.schema, tracker=tracker)
+
+
 def test_runner_import_has_no_startup_side_effects(monkeypatch):
     config = Path(__file__).resolve().parent.parent / 'config'
     monkeypatch.syspath_prepend(str(config))
@@ -261,6 +311,99 @@ def test_runner_import_has_no_startup_side_effects(monkeypatch):
     create.assert_not_called()
     signals.assert_not_called()
     assert callable(namespace['main'])
+
+
+def test_mart_example_and_runner_do_not_import_onecdc():
+    root = Path(__file__).resolve().parent.parent
+    subprocess.run([sys.executable, '-c',
+                    "import runpy, sys; "
+                    "sys.path.insert(0, 'config'); "
+                    "import handlers; "
+                    "[getattr(handlers, n) for n in handlers.__all__]; "
+                    "runpy.run_path('config/runner_marts.py'); "
+                    "assert not any(n == 'onecdc' or n.startswith('onecdc.') "
+                    "for n in sys.modules)"], cwd=root, check=True)
+
+
+@pytest.mark.parametrize('module_name,class_name', [
+    ('zakazy_klientov', 'ZakazyKlientov'),
+    ('zakazy_klientov_grouped', 'ZakazyKlientovGrouped'),
+])
+def test_postgres_examples_track_and_borrow_pass_lease(db, tracker, monkeypatch,
+                                                     module_name, class_name):
+    from datetime import datetime
+    from decimal import Decimal
+    import uuid
+    from sqlalchemy import text
+    from test_clickhouse_handlers import _source_tables, _movement, _nomenklatura, _document
+
+    _source_tables(db)
+    order, item = uuid.uuid4(), uuid.uuid4()
+    _nomenklatura(db, item, 'A')
+    _movement(db, order, 1, datetime(2026, 6, 7), 5, item)
+    _document(db, order, 'Z-1', datetime(2026, 6, 7))
+    if class_name == 'ZakazyKlientov':
+        with db.engine.begin() as conn:
+            conn.execute(text(f'INSERT INTO "{db.schema}"."AccumulationRegister_ZakazyKlientov" '
+                              '("Recorder", "Recorder_Type", "LineNumber", "is_deleted_or_empty") '
+                              'VALUES (:r, :t, 1, true)'),
+                         {'r': uuid.uuid4(), 't': 'Document_ЗаказКлиента'})
+    module = importlib.import_module(f'config.handlers.{module_name}')
+    original = module.dbmerge
+    calls = []
+
+    def guarded_merge(*args, **kwargs):
+        assert kwargs['tracker'] is tracker
+        handle = kwargs['lease_handle']
+        assert handle is not None
+        handle.validate(tracker)
+        calls.append(handle)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'dbmerge', guarded_merge)
+    handler = getattr(module, class_name)(db.engine, tracker=tracker, schema=db.schema)
+    assert handler.run_once(rebuild=True)
+    assert calls
+    assert tracker.last_merge(class_name, schema=db.schema).changed
+    with db.engine.connect() as conn:
+        assert conn.scalar(text(f'SELECT sum("Zakazano") FROM "{db.schema}"."{class_name}"')) == Decimal(5)
+        if class_name == 'ZakazyKlientov':
+            assert conn.scalar(text(f'SELECT count(*) FROM "{db.schema}"."{class_name}" '
+                                    'WHERE "Period" IS NULL')) == 1
+    # Change the catalog; the regular changes path must borrow its own pass handle too.
+    def change_catalog():
+        with db.engine.begin() as conn:
+            conn.execute(text(f'UPDATE "{db.schema}"."Catalog_Nomenklatura" '
+                              'SET "Code" = \'B\', merged_on = clock_timestamp()'))
+        return True
+
+    tracker.exec(change_catalog, destination=(db.schema, 'Catalog_Nomenklatura'))
+    before = len(calls)
+    assert handler.run_once()
+    assert len(calls) > before
+    with db.engine.connect() as conn:
+        assert conn.scalar(text(f'SELECT "Artikul" FROM "{db.schema}"."{class_name}" '
+                                'WHERE "Zakazano" = 5')) == 'B'
+
+
+def test_example_lost_pass_lease_does_not_advance_watermark(db, tracker, monkeypatch):
+    from dbmerge import LeaseLost
+    from config.handlers import orders_by_customer as module
+
+    orders, handler, write = _orders(db, tracker)
+    write(insert(orders).values(id=1, customer_id='a', amount=10))
+    original = module.dbmerge
+
+    def lose_lease(*args, **kwargs):
+        handle = kwargs['lease_handle']
+        handle._lease.release(handle.name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'dbmerge', lose_lease)
+    with pytest.raises(LeaseLost):
+        handler.run_once()
+    assert tracker.watermark('totals', schema=db.schema) is None
+    assert _totals(db) == {}
 
 
 def test_runner_stops_other_workers_and_propagates_startup_failure(monkeypatch):
@@ -274,7 +417,7 @@ def test_runner_stops_other_workers_and_propagates_startup_failure(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError('worker startup')
 
-    monkeypatch.setitem(globals_, 'run_mart', fail)
+    monkeypatch.setattr(globals_['OrdersByCustomer'], 'run_forever', fail)
     monkeypatch.setitem(globals_, 'request_stop', lambda *args: stopped.set())
     with patch('signal.signal'):
         with pytest.raises(RuntimeError, match='worker startup'):

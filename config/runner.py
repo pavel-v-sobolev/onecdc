@@ -12,9 +12,9 @@
 Параметры Replicator берутся из окружения и передаются явно. При необходимости значение
 можно задать прямо в конструкторе, например odata_auth=None для публикации без авторизации.
 
-Каждый HandlerLoop работает в своём потоке. Порядок обработчиков не определён: если одна
+Каждый MartHandler работает в своём потоке. Порядок обработчиков не определён: если одна
 витрина зависит от другой, приложение должно само согласовать их обновление. Репликатор
-передаёт сигналы через таблицу onecdc_handlers, поэтому обработчики можно запускать
+передаёт сигналы через общий журнал dbmerge_tracking, поэтому обработчики можно запускать
 и в отдельных процессах.
 
 Для второго плана обмена создайте ещё один Replicator и добавьте его run_forever в RUNNABLES.
@@ -27,14 +27,16 @@ ONECDC_MODE этот файл НЕ читает: состав и режим ра
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 # Нужен расписаниям (FullLoadCron ниже), когда грузится не весь объект, а свежий хвост.
 # from datetime import timedelta
 
 from sqlalchemy import create_engine
 
-from onecdc import FullLoadCron, HandlerLoop, Replicator
+from onecdc import FullLoadCron, Replicator
+from dbmerge import MergeTracker, request_stop
+import signal
 
 # from handlers import ZakazyKlientov, ZakazyKlientovGrouped
 # from handlers import ZakazyKlientovClickHouse, ZakazyKlientovGroupedClickHouse
@@ -55,10 +57,10 @@ from onecdc import FullLoadCron, HandlerLoop, Replicator
 # Обработчики витрин: пример, замените на свои. Считают витрины из уже загруженных таблиц, каждый
 # своим циклом. Классы — в handlers/ рядом.
 HANDLERS = [
-    # ZakazyKlientov(),
-    # ZakazyKlientovGrouped(),
-    # ZakazyKlientovClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),
-    # ZakazyKlientovGroupedClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),
+    # partial(ZakazyKlientov),
+    # partial(ZakazyKlientovGrouped),
+    # partial(ZakazyKlientovClickHouse, clickhouse=CLICKHOUSE, source_database=CLICKHOUSE_SOURCE),
+    # partial(ZakazyKlientovGroupedClickHouse, clickhouse=CLICKHOUSE, source_database=CLICKHOUSE_SOURCE),
 ]
 
 # Полные выгрузки по расписанию: пример, замените на свои.
@@ -129,6 +131,9 @@ DB_TEMP_SCHEMA = os.environ.get("ONECDC_DB_TEMP_SCHEMA")
 # недоступна из другой.
 ODATA_USER = os.environ.get("ONECDC_ODATA_USER")
 
+tracker = MergeTracker(engine, schema=DB_SCHEMA)
+marts = [factory(engine, tracker=tracker, schema=DB_SCHEMA) for factory in HANDLERS]
+
 replicator = Replicator(
     odata_url=os.environ["ONECDC_ODATA_URL"],
     odata_auth=((ODATA_USER, os.environ.get("ONECDC_ODATA_PASSWORD", "")) if ODATA_USER else None),
@@ -137,6 +142,7 @@ replicator = Replicator(
     queue_guid=os.environ.get("ONECDC_QUEUE_GUID", ""),
     engine=engine,
     db_schema=DB_SCHEMA,
+    tracker=tracker,
     db_temp_schema=DB_TEMP_SCHEMA,
     full_load_workers=FULL_LOAD_WORKERS,
     automatic_full_load=AUTOMATIC_FULL_LOAD,
@@ -153,11 +159,30 @@ logging.getLogger("onecdc").setLevel(LOG_LEVEL)
 # занятый репликатором навсегда, оставил бы задания обработчиков в очереди пула — витрины не
 # обновлялись бы, и ни одной ошибки при этом не появилось бы.
 RUNNABLES = [partial(replicator.run_forever, interval=POLL_INTERVAL)]
-RUNNABLES += [HandlerLoop(engine=engine, schema=DB_SCHEMA, handler=handler).run_forever
-              for handler in HANDLERS]
-RUNNABLES += [FullLoadCron(replicator, **job).run_forever for job in CRON_JOBS]
+RUNNABLES += [partial(mart.run_forever, poll_interval=POLL_INTERVAL) for mart in marts]
+cron_jobs = [FullLoadCron(replicator, **job) for job in CRON_JOBS]
+RUNNABLES += [job.run_forever for job in cron_jobs]
 
-with ThreadPoolExecutor(max_workers=len(RUNNABLES), thread_name_prefix='cdc') as pool:
-    tasks = [pool.submit(run) for run in RUNNABLES]
-    for task in tasks:
-        task.result()
+def stop_all(signum=None, frame=None):
+    request_stop()
+    replicator.request_stop()
+    for job in cron_jobs:
+        job.request_stop()
+
+
+signal.signal(signal.SIGTERM, stop_all)
+signal.signal(signal.SIGINT, stop_all)
+try:
+    with ThreadPoolExecutor(max_workers=len(RUNNABLES), thread_name_prefix='cdc') as pool:
+        try:
+            tasks = [pool.submit(run) for run in RUNNABLES]
+            for task in as_completed(tasks):
+                task.result()
+        finally:
+            stop_all()
+finally:
+    replicator.close()
+    tracker.close()
+    engine.dispose()
+    if 'CLICKHOUSE' in globals():
+        CLICKHOUSE.dispose()

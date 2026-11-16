@@ -36,7 +36,7 @@ def _uncomment_examples(source: str) -> str:
     (и с их импорта). Так проверяется сам шаблон, а не его копия в тесте.
     """
     source = source.replace("# from handlers import", "from handlers import")
-    for line in ("# ZakazyKlientov(),", "# ZakazyKlientovGrouped(),",
+    for line in ("# partial(ZakazyKlientov),", "# partial(ZakazyKlientovGrouped),",
                  '# dict(table_name="Document_ZakazKlienta", cron="0 3 * * *",',
                  '#      date_field="Date", date_from=timedelta(days=3)),',
                  '# dict(table_name="Catalog_Nomenklatura", cron="0 2 * * 0"),',
@@ -49,7 +49,8 @@ def _run(source: str, monkeypatch):
     """Исполняет шаблон, подменив пул потоков: сам run_forever нам тут не нужен."""
     monkeypatch.syspath_prepend(str(CONFIG_DIR))
     namespace = {"__name__": "__main__", "__file__": str(RUNNER)}
-    with mock.patch("concurrent.futures.ThreadPoolExecutor") as pool:
+    with mock.patch("concurrent.futures.ThreadPoolExecutor") as pool, \
+            mock.patch("concurrent.futures.as_completed", return_value=[]):
         exec(compile(source, str(RUNNER), "exec"), namespace)
     return namespace, pool
 
@@ -95,8 +96,8 @@ def test_clickhouse_examples_take_the_address_from_the_environment(db, monkeypat
     _env(monkeypatch, db, ONECDC_CLICKHOUSE_URL="clickhousedb://default:secret@chhost:8123/dwh")
     source = RUNNER.read_text().replace("# from handlers import", "from handlers import")
     for line in ("# CLICKHOUSE = create_engine(", '# CLICKHOUSE_SOURCE = "onecdc_pg"',
-                 "# ZakazyKlientovClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),",
-                 "# ZakazyKlientovGroupedClickHouse(CLICKHOUSE, CLICKHOUSE_SOURCE),"):
+                 "# partial(ZakazyKlientovClickHouse, clickhouse=CLICKHOUSE, source_database=CLICKHOUSE_SOURCE),",
+                 "# partial(ZakazyKlientovGroupedClickHouse, clickhouse=CLICKHOUSE, source_database=CLICKHOUSE_SOURCE),"):
         assert line in source, f'в шаблоне нет строки {line!r}'
         source = source.replace(line, line.replace("# ", "", 1))
 
@@ -104,11 +105,11 @@ def test_clickhouse_examples_take_the_address_from_the_environment(db, monkeypat
 
     clickhouse = namespace["CLICKHOUSE"]
     assert clickhouse.url.host == "chhost" and clickhouse.url.database == "dwh"
-    assert [type(h).__name__ for h in namespace["HANDLERS"]] == \
+    assert [type(h).__name__ for h in namespace["marts"]] == \
         ["ZakazyKlientovClickHouse", "ZakazyKlientovGroupedClickHouse"]
-    assert all(h.clickhouse is clickhouse for h in namespace["HANDLERS"]), 'один пул на все витрины'
-    assert all(h.database == "dwh" for h in namespace["HANDLERS"]), 'база витрин — из адреса'
-    assert all(h.source_database == "onecdc_pg" for h in namespace["HANDLERS"])
+    assert all(h.clickhouse is clickhouse for h in namespace["marts"]), 'один пул на все витрины'
+    assert all(h.database == "dwh" for h in namespace["marts"]), 'база витрин — из адреса'
+    assert all(h.source_database == "onecdc_pg" for h in namespace["marts"])
     assert pool.call_args.kwargs["max_workers"] == 3, 'репликатор + два обработчика'
     for runnable in namespace["RUNNABLES"]:
         owner = getattr(runnable, "__self__", None)

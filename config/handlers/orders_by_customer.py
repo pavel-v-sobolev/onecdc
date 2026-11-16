@@ -7,9 +7,9 @@
 MartLoop сохраняет watermark после успешного коммита и сам арендует destination.
 """
 
-from sqlalchemy import Column, MetaData, Numeric, String, Table, delete, func, insert, select
+from sqlalchemy import Column, MetaData, Numeric, String, Table, func, select
 
-from onecdc.marts import MartContext, MartHandler
+from dbmerge import MartContext, MartHandler, dbmerge
 
 
 class OrdersByCustomer(MartHandler):
@@ -27,9 +27,14 @@ class OrdersByCustomer(MartHandler):
                             autoload_with=ctx.engine)
 
     def process_changes(self, ctx: MartContext) -> None:
-        totals = select(self.orders.c.customer_id, func.sum(self.orders.c.amount)).where(
+        totals = select(self.orders.c.customer_id, func.sum(self.orders.c.amount).label('total')).where(
             self.orders.c.is_deleted_or_empty.is_(False),
             self.orders.c.customer_id.is_not(None)).group_by(self.orders.c.customer_id)
-        with ctx.engine.begin() as conn:
-            conn.execute(delete(self.table))
-            conn.execute(insert(self.table).from_select(["customer_id", "total"], totals))
+        with ctx.engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(totals).mappings()]
+        with dbmerge(ctx.engine, table_name=self.table.name, schema=self.table.schema,
+                     data=rows, key=['customer_id'],
+                     data_types={'customer_id': String(255), 'total': Numeric()},
+                     delete_mode='delete', tracker=ctx.tracker,
+                     lease_handle=ctx.lease_handle) as merge:
+            merge.exec()

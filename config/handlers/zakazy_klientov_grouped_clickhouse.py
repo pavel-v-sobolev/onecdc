@@ -20,14 +20,13 @@ zakazy_klientov_grouped.py с записью в ClickHouse. Почему пер�
 
 from sqlalchemy import Engine, text, tuple_
 
-from dbmerge import dbmerge
-
-from onecdc import Handler, HandlerContext
+from dbmerge import MartContext, MartHandler, dbmerge
 
 
-def postgres_ddl(context: HandlerContext) -> str:
+
+def postgres_ddl(context: MartContext) -> str:
     """Построчное и агрегатное представления и индексы под них в PostgreSQL."""
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientovGroupedClickHouse_rows_view"
 AS
@@ -120,8 +119,8 @@ SELECT Number, Year FROM `{source_database}`.`ZakazyKlientovGroupedClickHouse_ro
 """
 
 
-def postgres_months_sql(context: HandlerContext) -> str:
-    schema = context.schema or 'public'
+def postgres_months_sql(context: MartContext) -> str:
+    schema = context.destination[0] or 'public'
     return f'SELECT DISTINCT "Period" FROM "{schema}"."ZakazyKlientovGroupedClickHouse_rows_view"'
 
 
@@ -129,29 +128,30 @@ def clickhouse_months_sql(database: str) -> str:
     return f"SELECT DISTINCT Period FROM `{database}`.`ZakazyKlientovGrouped`"
 
 
-class ZakazyKlientovGroupedClickHouse(Handler):
+class ZakazyKlientovGroupedClickHouse(MartHandler):
     # Таблицы PostgreSQL, которые читают представления (см. zakazy_klientov_grouped.py).
-    ON = ["AccumulationRegister_ZakazyKlientov", "Document_ZakazKlienta", "Catalog_Nomenklatura"]
+    sources = ["AccumulationRegister_ZakazyKlientov", "Document_ZakazKlienta", "Catalog_Nomenklatura"]
 
-    def __init__(self, clickhouse: Engine, source_database: str, database: str | None = None,
-                 name: str | None = None):
+    def __init__(self, engine: Engine, clickhouse: Engine, source_database: str,
+                 database: str | None = None, *, tracker, schema=None, **lease_kwargs):
         """
-        clickhouse — engine clickhousedb:// (драйвер clickhouse-connect) из runner.py.
+        clickhouse — engine clickhousedb:// (драйвер clickhouse-connect) из runner_marts.py.
         source_database — база ClickHouse с движком PostgreSQL, которая смотрит на схему репликатора.
         database — база витрины в ClickHouse. Не задана — база из адреса подключения, а если
         её нет и там — default.
         """
-        super().__init__(name)
+        super().__init__(engine, tracker=tracker, destination=(schema, "ZakazyKlientovGroupedClickHouse"),
+                         sources=[(schema, name) for name in self.sources], **lease_kwargs)
         self.clickhouse = clickhouse
         self.source_database = source_database
         self.database = database or clickhouse.url.database or 'default'
 
-    def setup(self, context: HandlerContext) -> None:
+    def setup(self, context: MartContext) -> None:
         self.execute(context, postgres_ddl(context))
         with self.clickhouse.begin() as conn:
             conn.execute(text(clickhouse_ddl(self.database)))
 
-    def rebuild(self, context: HandlerContext):
+    def rebuild(self, context: MartContext):
         """
         Пересобрать витрину по месяцам, заменяя месяц целиком.
 
@@ -169,7 +169,8 @@ class ZakazyKlientovGroupedClickHouse(Handler):
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                  # этот месяц уже посчитан до перезапуска процесса
 
-            with dbmerge(self.clickhouse, table_name="ZakazyKlientovGrouped", schema=self.database,
+            with dbmerge(self.clickhouse, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientovGrouped", schema=self.database,
                          source_table_name="ZakazyKlientovGroupedClickHouse_view",
                          source_schema=self.source_database, delete_mode='delete') as merge:
                 merge.exec(source_condition=merge.source_table.c["Period"] == period,
@@ -178,13 +179,14 @@ class ZakazyKlientovGroupedClickHouse(Handler):
             context.logger.info("Data Mart updated for %s", label)
             yield label
 
-    def handle(self, context: HandlerContext) -> None:
+    def process_changes(self, context: MartContext) -> None:
         # Выборка групп уходит в merge дважды, поэтому её не выполняют, а готовят: text() с окном,
         # связанным как обычный параметр, — как в zakazy_klientov_grouped.py.
         groups_to_handle = text(groups_to_handle_sql(self.database, self.source_database)).bindparams(
-            last_run_at=context.last_run_at)
+            last_run_at=context.watermark)
 
-        with dbmerge(self.clickhouse, table_name="ZakazyKlientovGrouped", schema=self.database,
+        with dbmerge(self.clickhouse, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientovGrouped", schema=self.database,
                      source_table_name="ZakazyKlientovGroupedClickHouse_view",
                      source_schema=self.source_database, delete_mode='delete') as merge:
             source_key = tuple_(merge.source_table.c["Number"], merge.source_table.c["Year"])
@@ -196,5 +198,5 @@ class ZakazyKlientovGroupedClickHouse(Handler):
                        delete_condition=target_key.in_(groups_to_handle))
 
         context.logger.info(
-            f'Data Mart changes applied since {context.last_run_at}; '
-            f'Next run will apply since {context.boundary}')
+            f'Data Mart changes applied since {context.watermark}; '
+            f'Next run will apply since {context.next_watermark}')

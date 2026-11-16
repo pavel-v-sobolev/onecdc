@@ -2,7 +2,7 @@
 Витрина строк регистра «Заказы клиентов» с артикулами из справочника номенклатуры.
 
 Обработчик запускается при изменении регистра или номенклатуры в целевой БД и получает
-окно (context.last_run_at, context.boundary]. По этому окну он выбирает строки для пересчёта.
+окно (context.watermark, context.next_watermark]. По этому окну он выбирает строки для пересчёта.
 
 Объекты 1С загружаются независимо: номенклатура может поступить позже движений регистра.
 Поэтому представление содержит отдельную колонку merged_on для каждого источника.
@@ -11,18 +11,17 @@ merged_on регистра, поздняя загрузка номенклату
 """
 
 from sqlalchemy import and_, select, tuple_, union_all
-from dbmerge import dbmerge
-
-from onecdc import Handler, HandlerContext
+from dbmerge import MartContext, MartHandler, dbmerge
 
 
-def ddl(context: HandlerContext) -> str:
+
+def ddl(context: MartContext) -> str:
     """
     Сформировать DDL витрины, подставив имя схемы из контекста через f-строку.
 
     Если схема не задана, пример использует public.
     """
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientov_view"
 AS
@@ -75,7 +74,7 @@ CREATE INDEX IF NOT EXISTS "ix_AccumulationRegister_ZakazyKlientov_Period" ON
 """
 
 
-def rebuild_blocks_sql(context: HandlerContext) -> str:
+def rebuild_blocks_sql(context: MartContext) -> str:
     """
     Сформировать запрос месяцев с движениями регистра в хронологическом порядке.
 
@@ -83,31 +82,39 @@ def rebuild_blocks_sql(context: HandlerContext) -> str:
     соответствует порядку месяцев: все блоки до сохранённой метки уже обработаны.
     Календарные вычисления выполняются в БД.
     """
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 SELECT DISTINCT to_char(date_trunc('month', "Period"), 'YYYY-MM') AS label,
        date_trunc('month', "Period")::date AS begins,
        (date_trunc('month', "Period") + interval '1 month')::date AS ends
   FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
  WHERE "Period" IS NOT NULL
+UNION ALL
+SELECT '0000-00' AS label, NULL::date AS begins, NULL::date AS ends
+ WHERE EXISTS (SELECT 1 FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
+                WHERE "Period" IS NULL)
  ORDER BY label
 """
 
 
-class ZakazyKlientov(Handler):
+class ZakazyKlientov(MartHandler):
     # Имена таблиц в целевой БД (транслит), а не имена объектов 1С — те же, что стоят в SQL ниже:
     #   AccumulationRegister_ZakazyKlientov  ← РегистрНакопления.ЗаказыКлиентов
     #   Catalog_Nomenklatura                 ← Справочник.Номенклатура
     # Читаются обе, поэтому обе и перечислены: по этому же списку считается верхняя граница окна
     # (незавершённый merge любой из них прижимает границу к своему старту).
-    ON = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
+    sources = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
 
-    def setup(self, context: HandlerContext) -> None:
+    def __init__(self, engine, *, tracker, schema=None, **lease_kwargs):
+        super().__init__(engine, tracker=tracker, destination=(schema, "ZakazyKlientov"),
+                         sources=[(schema, name) for name in self.sources], **lease_kwargs)
+
+    def setup(self, context: MartContext) -> None:
         # Один раз за процесс, а не на каждый вызов: полная выгрузка сигналит постранично, и
         # CREATE OR REPLACE VIEW на каждую страницу брал бы блокировки на пустом месте.
         self.execute(context, ddl(context))
 
-    def rebuild(self, context: HandlerContext):
+    def rebuild(self, context: MartContext):
         """
         Пересобрать витрину по месяцам, применяя накопившиеся изменения между блоками.
 
@@ -122,24 +129,30 @@ class ZakazyKlientov(Handler):
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                      # этот месяц уже посчитан до перезапуска процесса
 
-            with dbmerge(context.engine, table_name="ZakazyKlientov", schema=context.schema,
+            with dbmerge(context.engine, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientov", schema=context.destination[0],
                          source_table_name="ZakazyKlientov_view",
-                         source_schema=context.schema) as merge:
+                         source_schema=context.destination[0]) as merge:
                 period = merge.source_table.c["Period"]
-                merge.exec(source_condition=and_(period >= begin, period < end))
+                # Пустые наборы регистра тоже представлены строками: Period у них NULL.
+                # Отдельная метка сортируется до месяцев и поддерживает resume.
+                condition = (period.is_(None) if label == '0000-00' else
+                             and_(period >= begin, period < end))
+                merge.exec(source_condition=condition)
 
             context.logger.info("Data Mart updated for %s", label)
             yield label
 
-    def handle(self, context: HandlerContext) -> None:
+    def process_changes(self, context: MartContext) -> None:
         # delete_mode не задан (по умолчанию 'no'): удалять из витрины нечего. Строки из целевых
         # таблиц физически не исчезают — выпавшую из набора движений репликатор помечает
         # is_deleted_or_empty и гасит ресурсы, а представление её не фильтрует. Значит такая строка
         # поступит сюда как обычное изменение и обновит строку витрины нулём и флагом.
-        with dbmerge(context.engine, table_name="ZakazyKlientov", schema=context.schema,
+        with dbmerge(context.engine, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientov", schema=context.destination[0],
                      # Источник данных — представление в той же схеме, что и витрина.
                      source_table_name="ZakazyKlientov_view",
-                     source_schema=context.schema) as merge:
+                     source_schema=context.destination[0]) as merge:
 
             # Ключ витрины совпадает с ключом строки регистра, и удаления нет, поэтому единица
             # пересчёта — строка: берём те, у которых стал свежее хоть один источник. (Там, где
@@ -159,9 +172,9 @@ class ZakazyKlientov(Handler):
             # Нижняя граница окна берётся из контекста как есть: там всегда дата, и на первом
             # прогоне (или пересборке) это начало времён, а не None — проверять нечего.
             changed_by_register = select(*row_key).where(
-                changed.c["merged_on"] > context.last_run_at)
+                changed.c["merged_on"] > context.watermark)
             changed_by_nomenklatura = select(*row_key).where(
-                changed.c["Nomenklatura_merged_on"] > context.last_run_at)
+                changed.c["Nomenklatura_merged_on"] > context.watermark)
 
             changed_rows = union_all(changed_by_register, changed_by_nomenklatura)
 
@@ -201,5 +214,5 @@ class ZakazyKlientov(Handler):
             #    заводит только merged_on, поэтому этот индекс создаётся в setup().
 
         context.logger.info(
-            f'Data Mart changes applied since {context.last_run_at}; '
-            f'Next run will apply since {context.boundary}')
+            f'Data Mart changes applied since {context.watermark}; '
+            f'Next run will apply since {context.next_watermark}')

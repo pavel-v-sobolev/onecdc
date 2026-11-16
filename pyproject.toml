@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "onecdc"
-version = "1.2.0"
+version = "2.0.0"
 description = "Change data capture (CDC) from 1C:Enterprise to your data warehouse"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 # (uv sync --upgrade), а точный проверенный набор зафиксирован в uv.lock.
 dependencies = [
     "croniter>=6.0.0",
-    "dbmerge>=2.4.1",
+    "dbmerge>=2.5.0",
     "requests>=2.33.0",
     "sqlalchemy>=2.0.49",
     "xmltodict>=1.0.4",
@@ -60,7 +60,7 @@ postgres = [
 # clickhouse-sqlalchemy dbmerge не принимает (его драйвер открывает сессию на каждый оператор,
 # и временная таблица теряется).
 clickhouse = [
-    "dbmerge[clickhouse]>=2.4.1",
+    "dbmerge[clickhouse]>=2.5.0",
 ]
 dev = [
     "pytest>=8",

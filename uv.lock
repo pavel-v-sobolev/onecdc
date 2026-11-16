@@ -409,16 +409,16 @@ wheels = [
 
 [[package]]
 name = "dbmerge"
-version = "2.4.1"
+version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alembic" },
     { name = "sqlalchemy", version = "2.0.57", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sqlalchemy", version = "2.1.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a4/64/494adf518105a452444cc0dc28a0c01bd189c2b32cdb7739b79e400bac21/dbmerge-2.4.1.tar.gz", hash = "sha256:02da31e3289836de4c1d7311b40adf98f4105b8ac6c405ecbc5ed436db986be1", size = 126935, upload-time = "2026-11-15T05:29:39.404Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/69/1975169d7f361c61dcb97aa6a520ef51d790be2712b7fc7ab6fcab107a99/dbmerge-2.5.0.tar.gz", hash = "sha256:a57c203f9b1c0be9209e827cdc6b960c320ba4ba4954152e496e0c1cea378efd", size = 136978, upload-time = "2026-11-16T10:42:15.007Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/66/65cc5dcf8cbfb04f1f67014c271e6bf139a5169d54cab1e78ce4ee232a56/dbmerge-2.4.1-py3-none-any.whl", hash = "sha256:ab1bb49f439e10adbdee86837a0f96948bf08c8d57c1d6d1c2177ce50fcc649d", size = 84379, upload-time = "2026-11-15T05:29:37.753Z" },
+    { url = "https://files.pythonhosted.org/packages/23/0d/ba9f3f526e771942159f58515e82ec3bbf51db6ea27388f4682b626c62e6/dbmerge-2.5.0-py3-none-any.whl", hash = "sha256:8ea8623a08c10ab9ffafaeed92a2b4bfcd11bd55bb7509cedc54c4cfc08d38b1", size = 88289, upload-time = "2026-11-16T10:42:13.475Z" },
 ]
 
 [package.optional-dependencies]
@@ -741,7 +741,7 @@ wheels = [
 
 [[package]]
 name = "onecdc"
-version = "1.2.0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
@@ -770,8 +770,8 @@ postgres = [
 [package.metadata]
 requires-dist = [
     { name = "croniter", specifier = ">=6.0.0" },
-    { name = "dbmerge", specifier = ">=2.4.1" },
-    { name = "dbmerge", extras = ["clickhouse"], marker = "extra == 'clickhouse'", specifier = ">=2.4.1" },
+    { name = "dbmerge", specifier = ">=2.5.0" },
+    { name = "dbmerge", extras = ["clickhouse"], marker = "extra == 'clickhouse'", specifier = ">=2.5.0" },
     { name = "onecdc", extras = ["clickhouse"], marker = "extra == 'dev'" },
     { name = "onecdc", extras = ["postgres"], marker = "extra == 'dev'" },
     { name = "psycopg2-binary", marker = "extra == 'postgres'", specifier = ">=2.9.12" },

@@ -3,7 +3,7 @@
 таблицы в PostgreSQL (схема теста, см. conftest.py), витрина в ClickHouse. ClickHouse читает схему
 теста сам, через базу с движком PostgreSQL, — как в боевой раскладке.
 
-Обработчики запускаются через HandlerLoop, как в боевом коде: первый прогон идёт пересборкой по
+Обработчики запускаются через dbmerge MartLoop, как в боевом коде: первый прогон идёт пересборкой по
 блокам, следующие — по окну после сигнала. Витрина читается с FINAL — так её читает и потребитель.
 
 Адрес ClickHouse — ONECDC_TEST_CLICKHOUSE_URL. Адрес PostgreSQL, по которому до него дотягивается
@@ -15,6 +15,7 @@
 
 import os
 import uuid
+import importlib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -24,7 +25,7 @@ from sqlalchemy import Engine, create_engine, make_url, text
 
 from config.handlers import ZakazyKlientovClickHouse, ZakazyKlientovGroupedClickHouse
 from conftest import TEST_DB_URL
-from onecdc.handlers import SOURCE_CHANGES, HandlerLoop, HandlerSignals
+from dbmerge import MergeTracker, request_rebuild, reset_stop
 
 CLICKHOUSE_URL = os.environ.get(
     "ONECDC_TEST_CLICKHOUSE_URL", "clickhousedb://default:@localhost:8123/default")
@@ -68,6 +69,29 @@ def clickhouse(db):
             conn.execute(text(f"DROP DATABASE IF EXISTS `{source_database}`"))
             conn.execute(text(f"DROP DATABASE IF EXISTS `{database}`"))
         engine.dispose()
+
+
+@pytest.fixture
+def tracker(db):
+    reset_stop()
+    with MergeTracker(db.engine, schema=db.schema) as tracker:
+        yield tracker
+    reset_stop()
+
+
+@pytest.fixture(autouse=True)
+def require_explicit_merge_lease(monkeypatch):
+    for name in ('zakazy_klientov_clickhouse', 'zakazy_klientov_grouped_clickhouse'):
+        module = importlib.import_module(f'config.handlers.{name}')
+        original = module.dbmerge
+
+        def guarded(*args, _original=original, **kwargs):
+            assert isinstance(kwargs['tracker'], MergeTracker)
+            assert kwargs['lease_handle'] is not None
+            kwargs['lease_handle'].validate(kwargs['tracker'])
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(module, 'dbmerge', guarded)
 
 
 @pytest.fixture
@@ -122,7 +146,7 @@ def _sql(db, sql, **params):
 
 
 def _loop(db, handler, loops):
-    loop = HandlerLoop(engine=db.engine, schema=db.schema, handler=handler)
+    loop = handler.loop()
     loops.append(loop)
     return loop
 
@@ -132,14 +156,10 @@ def _run(db, loop, *changed_tables):
     Сигнал, как его подаёт репликатор, и один оборот цикла. Упавший обработчик цикл не пробрасывает,
     а записывает в last_error — поэтому проверяем её, иначе тест сверял бы витрину прошлого прогона.
     """
-    signals = HandlerSignals(db.engine, db.schema)
-    for table in changed_tables:
-        signals.signal(table, SOURCE_CHANGES)
-    loop.run_if_pending()
-    with db.engine.connect() as conn:
-        error = conn.execute(text(f'SELECT last_error FROM "{db.schema}".onecdc_handlers '
-                                  'WHERE name = :name'), {"name": loop.name}).scalar()
-    assert error is None, error
+    for table in changed_tables or ("AccumulationRegister_ZakazyKlientov",):
+        loop.tracker.exec(lambda: True, destination=(db.schema, table))
+    assert loop.run_if_pending()
+
 
 
 def _mart(clickhouse, table, columns):
@@ -156,15 +176,19 @@ def _mart(clickhouse, table, columns):
 
 # --- построчная витрина -----------------------------------------------------------------------------
 
-def test_row_mart_follows_the_register_and_a_late_catalog(db, clickhouse, loops):
+def test_row_mart_follows_the_register_and_a_late_catalog(db, clickhouse, tracker, loops):
     _source_tables(db)
     order, older_order, nomenklatura = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     _movement(db, order, 1, datetime(2026, 6, 7, 10, 15, 30), 5, nomenklatura)
     _movement(db, order, 2, datetime(2026, 6, 7, 10, 15, 30), 2, nomenklatura, 'Expense')
     _movement(db, older_order, 1, datetime(2026, 5, 1), Decimal('1.125'), nomenklatura)
+    empty_before_rebuild = uuid.uuid4()
+    _sql(db, 'INSERT INTO "{s}"."AccumulationRegister_ZakazyKlientov" '
+             '("Recorder", "Recorder_Type", "LineNumber", "is_deleted_or_empty") '
+             'VALUES (:r, :t, 1, true)', r=empty_before_rebuild, t=ORDER)
 
-    loop = _loop(db, ZakazyKlientovClickHouse(clickhouse.engine, clickhouse.source_database,
-                                              clickhouse.database), loops)
+    loop = _loop(db, ZakazyKlientovClickHouse(db.engine, clickhouse.engine, clickhouse.source_database,
+                                              clickhouse.database, tracker=tracker, schema=db.schema), loops)
     columns = ["Recorder", "LineNumber", "Period", "Zakazano", "Artikul", "is_deleted_or_empty"]
 
     # Первый прогон — пересборка по месяцам. Номенклатура ещё не загружена: артикула нет.
@@ -173,12 +197,14 @@ def test_row_mart_follows_the_register_and_a_late_catalog(db, clickhouse, loops)
         (order, 1, datetime(2026, 6, 7, 10, 15, 30), Decimal('5'), None, False),
         (order, 2, datetime(2026, 6, 7, 10, 15, 30), Decimal('-2'), None, False),
         (older_order, 1, datetime(2026, 5, 1), Decimal('1.125'), None, False),
+        (empty_before_rebuild, 1, None, None, None, True),
     ]), 'Period доезжает тем же временем 1С, без сдвига на пояс сервера ClickHouse'
 
     # Справочник поступил позже движений: строки пересчитываются по его merged_on.
     _nomenklatura(db, nomenklatura, 'A-1')
     _run(db, loop, "Catalog_Nomenklatura")
-    assert {row[4] for row in _mart(clickhouse, "ZakazyKlientov", columns)} == {'A-1'}
+    assert {row[4] for row in _mart(clickhouse, "ZakazyKlientov", columns)
+            if row[0] != empty_before_rebuild} == {'A-1'}
 
     # Строку, выпавшую из набора движений, репликатор помечает: в витрине она обнуляется.
     _sql(db, 'UPDATE "{s}"."AccumulationRegister_ZakazyKlientov" '
@@ -212,7 +238,7 @@ def test_row_mart_follows_the_register_and_a_late_catalog(db, clickhouse, loops)
 GROUPED_COLUMNS = ["Number", "Year", "Artikul", "Zakazano", "Period"]
 
 
-def test_grouped_mart_moves_groups_with_their_document(db, clickhouse, loops):
+def test_grouped_mart_moves_groups_with_their_document(db, clickhouse, tracker, loops):
     _source_tables(db)
     late, early = uuid.uuid4(), uuid.uuid4()
     first, second = uuid.uuid4(), uuid.uuid4()
@@ -223,8 +249,8 @@ def test_grouped_mart_moves_groups_with_their_document(db, clickhouse, loops):
     _movement(db, early, 1, datetime(2025, 12, 30), 1, first)
     _document(db, early, 'Z-2', datetime(2025, 12, 30, 9, 0))
 
-    loop = _loop(db, ZakazyKlientovGroupedClickHouse(clickhouse.engine, clickhouse.source_database,
-                                                         clickhouse.database), loops)
+    loop = _loop(db, ZakazyKlientovGroupedClickHouse(db.engine, clickhouse.engine, clickhouse.source_database,
+                                                         clickhouse.database, tracker=tracker, schema=db.schema), loops)
 
     # Документ late ещё не поступил: его строки в группе-заглушке ('', 0) с месяцем 1900-01.
     _run(db, loop)
@@ -266,7 +292,7 @@ def test_grouped_mart_moves_groups_with_their_document(db, clickhouse, loops):
     ]
 
 
-def test_grouped_rebuild_replaces_whole_months(db, clickhouse, loops):
+def test_grouped_rebuild_replaces_whole_months(db, clickhouse, tracker, loops):
     """Пересборка заменяет месяц целиком, в том числе месяц, которого в источнике уже нет."""
     _source_tables(db)
     order, nomenklatura = uuid.uuid4(), uuid.uuid4()
@@ -274,8 +300,8 @@ def test_grouped_rebuild_replaces_whole_months(db, clickhouse, loops):
     _movement(db, order, 1, datetime(2026, 6, 7), 5, nomenklatura)
     _document(db, order, 'Z-1', datetime(2026, 6, 7))
 
-    loop = _loop(db, ZakazyKlientovGroupedClickHouse(clickhouse.engine, clickhouse.source_database,
-                                                         clickhouse.database), loops)
+    loop = _loop(db, ZakazyKlientovGroupedClickHouse(db.engine, clickhouse.engine, clickhouse.source_database,
+                                                         clickhouse.database, tracker=tracker, schema=db.schema), loops)
     _run(db, loop)
 
     # Лишние строки в витрине: группа месяца, который в источнике есть, и месяц, которого нет.
@@ -286,7 +312,7 @@ def test_grouped_rebuild_replaces_whole_months(db, clickhouse, loops):
             f"('X-9', 2026, 'Q', 1, '2026-06-01', [], now64(6)), "
             f"('X-8', 2020, 'Q', 1, '2020-01-01', [], now64(6))"))
 
-    HandlerSignals(db.engine, db.schema).request_full_rebuild("Document_ZakazKlienta", "test")
+    request_rebuild(db.engine, loop.destination, schema=db.schema)
     _run(db, loop)
     assert _mart(clickhouse, "ZakazyKlientovGrouped", GROUPED_COLUMNS) == [
         ('Z-1', 2026, 'A-1', Decimal('5'), date(2026, 6, 1))]

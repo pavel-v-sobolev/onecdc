@@ -3,6 +3,53 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [2.0.0] — 2026-11-16
+
+**Перед обновлением с 1.x:** удалён beta-адаптер `onecdc.run_mart`, изменён
+контракт запуска витрин и владения tracker. Минимальная версия dbmerge — 2.5.0.
+Основной API репликации и старые `Handler` / `HandlerLoop` сохранены.
+
+### Миграция с 1.x
+- Вместо `run_mart(handler, tracker=tracker, ...)` передавайте tracker в
+  конструктор `dbmerge.MartHandler` и вызывайте `handler.run_once()` либо
+  `handler.run_forever()`. В своих merge явно передавайте tracker и аренду
+  текущего прохода; подробности и примеры — в `MARTS.md`.
+- `Replicator(..., tracker=None)` больше не отключает журнал dbmerge: он создаёт
+  собственный tracker в `db_schema`. Для отдельной схемы журнала передайте
+  внешний `MergeTracker(engine, schema="tracking")`. Внешний tracker закрывает
+  приложение после остановки репликатора и витрин; собственный закрывает
+  `rep.close()`. Не закрывайте репликатор, пока витрины используют `rep.tracker`.
+
+### Added
+- Интеграционный OData-тест с явным разрешением записи `ONECDC_LIVE_WRITE=1`,
+  резервной копией исходных полей и восстановлением в `finally`. Проверяет
+  содержимое витрин двусторонним `EXCEPT ALL`. Тесты живой 1С исключены
+  из обычного набора; отмена и восстановление проведения требуют отдельного
+  успешного прогона на доступном тестовом сервере.
+
+### Fixed
+- Построчные примеры PostgreSQL/ClickHouse пересобирают также записи пустых наборов
+  с `Period IS NULL`: отдельный возобновляемый блок `0000-00` не теряет tombstones.
+
+### Changed
+- `Replicator` без `tracker` создаёт свой `MergeTracker` в `db_schema`, предоставляет
+  его как `rep.tracker` и закрывает в `close()`. Внешний открытый tracker сохраняет
+  свою схему и принадлежит приложению: журнал можно хранить отдельно от данных
+  и служебных таблиц onecdc. Неверный или закрытый tracker отклоняется сразу.
+- Минимальная версия dbmerge — 2.5.0. Beta-витрины используют напрямую
+  `dbmerge.MartHandler(engine, tracker=tracker)` и методы `run_once()` /
+  `run_forever()`. Удалён адаптер `onecdc.run_mart`; `onecdc.marts` сохраняет
+  только совместимые импорты классов и функций управления dbmerge.
+- Раннер явно владеет общим tracker и закрывает его после завершения workers.
+  Пример `OrdersByCustomer` и раннер не импортируют onecdc. Полные примеры
+  PostgreSQL/ClickHouse и блочной пересборки находятся в dbmerge.
+- Миграция beta API: передавайте `tracker` конструктору mart, используйте
+  `lease_options` / `lease_handle` вместо старых аргументов аренды; внутри merge
+  callback явно передавайте `tracker=ctx.tracker, lease_handle=ctx.lease_handle`.
+  Все примеры `ZakazyKlientov*` переведены на MartHandler, явный tracker и
+  заимствование lease_handle каждой merge-записью. Общий раннер связывает журнал
+  репликатора с витринами. Старый `Handler` / `HandlerLoop` остаётся без изменений.
+
 ## [1.2.0] — 2026-10-29
 
 ### Added

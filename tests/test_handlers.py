@@ -133,9 +133,11 @@ def test_as_handler_accepts_instances_modules_and_functions(db):
     send_to_queue.ON = ["Catalog_X"]
     assert as_handler(send_to_queue).name == 'send_to_queue'
 
-    from config.handlers import zakazy_klientov as module_handler
-    assert as_handler(module_handler.ZakazyKlientov()).on == frozenset(
-        ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"])
+    import types
+    module_handler = types.ModuleType('custom_handler')
+    module_handler.ON = ["Catalog_X"]
+    module_handler.handle = send_to_queue
+    assert as_handler(module_handler).on == frozenset(["Catalog_X"])
 
 
 def test_as_handler_rejects_broken_declarations(db):

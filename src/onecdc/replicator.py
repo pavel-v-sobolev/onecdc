@@ -631,7 +631,7 @@ class Replicator:
                  log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
                  automatic_full_load: bool = True,
                  max_response_bytes: int | None = MAX_RESPONSE_BYTES,
-                 # Журнал merges для витрин (dbmerge.tracking). None — журнал не ведём.
+                 # Внешний журнал либо собственный MergeTracker в db_schema.
                  tracker: MergeTracker | None = None):
         # Включаем вывод логов, если приложение не настроило логирование само.
         _ensure_handler()
@@ -644,6 +644,11 @@ class Replicator:
         # иначе оборачиваются ошибкой 1С посреди первого цикла, где уже не видно, что не так.
         self.engine = _check_db_connection(_check_engine(engine))
         self.db_schema = _check_db_schema(db_schema)
+        if tracker is not None:
+            if not isinstance(tracker, MergeTracker):
+                raise ValueError('tracker must be an open MergeTracker or None')
+            if tracker._closing or tracker._closed.is_set():
+                raise ValueError('tracker must be an open MergeTracker')
         # Куда класть одноразовые таблицы ключей полной выгрузки (см. full_load_keys). Не задана —
         # туда же, где данные. Отдельная схема удобна тем, что в ней по определению нет ничего
         # ценного: таблицу, оставшуюся после падения процесса, там видно и не жалко удалить.
@@ -772,6 +777,14 @@ class Replicator:
         # Действующий StopSignal текущего run_forever — через него цикл останавливают снаружи,
         # когда он крутится не в главном потоке и своего перехвата сигналов не имеет.
         self._stop_signal: "StopSignal | None" = None
+
+        # Создаём собственный tracker только после подготовки остальных компонентов:
+        # ошибка их конструктора не должна оставить открытый принадлежащий нам журнал.
+        # Схема внешнего tracker независима от схемы данных и служебных таблиц onecdc.
+        self._owns_tracker = tracker is None
+        self.tracker = (MergeTracker(self.engine, schema=self.db_schema)
+                        if tracker is None else tracker)
+        self.writer.tracker = self.tracker
 
 
     @_load_mode_tag(LOAD_MODE_CHANGES)
@@ -2150,9 +2163,16 @@ class Replicator:
 
         Не прерывает текущую загрузку. Для остановки run_forever сначала вызовите request_stop
         и дождитесь возврата из цикла. Сам run_forever вызывает close при штатном завершении.
+        Собственный tracker закрывается; внешний остаётся у вызывающего кода.
         """
-        self._node_lease.release(self._queue_guid)
-        self._node_lease.close()
+        try:
+            self._node_lease.release(self._queue_guid)
+        finally:
+            try:
+                self._node_lease.close()
+            finally:
+                if self._owns_tracker:
+                    self.tracker.close()
 
     @contextmanager
     def claim_full_load(self, object_full_name: str):

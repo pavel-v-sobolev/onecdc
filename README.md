@@ -28,7 +28,9 @@ It uses the standard OData interface and exchange plans to read changes and upda
 
 Новые витрины на `dbmerge.MartHandler` и дополнительный журнал `MergeTracker` имеют
 статус **beta**. Это отдельный API, старые `Handler`/`HandlerLoop` не заменяются.
-Настройка, ограничения и пример — в [MARTS.md](MARTS.md).
+Витрины и их раннеры работают непосредственно на dbmerge >= 2.5.0, без onecdc;
+onecdc передаёт в общий журнал изменения реплицируемых источников.
+Настройка, ограничения и примеры — в [MARTS.md](MARTS.md).
 
 
 # Что нужно для работы
@@ -329,30 +331,34 @@ OneCDC добавляет обработчик к логгеру `onecdc` с у�
 справочником по GUID. Для корпоративного хранилища данных (КХД) обычно удобнее менее строгая нормализация — витрины, собранные
 заранее.
 
-Витрины можно обновлять по мере изменения данных: репликатор передаёт сигнал, по которому
-цикл обработчика вызывает ваш код. Такой код называется **обработчиком** — это класс с подпиской на таблицы и методом `handle`:
+Витрины обновляются через `dbmerge.MartHandler`: репликатор пишет в общий
+`MergeTracker`, а витрина читает его независимо от onecdc. Настройка журнала,
+владение tracker и запуск — в [MARTS.md](MARTS.md).
 
 ```python
-from onecdc import Handler, HandlerContext
+from dbmerge import MartContext, MartHandler, dbmerge
 
-class ZakazyKlientov(Handler):
-    ON = ["AccumulationRegister_ZakazyKlientov"]   # имена ТАБЛИЦ в БД, не объектов 1С
+class ZakazyKlientov(MartHandler):
+    destination = "ZakazyKlientov"
+    sources = ["AccumulationRegister_ZakazyKlientov"]
 
-    def handle(self, context: HandlerContext) -> None:
-        self.execute(context, "insert into ... where merged_on > :last_run_at",
-                     last_run_at=context.last_run_at)
+    def process_changes(self, ctx: MartContext) -> None:
+        with dbmerge(ctx.engine, table_name=ctx.destination[1], schema=ctx.destination[0],
+                     source_table_name="ZakazyKlientov_view", tracker=ctx.tracker,
+                     lease_handle=ctx.lease_handle) as merge:
+            merge.exec(source_condition=merge.source_table.c.merged_on > ctx.watermark)
 ```
 
-Тем же способом изменения отправляют во внешнюю систему — очередь, вебхук, другую БД.
-Обработчик-отправщик сделайте устойчивым к повторной отправке: передавайте ключ и
-пропускайте на приёмнике то, что уже приходило — после сбоя одно и то же окно изменений может быть обработано повторно.
+Конструктору передаются `engine` и открытый `tracker=tracker`, затем вызывается
+`run_once()` или `run_forever()`. Старые `Handler` / `HandlerLoop` доступны для
+существующего кода, но примеры витрин ниже используют только dbmerge.
 
 Оптимально начать с **представления (view)**: в нём собран `SELECT` со всеми `JOIN` по GUID-ключам.
 DDL можно прописать прямо в обработчике (`setup`) или завести отдельно. Дальше обработчик работает так:
 
-- библиотека вызывает его, передавая отметку `last_run_at` — нижнюю границу окна изменений;
+- библиотека вызывает его, передавая отметку `watermark` — нижнюю границу окна изменений;
 - обработчик пишет `SELECT`, который находит по представлению изменившиеся ключи условием
-  `merged_on > last_run_at` (`merged_on` есть и у таблиц, подключённых через `JOIN`, — см. пример);
+  `merged_on > watermark` (`merged_on` есть и у таблиц, подключённых через `JOIN`, — см. пример);
 - этот `SELECT` уходит в условия обновления
   [dbmerge](https://github.com/pavel-v-sobolev/dbmerge): `source_condition` говорит, какие ключи
   взять из источника, `delete_condition` — в каком множестве ключей чистить строки, если что-то

@@ -23,8 +23,8 @@ timestamptz приходит в ClickHouse без пояса, и окно merged
    передаёт в PostgreSQL IN с подзапросом, и dbmerge выполняет подзапрос сам, а в PostgreSQL отдаёт
    готовый список ключей. Поэтому из PostgreSQL читаются только изменившиеся строки.
 
-2) Подключение к ClickHouse передаётся в конструктор: HandlerLoop знает только целевую БД репликатора
-   (context.engine). Адрес и пароль ClickHouse в этом файле не пишутся: engine создаёт runner.py
+2) Подключение к ClickHouse передаётся в конструктор: MartHandler получает PostgreSQL engine для чтения источников
+   (context.engine). Адрес и пароль ClickHouse в этом файле не пишутся: engine создаёт runner_marts.py
    из переменной окружения.
 
 3) Витрина — ReplacingMergeTree. Изменённая строка записывается новой версией, а прежняя исчезает
@@ -33,14 +33,13 @@ timestamptz приходит в ClickHouse без пояса, и окно merged
 """
 
 from sqlalchemy import Engine, and_, select, text, tuple_, union_all
-from dbmerge import dbmerge
-
-from onecdc import Handler, HandlerContext
+from dbmerge import MartContext, MartHandler, dbmerge
 
 
-def postgres_ddl(context: HandlerContext) -> str:
+
+def postgres_ddl(context: MartContext) -> str:
     """Представление-источник и индексы под него в PostgreSQL — те же, что в zakazy_klientov.py."""
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 CREATE OR REPLACE VIEW "{schema}"."ZakazyKlientovClickHouse_view"
 AS
@@ -95,58 +94,69 @@ ORDER BY (Recorder, Recorder_Type, LineNumber)
 """
 
 
-def rebuild_blocks_sql(context: HandlerContext) -> str:
+def rebuild_blocks_sql(context: MartContext) -> str:
     """Месяцы с движениями регистра в хронологическом порядке, как в zakazy_klientov.py."""
-    schema = context.schema or 'public'
+    schema = context.destination[0] or 'public'
     return f"""
 SELECT DISTINCT to_char(date_trunc('month', "Period"), 'YYYY-MM') AS label,
        date_trunc('month', "Period")::date AS begins,
        (date_trunc('month', "Period") + interval '1 month')::date AS ends
   FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
  WHERE "Period" IS NOT NULL
+UNION ALL
+SELECT '0000-00' AS label, NULL::date AS begins, NULL::date AS ends
+ WHERE EXISTS (SELECT 1 FROM "{schema}"."AccumulationRegister_ZakazyKlientov"
+                WHERE "Period" IS NULL)
  ORDER BY label
 """
 
 
-class ZakazyKlientovClickHouse(Handler):
+class ZakazyKlientovClickHouse(MartHandler):
     # Таблицы PostgreSQL, которые читает представление (см. zakazy_klientov.py).
-    ON = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
+    sources = ["AccumulationRegister_ZakazyKlientov", "Catalog_Nomenklatura"]
 
-    def __init__(self, clickhouse: Engine, source_database: str, database: str | None = None,
-                 name: str | None = None):
+    def __init__(self, engine: Engine, clickhouse: Engine, source_database: str,
+                 database: str | None = None, *, tracker, schema=None, **lease_kwargs):
         """
-        clickhouse — engine clickhousedb:// (драйвер clickhouse-connect) из runner.py.
+        clickhouse — engine clickhousedb:// (драйвер clickhouse-connect) из runner_marts.py.
         source_database — база ClickHouse с движком PostgreSQL, которая смотрит на схему репликатора.
         database — база витрины в ClickHouse. Не задана — база из адреса подключения, а если
         её нет и там — default.
         """
-        super().__init__(name)
+        super().__init__(engine, tracker=tracker, destination=(schema, "ZakazyKlientovClickHouse"),
+                         sources=[(schema, name) for name in self.sources], **lease_kwargs)
         self.clickhouse = clickhouse
         self.source_database = source_database
         self.database = database or clickhouse.url.database or 'default'
 
-    def setup(self, context: HandlerContext) -> None:
+    def setup(self, context: MartContext) -> None:
         self.execute(context, postgres_ddl(context))
         with self.clickhouse.begin() as conn:
             conn.execute(text(clickhouse_ddl(self.database)))
 
-    def rebuild(self, context: HandlerContext):
+    def rebuild(self, context: MartContext):
         """Пересобрать витрину по месяцам, как в zakazy_klientov.py: удалять здесь нечего."""
         for label, begin, end in self.query(context, rebuild_blocks_sql(context)):
             if context.rebuild_from and label <= context.rebuild_from:
                 continue                      # этот месяц уже посчитан до перезапуска процесса
 
-            with dbmerge(self.clickhouse, table_name="ZakazyKlientov", schema=self.database,
+            with dbmerge(self.clickhouse, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientov", schema=self.database,
                          source_table_name="ZakazyKlientovClickHouse_view",
                          source_schema=self.source_database) as merge:
                 period = merge.source_table.c["Period"]
-                merge.exec(source_condition=and_(period >= begin, period < end))
+                # Пустые наборы регистра тоже представлены строками: Period у них NULL.
+                # Отдельная метка сортируется до месяцев и поддерживает resume.
+                condition = (period.is_(None) if label == '0000-00' else
+                             and_(period >= begin, period < end))
+                merge.exec(source_condition=condition)
 
             context.logger.info("Data Mart updated for %s", label)
             yield label
 
-    def handle(self, context: HandlerContext) -> None:
-        with dbmerge(self.clickhouse, table_name="ZakazyKlientov", schema=self.database,
+    def process_changes(self, context: MartContext) -> None:
+        with dbmerge(self.clickhouse, tracker=context.tracker,
+                         lease_handle=context.lease_handle, table_name="ZakazyKlientov", schema=self.database,
                      source_table_name="ZakazyKlientovClickHouse_view",
                      source_schema=self.source_database) as merge:
 
@@ -158,13 +168,13 @@ class ZakazyKlientovClickHouse(Handler):
             row_key = (changed.c["Recorder"], changed.c["Recorder_Type"], changed.c["LineNumber"])
 
             changed_by_register = select(*row_key).where(
-                changed.c["merged_on"] > context.last_run_at)
+                changed.c["merged_on"] > context.watermark)
             changed_by_nomenklatura = select(*row_key).where(
-                changed.c["Nomenklatura_merged_on"] > context.last_run_at)
+                changed.c["Nomenklatura_merged_on"] > context.watermark)
 
             merge.exec(source_condition=tuple_(*row_key).in_(
                 union_all(changed_by_register, changed_by_nomenklatura)))
 
         context.logger.info(
-            f'Data Mart changes applied since {context.last_run_at}; '
-            f'Next run will apply since {context.boundary}')
+            f'Data Mart changes applied since {context.watermark}; '
+            f'Next run will apply since {context.next_watermark}')

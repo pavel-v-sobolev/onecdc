@@ -10,9 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sqlalchemy import create_engine
 
-from onecdc.marts import request_stop, run_mart
+from dbmerge import MergeTracker, request_stop
 
-from handlers import OrdersByCustomer
+from handlers.orders_by_customer import OrdersByCustomer
+# from handlers import ZakazyKlientov, ZakazyKlientovGrouped
+# from handlers import ZakazyKlientovClickHouse, ZakazyKlientovGroupedClickHouse
 
 DB_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/onecdc"
 POLL_INTERVAL = 60
@@ -24,20 +26,29 @@ MART_SCHEMA = None
 def main():
     engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=0)
     try:
-        marts = [OrdersByCustomer(engine,
-                                 destination=(MART_SCHEMA, "orders_by_customer"),
-                                 sources=[(SOURCE_SCHEMA, "orders")])]
-        signal.signal(signal.SIGTERM, request_stop)
-        signal.signal(signal.SIGINT, request_stop)
-        with ThreadPoolExecutor(max_workers=len(marts), thread_name_prefix='mart') as executor:
-            futures = [executor.submit(run_mart, mart, poll_interval=POLL_INTERVAL,
-                                       schema=DB_SCHEMA) for mart in marts]
-            try:
-                for future in as_completed(futures):
-                    future.result()
-            finally:
-                # Ошибка подготовки одного worker не оставляет остальные работать вечно.
-                request_stop()
+        with MergeTracker(engine, schema=DB_SCHEMA) as tracker:
+            marts = [OrdersByCustomer(engine, tracker=tracker,
+                                      destination=(MART_SCHEMA, "orders_by_customer"),
+                                      sources=[(SOURCE_SCHEMA, "orders")])]
+            # Вместо OrdersByCustomer можно запустить примеры для таблиц 1С:
+            # marts = [ZakazyKlientov(engine, tracker=tracker, schema=SOURCE_SCHEMA),
+            #          ZakazyKlientovGrouped(engine, tracker=tracker, schema=SOURCE_SCHEMA)]
+            # ClickHouse engine создаёт приложение и dispose() после остановки workers:
+            # ZakazyKlientovClickHouse(engine, clickhouse, 'onecdc_pg',
+            #                          tracker=tracker, schema=SOURCE_SCHEMA)
+            # ZakazyKlientovGroupedClickHouse(engine, clickhouse, 'onecdc_pg',
+            #                                 tracker=tracker, schema=SOURCE_SCHEMA)
+            signal.signal(signal.SIGTERM, request_stop)
+            signal.signal(signal.SIGINT, request_stop)
+            with ThreadPoolExecutor(max_workers=len(marts), thread_name_prefix='mart') as executor:
+                try:
+                    futures = [executor.submit(mart.run_forever, poll_interval=POLL_INTERVAL)
+                               for mart in marts]
+                    for future in as_completed(futures):
+                        future.result()
+                finally:
+                    # Остановить workers до ожидания executor и закрытия tracker.
+                    request_stop()
     finally:
         engine.dispose()
 
