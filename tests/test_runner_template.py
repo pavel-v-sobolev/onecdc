@@ -8,6 +8,7 @@
 """
 
 import re
+import signal
 from pathlib import Path
 from unittest import mock
 
@@ -49,10 +50,49 @@ def _run(source: str, monkeypatch):
     """Исполняет шаблон, подменив пул потоков: сам run_forever нам тут не нужен."""
     monkeypatch.syspath_prepend(str(CONFIG_DIR))
     namespace = {"__name__": "__main__", "__file__": str(RUNNER)}
-    with mock.patch("concurrent.futures.ThreadPoolExecutor") as pool, \
-            mock.patch("concurrent.futures.as_completed", return_value=[]):
-        exec(compile(source, str(RUNNER), "exec"), namespace)
+    from onecdc import stop_signal
+
+    # Шаблон ставит настоящие обработчики и создаёт Replicator, который запоминает
+    # прежних владельцев сигналов. Восстанавливаем обе части даже при ошибке exec:
+    # иначе следующий тест зависит от порядка запуска pytest-randomly.
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    installed = stop_signal._handlers_installed
+    previous = stop_signal._previous_handlers.copy()
+    try:
+        with mock.patch("concurrent.futures.ThreadPoolExecutor") as pool, \
+                mock.patch("concurrent.futures.as_completed", return_value=[]):
+            exec(compile(source, str(RUNNER), "exec"), namespace)
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        stop_signal._handlers_installed = installed
+        stop_signal._previous_handlers.clear()
+        stop_signal._previous_handlers.update(previous)
     return namespace, pool
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_running_template_restores_signal_handlers(monkeypatch, fails):
+    from onecdc import stop_signal
+
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    installed = stop_signal._handlers_installed
+    previous = stop_signal._previous_handlers.copy()
+    source = '''
+import signal
+from onecdc import stop_signal
+stop_signal.install_signal_handlers()
+signal.signal(signal.SIGTERM, lambda *args: None)
+signal.signal(signal.SIGINT, lambda *args: None)
+'''
+    if fails:
+        with pytest.raises(RuntimeError, match='startup failed'):
+            _run(source + "raise RuntimeError('startup failed')", monkeypatch)
+    else:
+        _run(source, monkeypatch)
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+    assert stop_signal._handlers_installed is installed
+    assert stop_signal._previous_handlers == previous
 
 
 def test_the_template_as_shipped_runs_one_loop(db, monkeypatch):
